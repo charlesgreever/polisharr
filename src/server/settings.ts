@@ -19,7 +19,7 @@ export function parseStoredSettings(value: unknown): Settings {
   const raw = record(value);
   const valid: Record<string, unknown> = {};
   for (const field of BOOLEAN_FIELDS) if (typeof raw[field] === "boolean") valid[field] = raw[field];
-  for (const field of ["preferredLanguage", "reviewPath", "offPeakStart", "offPeakEnd"] as const) {
+  for (const field of ["preferredLanguage", "reviewPath", "offPeakStart", "offPeakEnd", "defaultEncodeNodeId"] as const) {
     if (typeof raw[field] === "string") valid[field] = raw[field];
   }
   if (raw.videoTarget === "hevc" || raw.videoTarget === "av1") valid.videoTarget = raw.videoTarget;
@@ -53,6 +53,7 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
   if ("reviewPath" in raw && typeof raw.reviewPath !== "string") return invalid("reviewPath");
   if ("videoTarget" in raw && raw.videoTarget !== "hevc" && raw.videoTarget !== "av1") return invalid("videoTarget");
   if ("writeMode" in raw && raw.writeMode !== "sidecar" && raw.writeMode !== "direct") return invalid("writeMode");
+  if ("defaultEncodeNodeId" in raw && typeof raw.defaultEncodeNodeId !== "string") return invalid("defaultEncodeNodeId");
   if ("concurrency" in raw && !integerInRange(raw.concurrency, 1, 16)) return invalid("concurrency");
   if ("inspectConcurrency" in raw && !integerInRange(raw.inspectConcurrency, 1, 16)) return invalid("inspectConcurrency");
   for (const field of ["offPeakStart", "offPeakEnd"] as const) {
@@ -84,6 +85,7 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
       queueNewImportsSince: !current.suggestionDefaults.queueNewImports && suggestionDefaults.queueNewImports
         ? Date.now()
         : current.queueNewImportsSince,
+      defaultEncodeNodeId: stringValue(raw.defaultEncodeNodeId, current.defaultEncodeNodeId),
     },
   };
 }

@@ -23,6 +23,7 @@ import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
 import { parseStoredSettings } from "./settings.ts";
 import type { SuggestionFilters } from "./suggestion-filters.ts";
 import { suggestionTrackComparison } from "./tracks.ts";
+import { parseHardwareInfo, parseNodeRole, type ClusterNode } from "./cluster.ts";
 
 export type Page<T> = { items: T[]; nextOffset: number | null; total: number; pendingCount?: number; finishedCount?: number };
 
@@ -185,6 +186,17 @@ export class Store {
         audio_mix TEXT,
         PRIMARY KEY (instance_id, arr_series_id)
       );
+      CREATE TABLE IF NOT EXISTS nodes (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        last_seen INTEGER NOT NULL,
+        hardware TEXT NOT NULL,
+        concurrency INTEGER NOT NULL DEFAULT 1,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        version TEXT NOT NULL DEFAULT '',
+        current_job_id TEXT
+      );
     `);
     this.ensureColumn("jobs", "position", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("jobs", "phase", "TEXT NOT NULL DEFAULT 'queued'");
@@ -199,6 +211,10 @@ export class Store {
     this.ensureColumn("jobs", "promote_error", "TEXT");
     this.ensureColumn("jobs", "queue_visible", "INTEGER NOT NULL DEFAULT 1");
     this.ensureColumn("jobs", "log", "TEXT");
+    this.ensureColumn("jobs", "assigned_node_id", "TEXT");
+    this.ensureColumn("jobs", "node_id", "TEXT");
+    this.ensureColumn("jobs", "lease_until", "INTEGER");
+    this.ensureColumn("jobs", "lease_token", "TEXT");
     this.ensureColumn("library_items", "arr_series_id", "INTEGER");
     this.ensureColumn("library_items", "arr_episode_file_id", "INTEGER");
     this.ensureColumn("library_items", "first_seen_at", "INTEGER NOT NULL DEFAULT 0");
@@ -823,14 +839,20 @@ export class Store {
     return { walking: row.walking === 1, pending: row.pending, inspected: row.inspected, failed: row.failed };
   }
 
-  insertJob(job: Omit<Job, "displayTitle" | "writeMode" | "promoteError"> & { plan: unknown; position?: number; writeMode?: "sidecar" | "direct"; promoteError?: string | null }): string {
+  insertJob(job: Omit<Job, "displayTitle" | "writeMode" | "promoteError" | "assignedNodeId" | "nodeId"> & {
+    plan: unknown;
+    position?: number;
+    writeMode?: "sidecar" | "direct";
+    promoteError?: string | null;
+    assignedNodeId?: string | null;
+  }): string {
     const position =
       job.position ??
       ((this.db.prepare("SELECT COALESCE(MAX(position), 0) + 1 AS n FROM jobs").get() as { n: number }).n);
     this.db
       .prepare(
-        `INSERT INTO jobs (id, item_id, suggestion_id, status, phase, progress, error, warning, run_now, position, plan, created_at, write_mode, promote_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO jobs (id, item_id, suggestion_id, status, phase, progress, error, warning, run_now, position, plan, created_at, write_mode, promote_error, assigned_node_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         job.id,
@@ -847,16 +869,27 @@ export class Store {
         job.createdAt,
         job.writeMode === "direct" ? "direct" : "sidecar",
         job.promoteError ?? null,
+        job.assignedNodeId ?? null,
       );
     return job.id;
   }
 
-  updateJob(id: string, patch: Partial<{ status: JobStatus; phase: JobPhase; progress: number; error: string | null; runNow: boolean; position: number; promoteError: string | null; writeMode: "sidecar" | "direct" }>): void {
+  updateJob(id: string, patch: Partial<{
+    status: JobStatus;
+    phase: JobPhase;
+    progress: number;
+    error: string | null;
+    runNow: boolean;
+    position: number;
+    promoteError: string | null;
+    writeMode: "sidecar" | "direct";
+    nodeId: string | null;
+  }>): void {
     const current = this.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!current) return;
     this.db
       .prepare(
-        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=? WHERE id=?",
+        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=? WHERE id=?",
       )
       .run(
         patch.status ?? current.status,
@@ -867,6 +900,7 @@ export class Store {
         patch.position ?? current.position,
         patch.writeMode ?? current.write_mode ?? "sidecar",
         patch.promoteError === undefined ? current.promote_error : patch.promoteError,
+        patch.nodeId === undefined ? current.node_id : patch.nodeId,
         id,
       );
   }
@@ -957,10 +991,91 @@ export class Store {
     return cancel();
   }
 
-  recoverInterruptedJobs(): number {
+  recoverInterruptedJobs(now = Date.now(), localNodeId = ""): number {
+    const expired = this.expireLeases(now);
+    const local = this.db.prepare(
+      `UPDATE jobs SET status = 'queued', phase = 'queued', progress = 0,
+         error = 'Recovered after Polisharr restarted.', node_id = NULL, lease_until = NULL, lease_token = NULL
+       WHERE status = 'running' AND (lease_token IS NULL OR node_id = ?)`,
+    ).run(localNodeId).changes;
+    return expired + local;
+  }
+
+  expireLeases(now: number): number {
     return this.db.prepare(
-      "UPDATE jobs SET status = 'queued', phase = 'queued', progress = 0, error = 'Recovered after Polisharr restarted.' WHERE status = 'running'",
-    ).run().changes;
+      `UPDATE jobs SET status = 'queued', phase = 'queued', progress = 0,
+         error = 'The encode node stopped. The job is waiting on that node again.',
+         node_id = NULL, lease_until = NULL, lease_token = NULL
+       WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?`,
+    ).run(now).changes;
+  }
+
+  claimQueuedJobs(nodeId: string, limit: number, now: number, leaseMs: number): Array<(Job & { plan: JobPlan; leaseToken: string })> {
+    const node = this.getNode(nodeId);
+    if (!node?.enabled) return [];
+    const slots = Math.max(0, node.concurrency - this.runningCountOnNode(nodeId));
+    limit = Math.min(limit, slots);
+    if (limit <= 0) return [];
+    const claim = this.db.transaction(() => {
+      const rows = this.db.prepare(
+        "SELECT id FROM jobs WHERE status = 'queued' AND assigned_node_id = ? ORDER BY position ASC LIMIT ?",
+      ).all(nodeId, limit) as Array<{ id: string }>;
+      const claimed: Array<(Job & { plan: JobPlan; leaseToken: string })> = [];
+      const take = this.db.prepare(
+        `UPDATE jobs SET status = 'running', phase = 'muxing', progress = 0.05, error = NULL,
+           node_id = ?, lease_until = ?, lease_token = ?
+         WHERE id = ? AND status = 'queued' AND assigned_node_id = ?`,
+      );
+      for (const row of rows) {
+        const token = randomUUID();
+        const result = take.run(nodeId, now + leaseMs, token, row.id, nodeId);
+        if (result.changes !== 1) continue;
+        const job = this.getJob(row.id);
+        if (job) claimed.push({ ...job, leaseToken: token });
+      }
+      return claimed;
+    });
+    return claim();
+  }
+
+  jobLease(id: string): { token: string | null; until: number | null; nodeId: string | null } | undefined {
+    const row = this.db.prepare("SELECT lease_token, lease_until, node_id FROM jobs WHERE id = ?").get(id) as
+      | { lease_token: string | null; lease_until: number | null; node_id: string | null }
+      | undefined;
+    if (!row) return undefined;
+    return { token: row.lease_token, until: row.lease_until, nodeId: row.node_id };
+  }
+
+  leaseMatches(id: string, token: string): boolean {
+    const lease = this.jobLease(id);
+    return Boolean(lease?.token && token && lease.token === token);
+  }
+
+  renewNodeLeases(nodeId: string, jobIds: string[], until: number): void {
+    if (jobIds.length === 0) return;
+    const stmt = this.db.prepare(
+      "UPDATE jobs SET lease_until = ? WHERE id = ? AND node_id = ? AND status = 'running'",
+    );
+    const tx = this.db.transaction(() => {
+      for (const id of jobIds) stmt.run(until, id, nodeId);
+    });
+    tx();
+  }
+
+  cancelledIdsForNode(nodeId: string): string[] {
+    return (this.db.prepare(
+      "SELECT id FROM jobs WHERE node_id = ? AND status = 'cancelled'",
+    ).all(nodeId) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  runningCountOnNode(nodeId: string): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM jobs WHERE node_id = ? AND status = 'running'",
+    ).get(nodeId) as { n: number }).n);
+  }
+
+  setJobAssignedNode(id: string, nodeId: string): void {
+    this.db.prepare("UPDATE jobs SET assigned_node_id = ? WHERE id = ?").run(nodeId, id);
   }
 
   removeFinishedJob(id: string): "removed" | "active" | "missing" {
@@ -1170,6 +1285,58 @@ export class Store {
     this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('webhook', ?)").run(hash);
   }
 
+  clusterTokenHash(): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'cluster'").get() as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setClusterTokenHash(hash: string): void {
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cluster', ?)").run(hash);
+  }
+
+  localNodeId(): string {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = 'local_node_id'").get() as { value: string } | undefined;
+    if (row?.value) return row.value;
+    const id = randomUUID();
+    this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('local_node_id', ?)").run(id);
+    return id;
+  }
+
+  upsertNode(node: ClusterNode): void {
+    this.db.prepare(
+      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         role = excluded.role,
+         last_seen = excluded.last_seen,
+         hardware = excluded.hardware,
+         concurrency = excluded.concurrency,
+         enabled = excluded.enabled,
+         version = excluded.version,
+         current_job_id = excluded.current_job_id`,
+    ).run(
+      node.id,
+      node.name,
+      node.role,
+      node.lastSeen,
+      JSON.stringify(node.hardware),
+      node.concurrency,
+      node.enabled ? 1 : 0,
+      node.version,
+      node.currentJobId,
+    );
+  }
+
+  getNode(id: string): ClusterNode | undefined {
+    const row = this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapNode(row) : undefined;
+  }
+
+  listNodes(): ClusterNode[] {
+    return (this.db.prepare("SELECT * FROM nodes ORDER BY name ASC").all() as Record<string, unknown>[]).map(mapNode);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -1233,6 +1400,8 @@ function mapJob(row: Record<string, unknown>): Job & { plan: JobPlan } {
     createdAt: Number(row.created_at),
     writeMode: row.write_mode === "direct" ? "direct" : "sidecar",
     promoteError: row.promote_error == null ? null : String(row.promote_error),
+    assignedNodeId: row.assigned_node_id == null || row.assigned_node_id === "" ? null : String(row.assigned_node_id),
+    nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
     plan: JSON.parse(String(row.plan)) as JobPlan,
   };
 }
@@ -1252,6 +1421,26 @@ function mapReview(row: Record<string, unknown>): ReviewItem {
     source: compare.source,
     sidecar: compare.sidecar,
     error: row.error == null ? null : String(row.error),
+  };
+}
+
+function mapNode(row: Record<string, unknown>): ClusterNode {
+  let hardwareRaw: unknown = {};
+  try {
+    hardwareRaw = JSON.parse(String(row.hardware ?? "{}"));
+  } catch {
+    hardwareRaw = {};
+  }
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    role: parseNodeRole(row.role),
+    lastSeen: Number(row.last_seen),
+    hardware: parseHardwareInfo(hardwareRaw),
+    concurrency: Number(row.concurrency) || 1,
+    enabled: Number(row.enabled) === 1,
+    version: String(row.version ?? ""),
+    currentJobId: row.current_job_id == null ? null : String(row.current_job_id),
   };
 }
 

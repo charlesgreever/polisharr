@@ -11,7 +11,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => req<{ ok: boolean; service?: string; version?: string }>("/api/health"),
   work: () => req<{ queued: number; queueActive: number; review: number; runningTitle: string | null }>("/api/work"),
-  status: () => req<{ authenticated: boolean; firstRun: FirstRun; version?: string }>("/api/auth/status"),
+  status: () => req<{ authenticated: boolean; firstRun: FirstRun; version?: string; role?: "standalone" | "master" | "worker" }>("/api/auth/status"),
+  worker: () => req<WorkerStatus>("/api/worker"),
   setup: (username: string, password: string) => req("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) }),
   login: (username: string, password: string) => req("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   logout: () => req("/api/auth/logout", { method: "POST" }),
@@ -19,6 +20,8 @@ export const api = {
   saveSettings: (body: Record<string, unknown>) => req("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
   mintWebhookToken: () => req<{ token: string; url: string }>("/api/settings/webhook-token", { method: "POST" }),
   mintWidgetKey: () => req<{ key: string }>("/api/settings/widget-key", { method: "POST" }),
+  mintClusterToken: () => req<{ token: string }>("/api/settings/cluster-token", { method: "POST" }),
+  nodes: () => req<NodesPayload>("/api/nodes"),
   changePassword: (username: string, password: string) =>
     req("/api/auth/password", { method: "POST", body: JSON.stringify({ username, password }) }),
   hardware: () => req<Hardware>("/api/hardware"),
@@ -34,6 +37,7 @@ export const api = {
   title: (id: string) => req<{
     item: LibraryRow;
     hardware: Hardware;
+    av1Available?: boolean;
     settings: { writeMode: string; videoTarget: string; preferredLanguage?: string };
     languageId?: { available?: boolean };
     pgsOcr?: { available?: boolean };
@@ -46,8 +50,8 @@ export const api = {
     });
     return (await res.json()) as { ok?: boolean; plan?: ExecutablePlan; errors?: Array<{ field: string; message: string }>; error?: string };
   },
-  queueCustom: (id: string, draft: Record<string, unknown>, runNow = false) =>
-    req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow }) }),
+  queueCustom: (id: string, draft: Record<string, unknown>, runNow = false, assignedNodeId?: string) =>
+    req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow, assignedNodeId }) }),
   searchPreferred: (id: string) =>
     req(`/api/library/items/${id}/search-preferred`, { method: "POST", body: JSON.stringify({ confirm: true }) }),
   detectLanguage: (id: string, trackIndex: number, startSec?: number) =>
@@ -90,9 +94,9 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value !== undefined) params.set(key, String(value));
     return req<LibraryPage<SuggestionRow>>(`/api/suggestions?${params}`);
   },
-  queueFiltered: (q: string, filters: SuggestionFilters) =>
+  queueFiltered: (q: string, filters: SuggestionFilters, assignedNodeId?: string) =>
     req<{ queued: number; skipped: number }>("/api/suggestions/queue-filtered", {
-      method: "POST", body: JSON.stringify({ q, filters }),
+      method: "POST", body: JSON.stringify({ q, filters, assignedNodeId }),
     }),
   dismiss: (id: string) => req(`/api/suggestions/${id}/dismiss`, { method: "POST" }),
   queue: (body: Record<string, unknown>) => req("/api/queue", { method: "POST", body: JSON.stringify(body) }),
@@ -130,8 +134,15 @@ export const api = {
       `/api/library/series/${encodeURIComponent(instanceId)}/${seriesId}/audio-mix`,
       { method: "POST", body: JSON.stringify({ audioMix }) },
     ),
-  optimizeShow: (instanceId: string, seriesId: number) =>
-    req(`/api/library/series/${encodeURIComponent(instanceId)}/${seriesId}/optimize`, { method: "POST" }),
+  optimizeShow: (instanceId: string, seriesId: number, assignedNodeId?: string) =>
+    req(`/api/library/series/${encodeURIComponent(instanceId)}/${seriesId}/optimize`, {
+      method: "POST",
+      body: JSON.stringify({ assignedNodeId }),
+    }),
+  saveNode: (id: string, body: { concurrency?: number; enabled?: boolean }) =>
+    req<{ ok: true; node: ClusterNode }>(`/api/nodes/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  assignJob: (id: string, nodeId: string) =>
+    req(`/api/jobs/${encodeURIComponent(id)}/assign`, { method: "POST", body: JSON.stringify({ nodeId }) }),
   exclusions: () => req<{ exclusions: Exclusion[] }>("/api/exclusions"),
   addExclusion: (kind: Exclusion["kind"], value: string) =>
     req<{ exclusions: Exclusion[] }>("/api/exclusions", { method: "POST", body: JSON.stringify({ kind, value }) }),
@@ -164,6 +175,39 @@ export type SeriesSummary = {
 export type FirstRun = { hasAdmin: boolean; languageConfirmed: boolean; hasReviewPath: boolean; hasArr: boolean; complete: boolean };
 export type HardwareBackend = "cuda" | "vaapi" | "none";
 export type Hardware = { backend: HardwareBackend; cuda: boolean; vaapi: boolean; av1: boolean; reason: string | null; vaapiDevice?: string | null };
+export type ClusterNode = {
+  id: string;
+  name: string;
+  role: "standalone" | "master" | "worker";
+  roleLabel: string;
+  thisNode: boolean;
+  lastSeen: number;
+  hardware: Hardware;
+  hardwareLabel: string;
+  concurrency: number;
+  enabled: boolean;
+  version: string;
+  currentJobId: string | null;
+  online: boolean;
+};
+export type WorkerStatus = {
+  role: "worker";
+  name: string;
+  nodeId: string;
+  masterUrl: string | null;
+  version: string;
+  hardware: Hardware;
+  hardwareLabel: string;
+  status: "misconfigured" | "connecting" | "connected" | "unreachable" | "rejected";
+  detail: string;
+  currentJobId: string | null;
+};
+export type NodesPayload = {
+  thisNodeId: string;
+  defaultEncodeNodeId: string;
+  av1Available?: boolean;
+  nodes: ClusterNode[];
+};
 export type SettingsPayload = {
   preferredLanguage: string;
   languageConfirmed: boolean;
@@ -191,6 +235,9 @@ export type SettingsPayload = {
   profileAutoAssign: boolean;
   hasWebhookToken?: boolean;
   hasWidgetKey?: boolean;
+  hasClusterToken?: boolean;
+  defaultEncodeNodeId?: string;
+  thisNodeId?: string;
   username?: string;
   instances: Array<{ id: string; kind: "radarr" | "sonarr" | "plex" | "jellyfin"; name: string; url: string; enabled: boolean; hasApiKey?: boolean; hasToken?: boolean }>;
   firstRun: FirstRun;
@@ -264,7 +311,10 @@ export type JobRow = {
   warning: string | null;
   promoteError: string | null;
   writeMode?: "sidecar" | "direct";
-  plan?: { video?: { kind?: "copy" | "size" | "quality" }; reasons?: string[]; writeMode?: "sidecar" | "direct" };
+  plan?: { video?: { kind?: "copy" | "size" | "quality"; codec?: "hevc" | "av1" }; reasons?: string[]; writeMode?: "sidecar" | "direct" };
+  assignedNodeId?: string | null;
+  assignedNodeName?: string | null;
+  waitingForNode?: boolean;
 };
 export type ReviewRow = {
   id: string;

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api, type LibraryRow, type SeriesSummary } from "../api";
+import { api, type ClusterNode, type LibraryRow, type SeriesSummary } from "../api";
+import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
 import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { AudioMixSelect } from "../components/AudioMixSelect";
@@ -17,6 +18,9 @@ export function SeriesPage() {
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const [houseVideoTarget, setHouseVideoTarget] = useState<"hevc" | "av1">("hevc");
   const [av1Available, setAv1Available] = useState(false);
+  const [nodes, setNodes] = useState<ClusterNode[]>([]);
+  const [defaultNodeId, setDefaultNodeId] = useState("");
+  const [encodeNodeId, setEncodeNodeId] = useState("");
   const loadingRef = useRef(false);
   const pendingResetRef = useRef(false);
   const [searchParams] = useSearchParams();
@@ -51,7 +55,12 @@ export function SeriesPage() {
     void api.settings().then((settings) => {
       setHouseVideoTarget(settings.videoTarget === "av1" ? "av1" : "hevc");
     }).catch(() => undefined);
-    void api.hardware().then((hardware) => setAv1Available(Boolean(hardware.av1))).catch(() => undefined);
+    void api.nodes().then((payload) => {
+      setAv1Available(Boolean(payload.av1Available));
+      setNodes(payload.nodes);
+      setDefaultNodeId(payload.defaultEncodeNodeId);
+      setEncodeNodeId((current) => current || payload.defaultEncodeNodeId);
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -99,6 +108,10 @@ export function SeriesPage() {
             refreshVersion={refreshVersion}
             houseVideoTarget={houseVideoTarget}
             av1Available={av1Available}
+            nodes={nodes}
+            defaultNodeId={defaultNodeId}
+            encodeNodeId={encodeNodeId}
+            onEncodeNodeChange={setEncodeNodeId}
             onMsg={setMsg}
             onPatch={(patch) => {
               setSummaries((current) => current.map((row) => (
@@ -126,6 +139,10 @@ function SeriesGroup({
   refreshVersion,
   houseVideoTarget,
   av1Available,
+  nodes,
+  defaultNodeId,
+  encodeNodeId,
+  onEncodeNodeChange,
   onMsg,
   onPatch,
 }: {
@@ -134,6 +151,10 @@ function SeriesGroup({
   refreshVersion: number;
   houseVideoTarget: "hevc" | "av1";
   av1Available: boolean;
+  nodes: ClusterNode[];
+  defaultNodeId: string;
+  encodeNodeId: string;
+  onEncodeNodeChange: (nodeId: string) => void;
   onMsg: (msg: string) => void;
   onPatch: (patch: Partial<SeriesSummary>) => void;
 }) {
@@ -297,11 +318,18 @@ function SeriesGroup({
             }).catch((cause: Error) => onMsg(cause.message));
           }}
         />
+        <EncodeNodeSelect
+          nodes={nodes}
+          value={encodeNodeId}
+          defaultNodeId={defaultNodeId}
+          need={summary.videoTarget === "av1" || (!summary.videoTarget && houseVideoTarget === "av1") ? "av1" : "hevc"}
+          onChange={onEncodeNodeChange}
+        />
         <button
           className="btn whitespace-nowrap"
           type="button"
           onClick={() => {
-            void api.optimizeShow(summary.instanceId, summary.arrSeriesId).then((result) => {
+            void api.optimizeShow(summary.instanceId, summary.arrSeriesId, encodeNodeId || undefined).then((result) => {
               const counts = result as { queued: number; skipped: number };
               onMsg(`Queued ${counts.queued}. Skipped ${counts.skipped}.`);
               if (open) void refreshLoaded();

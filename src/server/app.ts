@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import argon2 from "argon2";
@@ -45,6 +46,26 @@ import { updateSettings } from "./settings.ts";
 import { LibrarySync, pathsOverlap } from "./library-sync.ts";
 import { parseArrWebhook, presentedWebhookToken, webhookTokenMatches } from "./arr-webhook.ts";
 import { parseSuggestionFilters } from "./suggestion-filters.ts";
+import {
+  CLUSTER_NOT_MASTER,
+  CLUSTER_UNKNOWN_NODE,
+  CLUSTER_WRONG_TOKEN,
+  LEASE_MS,
+  WORKER_MANAGE_ERROR,
+  clusterHasAv1,
+  clusterHasHardware,
+  nodeHardwareLabel,
+  nodeIsOnline,
+  nodeRoleLabel,
+  parseClusterClaim,
+  parseClusterHeartbeat,
+  parseClusterHello,
+  parseRemoteComplete,
+  parseRemoteFail,
+  parseRemoteProgress,
+  type ClusterNode,
+} from "./cluster.ts";
+import { WorkerLoop } from "./worker-loop.ts";
 
 const execFileAsync = promisify(execFile);
 const SESSION_TTL = 14 * 24 * 60 * 60 * 1000;
@@ -101,9 +122,10 @@ export function createApp(opts: AppOptions) {
     listIso: opts.listIso,
     recomputeSuggestion: afterInspect,
   });
+  const optimizer = opts.optimizer ?? ffmpegOptimizer();
   const jobs = new JobService({
     store,
-    optimizer: opts.optimizer ?? ffmpegOptimizer(),
+    optimizer,
     clock: opts.clock,
     hardware,
     tools: { ffmpeg: opts.env.ffmpeg, ffprobe: opts.env.ffprobe, mkvmerge: opts.env.mkvmerge },
@@ -111,8 +133,10 @@ export function createApp(opts: AppOptions) {
     fetch: httpFetch,
     reinspectChangedItem: inspections.reinspectChangedItem,
     inspectOne: inspections.inspectOne,
+    localNodeId: () => store.localNodeId(),
   });
-  jobs.start();
+  const isWorker = opts.env.role === "worker";
+  if (!isWorker) jobs.start();
   const sync = new LibrarySync({
     store,
     fetch: httpFetch,
@@ -121,8 +145,31 @@ export function createApp(opts: AppOptions) {
     intervalMs: opts.syncIntervalMs,
   });
   const library = createLibraryReadModel(store);
+  const workerLoop = new WorkerLoop({
+    nodeId: store.localNodeId(),
+    name: opts.env.nodeName || localHostname(),
+    version,
+    masterUrl: opts.env.masterUrl,
+    token: opts.env.clusterTokenEnv,
+    hardware,
+    concurrency: () => Math.max(1, store.getSettings().concurrency),
+    fetch: httpFetch,
+    optimizer,
+    tools: { ffmpeg: opts.env.ffmpeg, ffprobe: opts.env.ffprobe, mkvmerge: opts.env.mkvmerge },
+  });
 
   const app = new Hono();
+
+  if (isWorker) {
+    app.use("/api/*", async (c, next) => {
+      const path = c.req.path;
+      if (path === "/api/health" || path === "/api/ready" || path === "/api/auth/status" || path === "/api/worker") {
+        await next();
+        return;
+      }
+      return c.json({ error: WORKER_MANAGE_ERROR }, 409);
+    });
+  }
 
   const cookieOpts = { httpOnly: true, path: "/", sameSite: "Lax" as const };
 
@@ -184,6 +231,7 @@ export function createApp(opts: AppOptions) {
       authenticated: Boolean(user),
       firstRun: firstRunState(),
       version,
+      role: opts.env.role,
     });
   });
 
@@ -254,6 +302,8 @@ export function createApp(opts: AppOptions) {
   app.use("/api/work", authed);
   app.use("/api/search", authed);
   app.use("/api/hardware", authed);
+  app.use("/api/nodes", authed);
+  app.use("/api/nodes/*", authed);
   app.use("/api/auth/password", authed);
   app.use("/api/queue", authed);
 
@@ -268,16 +318,157 @@ export function createApp(opts: AppOptions) {
 
   app.get("/api/hardware", async (c) => c.json(await hardware()));
 
+  app.get("/api/nodes", async (c) => {
+    const thisNode = await refreshLocalNode();
+    return c.json(nodesPayload(thisNode.id));
+  });
+
+  app.put("/api/nodes/:id", async (c) => {
+    const node = store.getNode(c.req.param("id"));
+    if (!node) return c.json({ error: "That encode node is not registered." }, 404);
+    const body = await readJson(c);
+    const raw = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+    let concurrency = node.concurrency;
+    if (raw.concurrency !== undefined) {
+      if (typeof raw.concurrency !== "number" || !Number.isSafeInteger(raw.concurrency) || raw.concurrency < 1 || raw.concurrency > 16) {
+        return c.json({ error: "Concurrent jobs on a node must be a whole number from 1 to 16." }, 400);
+      }
+      concurrency = raw.concurrency;
+    }
+    if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") {
+      return c.json({ error: "Drain must be true or false." }, 400);
+    }
+    const enabled = raw.enabled === undefined ? node.enabled : raw.enabled;
+    store.upsertNode({ ...node, concurrency, enabled });
+    if (node.id === store.localNodeId() && concurrency !== store.getSettings().concurrency) {
+      store.saveSettings({ ...store.getSettings(), concurrency });
+    }
+    return c.json({ ok: true, node: publicNode(store.getNode(node.id)!, store.localNodeId()) });
+  });
+
+  app.get("/api/worker", async (c) => {
+    if (!isWorker) return c.json({ error: "This container is not a worker." }, 404);
+    const hardwareInfo = await hardware();
+    const join = workerLoop.snapshot();
+    return c.json({
+      role: "worker" as const,
+      name: opts.env.nodeName || localHostname(),
+      nodeId: store.localNodeId(),
+      masterUrl: opts.env.masterUrl,
+      version,
+      hardware: hardwareInfo,
+      hardwareLabel: nodeHardwareLabel(hardwareInfo),
+      status: join.status,
+      detail: join.detail,
+      currentJobId: join.currentJobId,
+    });
+  });
+
+  app.post("/api/cluster/hello", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseClusterHello(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const now = clusterNow();
+    const existing = store.getNode(parsed.hello.nodeId);
+    const av1Before = clusterAv1();
+    store.upsertNode({
+      id: parsed.hello.nodeId,
+      name: parsed.hello.name,
+      role: "worker",
+      lastSeen: now,
+      hardware: parsed.hello.hardware,
+      concurrency: existing?.concurrency ?? parsed.hello.concurrency,
+      enabled: existing?.enabled ?? true,
+      version: parsed.hello.version,
+      currentJobId: null,
+    });
+    if (clusterAv1() !== av1Before) recomputeAllSuggestions();
+    const node = store.getNode(parsed.hello.nodeId);
+    return c.json({ ok: true, nodeId: parsed.hello.nodeId, concurrency: node?.concurrency ?? parsed.hello.concurrency });
+  });
+
+  app.post("/api/cluster/heartbeat", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseClusterHeartbeat(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const existing = store.getNode(parsed.beat.nodeId);
+    if (!existing) return c.json({ error: CLUSTER_UNKNOWN_NODE }, 404);
+    const now = opts.clock?.() ?? Date.now();
+    store.upsertNode({
+      ...existing,
+      lastSeen: now,
+      hardware: parsed.beat.hardware,
+      currentJobId: parsed.beat.currentJobId,
+      version: existing.version,
+    });
+    store.renewNodeLeases(parsed.beat.nodeId, parsed.beat.runningJobIds, now + LEASE_MS);
+    const node = store.getNode(parsed.beat.nodeId);
+    return c.json({
+      ok: true,
+      cancelJobIds: store.cancelledIdsForNode(parsed.beat.nodeId),
+      concurrency: node?.concurrency ?? existing.concurrency,
+    });
+  });
+
+  app.post("/api/cluster/claim", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseClusterClaim(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    if (!store.getNode(parsed.nodeId)) return c.json({ error: CLUSTER_UNKNOWN_NODE }, 404);
+    const claimed = jobs.claimForNode(parsed.nodeId, parsed.freeSlots);
+    return c.json({ jobs: claimed });
+  });
+
+  app.post("/api/cluster/jobs/:id/progress", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseRemoteProgress(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = jobs.progressRemote(c.req.param("id"), parsed.leaseToken, parsed.phase, parsed.progress, parsed.log);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/jobs/:id/complete", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseRemoteComplete(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = await jobs.completeRemote(c.req.param("id"), parsed.leaseToken, parsed.sidecarPath, parsed.output);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/jobs/:id/fail", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseRemoteFail(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = jobs.failRemote(c.req.param("id"), parsed.leaseToken, parsed.error);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
   app.get("/api/settings", (c) => {
     const settings = store.getSettings();
+    const thisNodeId = store.localNodeId();
     return c.json({
       ...settings,
+      defaultEncodeNodeId: resolvedDefaultEncodeNodeId(thisNodeId),
       hasWebhookToken: Boolean(store.webhookTokenHash()),
       hasWidgetKey: Boolean(store.widgetKeyHash()),
+      hasClusterToken: Boolean(store.clusterTokenHash()),
       username: store.onlyUser()?.username ?? "",
       instances: publicInstances(),
       firstRun: firstRunState(),
       profilePreviews: profilePreviews(settings.sizeCaps),
+      thisNodeId,
     });
   });
 
@@ -310,6 +501,9 @@ export function createApp(opts: AppOptions) {
     const guardedPaths = [...knownRoots, ...store.listItems().map((item) => dirnameOf(item.path))];
     if (next.reviewPath && unsafeReviewPath(next.reviewPath, guardedPaths)) {
       return c.json({ error: "The review folder cannot sit inside an Arr library folder." }, 400);
+    }
+    if (next.defaultEncodeNodeId && !store.getNode(next.defaultEncodeNodeId) && next.defaultEncodeNodeId !== store.localNodeId()) {
+      return c.json({ error: "That encode node is not registered." }, 400);
     }
     const suggestionsChanged = suggestionSettingsChanged(current, next);
     store.saveSettings(next);
@@ -404,7 +598,6 @@ export function createApp(opts: AppOptions) {
     if (!item || !report) return null;
     const settings = store.getSettings();
     const excluded = isExcluded(item);
-    const hw = lastHardware;
     const suggestion = buildSuggestion({
       item,
       report,
@@ -412,8 +605,8 @@ export function createApp(opts: AppOptions) {
       sizeExempt: item.sizeExempt,
       excluded,
       videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
-      av1Available: hw.av1,
-      hardwareAvailable: hw.backend !== "none",
+      av1Available: clusterAv1(),
+      hardwareAvailable: clusterHardware(),
       audioMix: store.audioMixForItem(item),
     });
     return store.saveSuggestion(itemId, suggestion) ?? null;
@@ -428,6 +621,22 @@ export function createApp(opts: AppOptions) {
     lastHardware = h;
     recomputeAllSuggestions();
   });
+
+  function clusterNow(): number {
+    return opts.clock?.() ?? Date.now();
+  }
+
+  function clusterAv1(): boolean {
+    const nodes = store.listNodes();
+    if (nodes.length === 0) return lastHardware.av1;
+    return clusterHasAv1(nodes, clusterNow());
+  }
+
+  function clusterHardware(): boolean {
+    const nodes = store.listNodes();
+    if (nodes.length === 0) return lastHardware.backend !== "none";
+    return clusterHasHardware(nodes, clusterNow());
+  }
 
   function isExcluded(item: ReturnType<Store["getItem"]>): boolean {
     if (!item) return false;
@@ -482,8 +691,8 @@ export function createApp(opts: AppOptions) {
       excluded: false,
       forceTranscode: true,
       videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
-      av1Available: lastHardware.av1,
-      hardwareAvailable: lastHardware.backend !== "none",
+      av1Available: clusterAv1(),
+      hardwareAvailable: clusterHardware(),
     });
     if (!suggestion) return c.json({ error: "Force did not create work for this title." }, 400);
     const saved = store.saveSuggestion(item.id, suggestion);
@@ -509,8 +718,8 @@ export function createApp(opts: AppOptions) {
       excluded: false,
       forceStereo: true,
       videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
-      av1Available: lastHardware.av1,
-      hardwareAvailable: lastHardware.backend !== "none",
+      av1Available: clusterAv1(),
+      hardwareAvailable: clusterHardware(),
     });
     if (!suggestion?.actions.includes("add_stereo")) {
       return c.json({ error: "Add stereo did not change the plan." }, 400);
@@ -580,6 +789,7 @@ export function createApp(opts: AppOptions) {
     return c.json({
       item: library.item(item.id, true),
       hardware: lastHardware,
+      av1Available: clusterAv1(),
       settings: {
         writeMode: store.getSettings().writeMode,
         videoTarget: store.getSettings().videoTarget,
@@ -602,6 +812,7 @@ export function createApp(opts: AppOptions) {
       settings: store.getSettings(),
       hardware: lastHardware,
       draft: body.draft ?? {},
+      av1Available: clusterAv1(),
     });
     if (!result.ok) return c.json({ ok: false, errors: result.errors }, 400);
     return c.json({ ok: true, plan: result.plan });
@@ -614,16 +825,20 @@ export function createApp(opts: AppOptions) {
     if (!item) return c.json({ error: "That title is not in the library." }, 404);
     const report = store.getInspection(item.id);
     if (!report) return c.json({ error: "This file has not been inspected yet, or the path is unreadable." }, 400);
-    const body = await c.req.json<{ draft?: CustomPlanDraft; runNow?: boolean }>();
+    const body = await c.req.json<{ draft?: CustomPlanDraft; runNow?: boolean; assignedNodeId?: string }>();
     const result = validateCustomPlan({
       item,
       report,
       settings: store.getSettings(),
       hardware: lastHardware,
       draft: body.draft ?? {},
+      av1Available: clusterAv1(),
     });
     if (!result.ok) return c.json({ ok: false, errors: result.errors }, 400);
-    const queued = jobs.enqueueCustom(item.id, result.plan, Boolean(body.runNow));
+    const queued = jobs.enqueueCustom(item.id, result.plan, {
+      runNow: Boolean(body.runNow),
+      assignedNodeId: typeof body.assignedNodeId === "string" ? body.assignedNodeId : undefined,
+    });
     if ("error" in queued) return c.json({ error: queued.error }, queued.status as 400 | 404 | 409);
     return c.json({ ok: true, id: queued.id, plan: result.plan });
   });
@@ -821,6 +1036,8 @@ export function createApp(opts: AppOptions) {
     const episodes = store.listItems("episode").filter(
       (episode) => episode.instanceId === c.req.param("instanceId") && episode.arrSeriesId === seriesId,
     );
+    const body = await c.req.json<{ assignedNodeId?: string }>().catch(() => ({} as { assignedNodeId?: string }));
+    const assignedNodeId = typeof body.assignedNodeId === "string" ? body.assignedNodeId : undefined;
     let queued = 0;
     let skipped = 0;
     for (const ep of episodes) {
@@ -829,7 +1046,7 @@ export function createApp(opts: AppOptions) {
         skipped += 1;
         continue;
       }
-      const result = jobs.enqueue(ep.id, suggestion);
+      const result = jobs.enqueue(ep.id, suggestion, { assignedNodeId });
       if ("id" in result) queued += 1;
       else skipped += 1;
     }
@@ -860,7 +1077,9 @@ export function createApp(opts: AppOptions) {
         skipped += 1;
         continue;
       }
-      const result = jobs.enqueue(suggestion.itemId, suggestion);
+      const result = jobs.enqueue(suggestion.itemId, suggestion, {
+        assignedNodeId: typeof raw.assignedNodeId === "string" ? raw.assignedNodeId : undefined,
+      });
       if ("id" in result) queued += 1;
       else skipped += 1;
     }
@@ -900,17 +1119,32 @@ export function createApp(opts: AppOptions) {
   app.post("/api/queue", async (c) => {
     const blocked = gateOptimize();
     if (blocked) return c.json({ error: blocked }, 403);
-    const body = await c.req.json<{ suggestionId?: string; itemId?: string; runNow?: boolean }>();
+    const body = await c.req.json<{ suggestionId?: string; itemId?: string; runNow?: boolean; assignedNodeId?: string }>();
     const suggestion = body.suggestionId ? store.getSuggestion(body.suggestionId) : body.itemId ? store.openSuggestionForItem(body.itemId) : undefined;
     if (!suggestion || suggestion.dismissed) return c.json({ error: "There is no open suggestion to queue." }, 400);
-    const result = jobs.enqueue(suggestion.itemId, suggestion, Boolean(body.runNow));
+    const result = jobs.enqueue(suggestion.itemId, suggestion, {
+      runNow: Boolean(body.runNow),
+      assignedNodeId: typeof body.assignedNodeId === "string" ? body.assignedNodeId : undefined,
+    });
     if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
     return c.json({ ok: true, id: result.id });
   });
 
   app.get("/api/jobs", (c) => {
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
-    return c.json(store.jobPage(offset, limit));
+    const page = store.jobPage(offset, limit);
+    return c.json({ ...page, items: page.items.map((job) => publicJob(job)) });
+  });
+
+  app.post("/api/jobs/:id/assign", async (c) => {
+    const body = await readJson(c);
+    const nodeId = body && typeof body === "object" && !Array.isArray(body) && typeof (body as Record<string, unknown>).nodeId === "string"
+      ? (body as Record<string, unknown>).nodeId as string
+      : "";
+    if (!nodeId) return c.json({ error: "Pick an encode node." }, 400);
+    const result = jobs.reassign(c.req.param("id"), nodeId);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
+    return c.json({ ok: true });
   });
 
   app.post("/api/jobs/cancel-all", (c) => {
@@ -1046,7 +1280,7 @@ export function createApp(opts: AppOptions) {
       review: work.review,
       errors: work.errors,
       recent: store.historyPage(0, 8).items,
-      status: work.running ? `Working · ${work.running.displayTitle}` : work.queued ? `${work.queued} waiting` : "Idle",
+      status: homeStatus(work),
     });
   });
 
@@ -1076,6 +1310,12 @@ export function createApp(opts: AppOptions) {
     const raw = randomBytes(24).toString("hex");
     store.setWebhookTokenHash(createHash("sha256").update(raw).digest("hex"));
     return c.json({ token: raw, url: "/api/hooks/arr" });
+  });
+
+  app.post("/api/settings/cluster-token", (c) => {
+    const raw = randomBytes(24).toString("hex");
+    store.setClusterTokenHash(createHash("sha256").update(raw).digest("hex"));
+    return c.json({ token: raw });
   });
 
   app.post("/api/hooks/arr", async (c) => {
@@ -1117,7 +1357,7 @@ export function createApp(opts: AppOptions) {
     }
     const work = store.workSummary();
     return c.json({
-      status: work.running ? `Working · ${work.running.displayTitle}` : work.queued ? `${work.queued} waiting` : "Idle",
+      status: homeStatus(work),
       queued: work.queued,
       review: work.review,
       suggestions: work.suggestions,
@@ -1166,9 +1406,120 @@ export function createApp(opts: AppOptions) {
     });
   }
 
-  sync.start();
-  void inspections.inspectPending();
-  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret };
+  if (!isWorker) {
+    sync.start();
+    void inspections.inspectPending();
+  }
+  function resolvedDefaultEncodeNodeId(thisNodeId: string): string {
+    const stored = store.getSettings().defaultEncodeNodeId;
+    if (stored && (store.getNode(stored) || stored === thisNodeId)) return stored;
+    return thisNodeId;
+  }
+
+  function publicNode(node: ClusterNode, thisNodeId: string) {
+    const now = opts.clock?.() ?? Date.now();
+    return {
+      ...node,
+      thisNode: node.id === thisNodeId,
+      hardwareLabel: nodeHardwareLabel(node.hardware),
+      roleLabel: nodeRoleLabel(node.role, node.id === thisNodeId),
+      online: nodeIsOnline(node.lastSeen, now),
+    };
+  }
+
+  function nodesPayload(thisNodeId: string) {
+    const nodes = store.listNodes().map((node) => publicNode(node, thisNodeId));
+    return {
+      thisNodeId,
+      defaultEncodeNodeId: resolvedDefaultEncodeNodeId(thisNodeId),
+      av1Available: clusterAv1(),
+      nodes,
+    };
+  }
+
+  async function refreshLocalNode(): Promise<ClusterNode> {
+    const running = store.listJobs().find((job) => job.status === "running" && job.nodeId === store.localNodeId());
+    const id = store.localNodeId();
+    const existing = store.getNode(id);
+    const node: ClusterNode = {
+      id,
+      name: opts.env.nodeName || localHostname(),
+      role: opts.env.role,
+      lastSeen: clusterNow(),
+      hardware: await hardware(),
+      concurrency: existing?.concurrency ?? Math.max(1, store.getSettings().concurrency),
+      enabled: existing?.enabled ?? true,
+      version,
+      currentJobId: running?.id ?? null,
+    };
+    store.upsertNode(node);
+    return node;
+  }
+
+  if (isWorker) workerLoop.start();
+  else void refreshLocalNode();
+
+  function publicJob<T extends { assignedNodeId?: string | null; status: string }>(job: T) {
+    const node = job.assignedNodeId ? store.getNode(job.assignedNodeId) : undefined;
+    const now = opts.clock?.() ?? Date.now();
+    const waiting = (job.status === "queued" || job.status === "held") && node && !nodeIsOnline(node.lastSeen, now);
+    return {
+      ...job,
+      assignedNodeName: node?.name ?? null,
+      waitingForNode: Boolean(waiting),
+    };
+  }
+
+  function homeStatus(work: ReturnType<Store["workSummary"]>): string {
+    if (work.running) {
+      const node = work.running.assignedNodeId ? store.getNode(work.running.assignedNodeId) : undefined;
+      if (node && store.listNodes().length > 1) return `Encoding ${work.running.displayTitle} on ${node.name}`;
+      return `Working · ${work.running.displayTitle}`;
+    }
+    if (work.queued) {
+      const waiting = store.listJobs().find((job) => {
+        if (job.status !== "queued" && job.status !== "held") return false;
+        const node = job.assignedNodeId ? store.getNode(job.assignedNodeId) : undefined;
+        return Boolean(node && !nodeIsOnline(node.lastSeen, opts.clock?.() ?? Date.now()));
+      });
+      if (waiting?.assignedNodeId) {
+        const node = store.getNode(waiting.assignedNodeId);
+        if (node) return `Waiting for ${node.name}`;
+      }
+      return `${work.queued} waiting`;
+    }
+    return "Idle";
+  }
+
+  function clusterAdmission(c: Context) {
+    if (opts.env.role !== "master") return c.json({ error: CLUSTER_NOT_MASTER }, 404);
+    const presented = presentedWebhookToken({
+      apiKey: c.req.header("x-api-key") ?? undefined,
+      authorization: c.req.header("authorization") ?? undefined,
+    });
+    const envKey = opts.env.clusterTokenEnv;
+    const accepted = webhookTokenMatches(presented, store.clusterTokenHash()) || Boolean(envKey && presented === envKey);
+    if (!accepted) return c.json({ error: CLUSTER_WRONG_TOKEN }, 401);
+    return null;
+  }
+
+  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop };
+}
+
+async function readJson(c: Context): Promise<unknown> {
+  try {
+    return await c.req.json();
+  } catch {
+    return {};
+  }
+}
+
+function localHostname(): string {
+  try {
+    return hostname().trim() || "polisharr";
+  } catch {
+    return "polisharr";
+  }
 }
 
 function unsafeReviewPath(reviewPath: string, libraryRoots: string[]): boolean {

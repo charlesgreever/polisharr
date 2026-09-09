@@ -1,6 +1,6 @@
 # Copy this file to compose.yaml. Set the media bind to the same path
 # Radarr and Sonarr report. NVIDIA is the default. For Intel, see the
-# commented block at the bottom.
+# commented block at the bottom. A second GPU box is compose.worker.yaml.
 #
 #   docker compose up -d
 #

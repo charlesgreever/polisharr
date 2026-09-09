@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, stat, unlink } from "node:fs/promises";
 import type { Store } from "./store.ts";
-import type { HardwareInfo, InspectionReport, Job, ReviewItem, Settings, Suggestion } from "./types.ts";
+import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewItem, Settings, Suggestion } from "./types.ts";
 import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
 import { CancelledError, isExecutablePlan, planFromSuggestion, resolvePlan } from "./optimize.ts";
@@ -10,8 +10,15 @@ import { classifyInterruptedKeep, KEEP_INTERRUPTED, SIDECAR_GONE } from "./revie
 import { clearStagedBackup, promote, promotedPath, recoverStagedReplace, type PromoteInput, type PromoteResult } from "./promote.ts";
 import { assignProfile, PROFILE_NAMES } from "./arr-profiles.ts";
 import { effectiveWriteMode, profileAssignmentEligible } from "./types.ts";
-import { isoInspectionLooksStale } from "./inspect.ts";
+import { isoInspectionLooksStale, normalizeInspection } from "./inspect.ts";
 import { refreshAndRenameArr } from "./arr.ts";
+import { encodeNeedFromPlan, LEASE_MS, nodeCanEncode, type RemoteJobDocument } from "./cluster.ts";
+
+export type EnqueueOptions = {
+  runNow?: boolean;
+  writeMode?: import("./types.ts").WriteMode;
+  assignedNodeId?: string;
+};
 
 export type JobServiceOptions = {
   store: Store;
@@ -25,6 +32,7 @@ export type JobServiceOptions = {
   reinspectChangedItem: (itemId: string, oldPath: string) => Promise<{ ok: true } | { ok: false; warning: string }>;
   inspectOne?: (itemId: string) => Promise<{ ok: true; report: InspectionReport } | { ok: false; warning: string }>;
   promote?: (input: PromoteInput) => Promise<PromoteResult>;
+  localNodeId?: () => string;
 };
 
 export const SHARED_FILE_BUSY = "This file is already in the queue or Review. Another episode uses the same file.";
@@ -39,10 +47,22 @@ export class JobService {
   constructor(private readonly opts: JobServiceOptions) {}
 
   start(): void {
-    this.opts.store.recoverInterruptedJobs();
+    this.opts.store.recoverInterruptedJobs(this.now(), this.localNodeId());
     void this.recoverInterruptedKeeps();
     void this.tick();
     this.timer = setInterval(() => void this.tick(), 500);
+  }
+
+  private localNodeId(): string {
+    return this.opts.localNodeId?.() ?? this.opts.store.localNodeId();
+  }
+
+  assignedNodeId(override?: string): string {
+    const local = this.localNodeId();
+    if (override) return override;
+    const stored = this.opts.store.getSettings().defaultEncodeNodeId;
+    if (stored && (this.opts.store.getNode(stored) || stored === local)) return stored;
+    return local;
   }
 
   stop(): void {
@@ -52,7 +72,7 @@ export class JobService {
   enqueue(
     itemId: string,
     suggestion: Suggestion,
-    runNowOrOpts: boolean | { runNow?: boolean; writeMode?: import("./types.ts").WriteMode } = false,
+    runNowOrOpts: boolean | EnqueueOptions = false,
   ): { id: string } | { error: string; status: number } {
     const item = this.opts.store.getItem(itemId);
     if (!item) return { error: "That title is not in the library.", status: 404 };
@@ -69,6 +89,9 @@ export class JobService {
     const locked = options.writeMode !== undefined;
     const writeMode = options.writeMode ?? this.opts.store.getSettings().writeMode;
     const plan = { ...planFromSuggestion(suggestion, writeMode), writeModeLocked: locked };
+    const assignedNodeId = this.assignedNodeId(options.assignedNodeId);
+    const incapable = this.rejectIncapableNode(assignedNodeId, plan);
+    if (incapable) return incapable;
     this.opts.store.insertJob({
       id,
       itemId,
@@ -82,17 +105,26 @@ export class JobService {
       createdAt: this.now(),
       writeMode,
       plan,
+      assignedNodeId,
     });
     void this.tick();
     return { id };
   }
 
-  enqueueCustom(itemId: string, plan: import("./types.ts").ExecutablePlan, runNow = false): { id: string } | { error: string; status: number } {
+  enqueueCustom(
+    itemId: string,
+    plan: import("./types.ts").ExecutablePlan,
+    runNowOrOpts: boolean | EnqueueOptions = false,
+  ): { id: string } | { error: string; status: number } {
     const item = this.opts.store.getItem(itemId);
     if (!item) return { error: "That title is not in the library.", status: 404 };
     const busy = this.enqueueLock(item);
     if (busy) return busy;
     this.dismissOpenSuggestionsForItem(item);
+    const options = typeof runNowOrOpts === "boolean" ? { runNow: runNowOrOpts } : runNowOrOpts;
+    const assignedNodeId = this.assignedNodeId(options.assignedNodeId);
+    const incapable = this.rejectIncapableNode(assignedNodeId, plan);
+    if (incapable) return incapable;
     const id = randomUUID();
     this.opts.store.insertJob({
       id,
@@ -103,14 +135,37 @@ export class JobService {
       progress: 0,
       error: null,
       warning: plan.warning,
-      runNow,
+      runNow: Boolean(options.runNow),
       createdAt: this.now(),
       writeMode: plan.writeMode,
       promoteError: null,
       plan,
+      assignedNodeId,
     });
     void this.tick();
     return { id };
+  }
+
+  reassign(id: string, nodeId: string): { ok: true } | { error: string; status: number } {
+    const job = this.opts.store.getJob(id);
+    if (!job) return { error: "That job does not exist.", status: 404 };
+    if (job.status === "running" || job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+      return { error: "Move a waiting job, not one that is already encoding.", status: 409 };
+    }
+    const node = this.opts.store.getNode(nodeId);
+    if (!node) return { error: "That encode node is not registered.", status: 400 };
+    const plan = isExecutablePlan(job.plan) ? resolvePlan(job.plan, job.writeMode) : planFromSuggestion(job.plan, job.writeMode);
+    const incapable = this.rejectIncapableNode(nodeId, plan);
+    if (incapable) return incapable;
+    this.opts.store.setJobAssignedNode(id, nodeId);
+    return { ok: true };
+  }
+
+  private rejectIncapableNode(nodeId: string, plan: { video?: { kind?: string; codec?: string } }): { error: string; status: number } | undefined {
+    const node = this.opts.store.getNode(nodeId);
+    if (!node) return undefined;
+    if (nodeCanEncode(node, encodeNeedFromPlan(plan))) return undefined;
+    return { error: "That encode node cannot run this plan.", status: 400 };
   }
 
   private enqueueLock(item: NonNullable<ReturnType<Store["getItem"]>>): { error: string; status: number } | undefined {
@@ -167,15 +222,170 @@ export class JobService {
     return { removed: this.opts.store.clearFinishedJobs() };
   }
 
+  claimForNode(nodeId: string, freeSlots: number): RemoteJobDocument[] {
+    this.applySchedule(this.opts.store.getSettings());
+    this.opts.store.expireLeases(this.now());
+    const claimed = this.opts.store.claimQueuedJobs(nodeId, freeSlots, this.now(), LEASE_MS);
+    const settings = this.opts.store.getSettings();
+    const docs: RemoteJobDocument[] = [];
+    for (const job of claimed) {
+      const doc = this.toRemoteDocument(job, job.leaseToken, settings);
+      if (doc) docs.push(doc);
+      else {
+        this.opts.store.updateJob(job.id, {
+          status: "failed",
+          error: "This title has no completed inspection.",
+          nodeId: null,
+        });
+      }
+    }
+    return docs;
+  }
+
+  progressRemote(
+    id: string,
+    leaseToken: string,
+    phase: string,
+    progress: number,
+    log: string,
+  ): { ok: true } | { cancelled: true } | { error: string; status: number } {
+    const job = this.opts.store.getJob(id);
+    if (!job) return { error: "That job does not exist.", status: 404 };
+    if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
+    if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
+    const nextPhase = jobPhaseOr(phase, job.phase);
+    this.opts.store.updateJob(id, { phase: nextPhase, progress });
+    this.opts.store.renewNodeLeases(job.nodeId ?? "", [id], this.now() + LEASE_MS);
+    if (log) this.opts.store.appendJobLog(id, log);
+    return { ok: true };
+  }
+
+  async completeRemote(
+    id: string,
+    leaseToken: string,
+    sidecarPath: string,
+    outputRaw: Record<string, unknown>,
+  ): Promise<{ ok: true } | { cancelled: true } | { error: string; status: number }> {
+    const job = this.opts.store.getJob(id);
+    if (!job) return { error: "That job does not exist.", status: 404 };
+    if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
+    if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
+    const item = this.opts.store.getItem(job.itemId);
+    const report = this.opts.store.getInspection(job.itemId);
+    if (!item || !report) return { error: "This title has no completed inspection.", status: 409 };
+    const settings = this.opts.store.getSettings();
+    const output = normalizeInspection(outputRaw, sidecarPath, Number(outputRaw.sizeBytes ?? 0));
+    const resolved = resolvePlan(job.plan, job.writeMode);
+    const writeMode = effectiveWriteMode(resolved, settings.writeMode);
+    const plan = { ...resolved, writeMode };
+    try {
+      if (plan.writeMode === "direct") {
+        const outcome = await this.promoteOutput(item, sidecarPath, report.sizeBytes, output.sizeBytes, plan);
+        if (!outcome.replaced) {
+          this.opts.store.updateJob(id, { status: "failed", error: outcome.error ?? "Direct write failed.", nodeId: null });
+          this.opts.store.addHistory(item.id, "failed", 0, this.now());
+          return { ok: true };
+        }
+        const synced = await this.syncLibraryFile(item, outcome.destPath, output.sizeBytes);
+        const warning = appendWarning(outcome.warning, synced.warning);
+        this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, promoteError: warning, nodeId: job.nodeId });
+        this.opts.store.addHistory(item.id, "kept", outcome.savedBytes, this.now());
+        return { ok: true };
+      }
+      const targetBytes = plan.video.kind === "size" ? plan.video.targetBytes : null;
+      const flagged = missedOutputTarget({
+        outputBytes: output.sizeBytes,
+        sourceBytes: report.sizeBytes,
+        outputSizePerHourGb: output.sizePerHourGb,
+        categoryCap: settings.sizeCaps[plan.category],
+        targetBytes,
+      });
+      this.opts.store.insertReview({
+        id: randomUUID(),
+        jobId: id,
+        itemId: item.id,
+        displayTitle: displayTitle(item),
+        status: "pending",
+        flagged,
+        flagReason: flagged ? "The sidecar missed the size target or is larger than the original." : null,
+        sourcePath: item.path,
+        sidecarPath,
+        source: {
+          codec: report.videoCodec,
+          quality: item.quality,
+          sizeBytes: report.sizeBytes,
+          sizePerHourGb: report.sizePerHourGb,
+          durationSec: report.durationSec,
+          tracks: `${report.audio.length} audio / ${report.subtitles.length} subtitles`,
+        },
+        sidecar: {
+          codec: output.videoCodec,
+          quality: item.quality,
+          sizeBytes: output.sizeBytes,
+          sizePerHourGb: output.sizePerHourGb,
+          durationSec: output.durationSec,
+          tracks: `${output.audio.length} audio / ${output.subtitles.length} subtitles`,
+        },
+        error: null,
+      });
+      this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
+      if (flagged) this.opts.store.addHistory(item.id, "flagged", 0, this.now());
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The job failed.";
+      this.opts.store.updateJob(id, { status: "failed", error: message, nodeId: job.nodeId });
+      this.opts.store.addHistory(item.id, "failed", 0, this.now());
+      return { ok: true };
+    }
+  }
+
+  failRemote(id: string, leaseToken: string, error: string): { ok: true } | { cancelled: true } | { error: string; status: number } {
+    const job = this.opts.store.getJob(id);
+    if (!job) return { error: "That job does not exist.", status: 404 };
+    if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
+    if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
+    this.opts.store.updateJob(id, { status: "failed", error, nodeId: job.nodeId });
+    this.opts.store.addHistory(job.itemId, "failed", 0, this.now());
+    return { ok: true };
+  }
+
+  private toRemoteDocument(
+    job: NonNullable<ReturnType<Store["getJob"]>> & { leaseToken: string },
+    leaseToken: string,
+    settings: Settings,
+  ): RemoteJobDocument | null {
+    const item = this.opts.store.getItem(job.itemId);
+    const report = this.opts.store.getInspection(job.itemId);
+    if (!item || !report) return null;
+    const resolved = resolvePlan(job.plan, job.writeMode);
+    return {
+      id: job.id,
+      leaseToken,
+      sourcePath: item.path,
+      reviewDir: settings.reviewPath,
+      plan: { ...resolved, writeMode: effectiveWriteMode(resolved, settings.writeMode) },
+      report,
+      target: this.opts.store.videoTargetForItem(item) ?? settings.videoTarget,
+      conservative: settings.conservativeMode,
+      writeMode: job.writeMode,
+      nodeId: job.nodeId ?? this.localNodeId(),
+    };
+  }
+
   private async tick(): Promise<void> {
     try {
       const settings = this.opts.store.getSettings();
       this.applySchedule(settings);
-      const capacity = Math.max(1, settings.concurrency) - this.running.size;
+      this.opts.store.expireLeases(this.now());
+      const localId = this.localNodeId();
+      const localNode = this.opts.store.getNode(localId);
+      if (localNode && !localNode.enabled) return;
+      const slots = Math.max(1, localNode?.concurrency ?? settings.concurrency);
+      const capacity = slots - this.running.size;
       if (capacity <= 0) return;
       const next = this.opts.store
         .listJobs()
-        .filter((j) => j.status === "queued")
+        .filter((j) => j.status === "queued" && assignedToNode(j.assignedNodeId, localId))
         .slice(0, capacity);
       for (const job of next) void this.run(job.id, settings);
     } catch (error) {
@@ -211,7 +421,7 @@ export class JobService {
       return;
     }
     this.running.add(id);
-    this.opts.store.updateJob(id, { status: "running", phase: "muxing", progress: 0.05 });
+    this.opts.store.updateJob(id, { status: "running", phase: "muxing", progress: 0.05, nodeId: this.localNodeId() });
     try {
       const hardware = await this.opts.hardware();
       const resolved = resolvePlan(job.plan, job.writeMode);
@@ -236,6 +446,7 @@ export class JobService {
         onLog: (text) => this.opts.store.appendJobLog(id, text),
         isCancelled: () => this.cancelled.has(id),
         jobId: id,
+        nodeId: this.localNodeId(),
       });
       if (this.cancelled.has(id)) {
         await safeUnlink(result.sidecarPath);
@@ -601,6 +812,20 @@ export class JobService {
   private now(): number {
     return this.opts.clock?.() ?? Date.now();
   }
+}
+
+export function assignedToNode(assignedNodeId: string | null | undefined, localNodeId: string): boolean {
+  return !assignedNodeId || assignedNodeId === localNodeId;
+}
+
+function jobPhaseOr(value: string, fallback: JobPhase): JobPhase {
+  if (
+    value === "queued" || value === "held" || value === "paused" || value === "copying"
+    || value === "muxing" || value === "creating_stereo" || value === "transcoding" || value === "finishing" || value === "idle"
+  ) {
+    return value;
+  }
+  return fallback;
 }
 
 export function insideWindow(start: string, end: string, now: Date): boolean {

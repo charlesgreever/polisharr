@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, formatSize, type ExecutablePlan, type InspectionReport, type LibraryRow } from "../api";
+import { api, formatSize, type ClusterNode, type ExecutablePlan, type InspectionReport, type LibraryRow } from "../api";
 import { Help, PageHead } from "../components/Shell";
+import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
 import { EncodeTargetSelect } from "../components/EncodeTargetSelect";
 import { TitleFacts } from "../components/TitleFacts";
 import { Pill } from "../components/ui";
@@ -27,6 +28,9 @@ export function TitlePage() {
   const { id = "" } = useParams();
   const [item, setItem] = useState<LibraryRow | null>(null);
   const [av1, setAv1] = useState(false);
+  const [nodes, setNodes] = useState<ClusterNode[]>([]);
+  const [defaultNodeId, setDefaultNodeId] = useState("");
+  const [encodeNodeId, setEncodeNodeId] = useState("");
   const [writeDefault, setWriteDefault] = useState("sidecar");
   const [houseVideoTarget, setHouseVideoTarget] = useState<"hevc" | "av1">("hevc");
   const [preferredLanguage, setPreferredLanguage] = useState("eng");
@@ -77,7 +81,7 @@ export function TitlePage() {
   useEffect(() => {
     void api.title(id).then((r) => {
       setItem(r.item);
-      setAv1(r.hardware.av1);
+      setAv1(Boolean(r.av1Available ?? r.hardware.av1));
       setWriteDefault(r.settings.writeMode);
       setHouseVideoTarget(r.settings.videoTarget === "av1" ? "av1" : "hevc");
       if (r.settings.preferredLanguage) setPreferredLanguage(r.settings.preferredLanguage);
@@ -90,6 +94,11 @@ export function TitlePage() {
       setAudio(nextAudio);
       setSubs(nextSubs);
     }).catch((e: Error) => setMsg(e.message));
+    void api.nodes().then((payload) => {
+      setNodes(payload.nodes);
+      setDefaultNodeId(payload.defaultEncodeNodeId);
+      setEncodeNodeId((current) => current || payload.defaultEncodeNodeId);
+    }).catch(() => undefined);
   }, [id]);
 
   const draft = useMemo(() => ({
@@ -278,11 +287,23 @@ export function TitlePage() {
           <ul className="space-y-1 text-sm leading-5 text-muted">
             {item.suggestion.reasons.map((reason) => <li key={reason}>{reason}</li>)}
           </ul>
+          <div className="mt-3 max-w-xs">
+            <EncodeNodeSelect
+              nodes={nodes}
+              value={encodeNodeId}
+              defaultNodeId={defaultNodeId}
+              need={!item.suggestion.actions.includes("transcode")
+                ? "copy"
+                : (item.videoTarget ?? houseVideoTarget) === "av1" && av1 ? "av1" : "hevc"}
+              disabled={locked}
+              onChange={setEncodeNodeId}
+            />
+          </div>
           <button
             className="btn mt-1"
             type="button"
             disabled={locked}
-            onClick={() => void api.queue({ itemId: item.id }).then(() => setMsg("Bulk plan queued.")).catch((e: Error) => setMsg(e.message))}
+            onClick={() => void api.queue({ itemId: item.id, assignedNodeId: encodeNodeId || undefined }).then(() => setMsg("Bulk plan queued.")).catch((e: Error) => setMsg(e.message))}
           >
             Queue suggested work
           </button>
@@ -540,11 +561,21 @@ export function TitlePage() {
         {errors.map((error) => (
           <p key={error} className="rounded-lg border border-bad/30 bg-bad/10 px-3 py-2 text-sm text-bad">{error}</p>
         ))}
+        <div className="mb-3 max-w-xs">
+          <EncodeNodeSelect
+            nodes={nodes}
+            value={encodeNodeId}
+            defaultNodeId={defaultNodeId}
+            need={videoMode === "copy" ? "copy" : codec === "av1" ? "av1" : "hevc"}
+            disabled={locked}
+            onChange={setEncodeNodeId}
+          />
+        </div>
         <button
           className="btn"
           type="button"
           disabled={!queueReady}
-          onClick={() => void api.queueCustom(id, draft).then(() => setMsg("Custom plan queued.")).catch((e: Error) => setMsg(e.message))}
+          onClick={() => void api.queueCustom(id, draft, false, encodeNodeId || undefined).then(() => setMsg("Custom plan queued.")).catch((e: Error) => setMsg(e.message))}
         >
           Queue this plan
         </button>

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { parseNodeRole, type NodeRole } from "./cluster.ts";
 
 export type Env = {
   configDir: string;
@@ -18,6 +19,10 @@ export type Env = {
   dbPath: string;
   widgetKeyEnv: string | null;
   trustProxy: boolean;
+  role: NodeRole;
+  nodeName: string | null;
+  masterUrl: string | null;
+  clusterTokenEnv: string | null;
 };
 
 export function readAppVersion(cwd = process.cwd()): string {
@@ -49,6 +54,10 @@ export function loadEnv(processEnv: NodeJS.ProcessEnv = process.env): Env {
     dbPath: resolveDbPath(configDir),
     widgetKeyEnv: processEnv.POLISHARR_WIDGET_KEY ?? processEnv.OPTIMIZARR_WIDGET_KEY ?? null,
     trustProxy: processEnv.POLISHARR_TRUST_PROXY === "1" || processEnv.OPTIMIZARR_TRUST_PROXY === "1",
+    role: parseNodeRole(processEnv.POLISHARR_ROLE),
+    nodeName: processEnv.POLISHARR_NODE_NAME?.trim() ? processEnv.POLISHARR_NODE_NAME.trim() : null,
+    masterUrl: processEnv.POLISHARR_MASTER_URL?.trim() ? processEnv.POLISHARR_MASTER_URL.trim() : null,
+    clusterTokenEnv: processEnv.POLISHARR_CLUSTER_TOKEN?.trim() ? processEnv.POLISHARR_CLUSTER_TOKEN.trim() : null,
   };
 }
 

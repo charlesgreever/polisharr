@@ -89,6 +89,7 @@ Empty `catch` is forbidden unless the next line documents why ignore is safe (`u
 | Player token | same | `hasToken: true` only |
 | Homepage widget key | SHA-256 | never (shown once on mint) |
 | Arr webhook token | SHA-256 | `hasWebhookToken: true` only (raw token shown once on mint) |
+| Cluster token | SHA-256 | `hasClusterToken: true` only (raw token shown once on mint) |
 | Session | random id, httpOnly cookie | cookie only |
 
 Do not log API keys, tokens, or password hashes. Do not put them in query strings. Do not commit `.env` or `config/*.db`. Radarr/Sonarr Connect may send the webhook token as `?apikey=` when the form only has a URL (issue #41); prefer `X-Api-Key` or HTTP Basic so the token stays out of access logs.
@@ -138,7 +139,7 @@ If you cannot name it, the type is wrong.
 
 **Source:** Twelve-Factor III, VI, XI.
 
-Runtime knobs come from env (`CONFIG_DIR`, `PORT`, `PUID`, `TZ`, `FFMPEG`, `POLISHARR_BACKENDS`). Do not hard-code ubuntuserver paths in server code. The container is one process; the job runner lives in that process and must survive restart without a half-written library file. Interrupted Keep cards recover on startup the same way interrupted jobs return to the queue.
+Runtime knobs come from env (`CONFIG_DIR`, `PORT`, `PUID`, `TZ`, `FFMPEG`, `POLISHARR_BACKENDS`, `POLISHARR_ROLE`, `POLISHARR_NODE_NAME`, `POLISHARR_MASTER_URL`, `POLISHARR_CLUSTER_TOKEN`). Do not hard-code ubuntuserver or homeserver paths in server code. Each container is one process. In standalone mode the job runner lives in that process. A designated master may lease a job to the encode node assigned at enqueue (`plans/multi-node.md`); that is a named break of “the runner is always this process.” Interrupted local jobs and expired leases return to the queue on the same assigned node. A live remote lease survives master restart. Interrupted Keep cards recover on the master the same way as before.
 
 Logs are sentences with the agent named (RULE-02). No leftover `console.log` of full request bodies.
 

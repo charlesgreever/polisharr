@@ -1,0 +1,37 @@
+# Second GPU box. The master owns the UI, library, Review, and Keep.
+# This container only encodes. Use a separate /config; do not share the
+# master's database.
+#
+# 1. On the master, Settings → Nodes → generate a cluster token. Copy it once.
+# 2. Set POLISHARR_MASTER_URL to that host (LAN IP or hostname) and port 7373.
+# 3. Bind the same media path Radarr and Sonarr report, and the same review folder.
+# 4. docker compose -f compose.worker.yaml up -d
+#
+# NVIDIA is selected below. For Intel, comment runtime and NVIDIA_* and
+# uncomment devices / group_add as in compose.example.yaml.
+
+name: polisharr-worker
+services:
+  polisharr:
+    container_name: polisharr-worker
+    image: ghcr.io/charlesgreever/polisharr:latest
+    # build: .
+    ports:
+      - "7374:7373"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: UTC
+      CONFIG_DIR: /config
+      POLISHARR_ROLE: worker
+      POLISHARR_NODE_NAME: gpu-box
+      POLISHARR_MASTER_URL: http://192.168.1.10:7373
+      POLISHARR_CLUSTER_TOKEN: replace-with-the-token-from-the-master
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      WHISPER_LID: /usr/local/bin/whisper-lid
+      PGS_OCR: /usr/local/bin/pgs-ocr
+    volumes:
+      - ./config-worker:/config
+      - /path/to/media:/path/to/media
+    runtime: nvidia

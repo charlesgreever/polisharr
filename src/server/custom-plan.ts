@@ -24,11 +24,13 @@ export type CustomPlanInput = {
   settings: Settings;
   hardware: HardwareInfo;
   draft: CustomPlanDraft;
+  av1Available?: boolean;
 };
 
 export function validateCustomPlan(input: CustomPlanInput): CustomPlanResult {
   const errors: PlanFieldError[] = [];
   const { item, report, settings, hardware, draft } = input;
+  const av1Available = input.av1Available ?? hardware.av1;
   const listed = report.listingState === "complete";
   const iso = isIsoPath(item.path);
   const videoDraft = draft.video ?? { mode: "copy" as const };
@@ -44,7 +46,7 @@ export function validateCustomPlan(input: CustomPlanInput): CustomPlanResult {
 
   const audioOps = listed ? buildAudioOps(report, draft.audio ?? [], errors) : report.audio.map(keepAudioOp);
   const subOps = listed ? buildSubtitleOps(report, draft.subtitles ?? [], errors) : report.subtitles.map(keepSubtitleOp);
-  const video = buildVideo(item, report, hardware, videoDraft, errors);
+  const video = buildVideo(item, report, hardware, videoDraft, errors, av1Available);
 
   const remux = iso && (draft.remuxToMkv !== false);
   const trackWork = audioOps.some((op) => op.op !== "keep") || subOps.some((op) => op.op !== "keep");
@@ -100,6 +102,7 @@ function buildVideo(
   hardware: HardwareInfo,
   draft: NonNullable<CustomPlanDraft["video"]>,
   errors: PlanFieldError[],
+  av1Available = hardware.av1,
 ): VideoIntent {
   if (draft.mode === "copy") {
     if (draft.downscale1080p) {
@@ -108,8 +111,8 @@ function buildVideo(
     return { kind: "copy" };
   }
   const codec: VideoTarget = draft.codec ?? "hevc";
-  if (codec === "av1" && !hardware.av1) {
-    errors.push({ field: "video.codec", message: "AV1 encode is hidden because this hardware cannot encode AV1." });
+  if (codec === "av1" && !av1Available) {
+    errors.push({ field: "video.codec", message: "AV1 encode is hidden because no encode node can encode AV1." });
   }
   const downscale = Boolean(draft.downscale1080p);
   if (downscale && !is4k(item, report)) {

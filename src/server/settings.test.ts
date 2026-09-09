@@ -21,6 +21,15 @@ describe("settings boundary", () => {
     });
   });
 
+  it("keeps an empty default encode node as this machine", () => {
+    expect(parseStoredSettings({}).defaultEncodeNodeId).toBe("");
+    const updated = updateSettings(DEFAULT_SETTINGS, { defaultEncodeNodeId: "node-5090" });
+    expect(updated.ok).toBe(true);
+    if (!updated.ok) return;
+    expect(updated.settings.defaultEncodeNodeId).toBe("node-5090");
+    expect(updateSettings(DEFAULT_SETTINGS, { defaultEncodeNodeId: 12 }).ok).toBe(false);
+  });
+
   it("stamps queueNewImportsSince when the import auto-queue setting is turned on", () => {
     const before = Date.now();
     const enabled = updateSettings(DEFAULT_SETTINGS, {

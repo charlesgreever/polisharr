@@ -36,7 +36,12 @@ export type OptimizeRequest = {
   onLog?: (text: string) => void;
   isCancelled?: () => boolean;
   jobId?: string;
+  nodeId?: string;
 };
+
+export function optimizerWorkDir(reviewDir: string, nodeId?: string, jobId?: string): string {
+  return nodeId ? join(reviewDir, ".work", nodeId, jobId ?? "job") : join(reviewDir, ".work");
+}
 
 export type OptimizeResult = {
   sidecarPath: string;
@@ -136,7 +141,7 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
     await mkdir(req.reviewDir, { recursive: true });
     const plannedBytes = plan.estimatedOutputBytes ?? req.report.sizeBytes;
     await assertReviewCapacity(req.reviewDir, Math.max(req.report.sizeBytes, plannedBytes) + 256 * 1024 ** 2, options.capacity);
-    const workDir = join(req.reviewDir, ".work");
+    const workDir = optimizerWorkDir(req.reviewDir, req.nodeId, req.jobId);
     await mkdir(workDir, { recursive: true });
     const suffix = req.jobId ? `-${req.jobId}` : "";
     const sidecarPath = join(req.reviewDir, `${basename(req.sourcePath).replace(/\.[^.]+$/, "")}${suffix}.mkv`);

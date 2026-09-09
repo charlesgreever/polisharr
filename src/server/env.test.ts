@@ -23,6 +23,26 @@ describe("env", () => {
     expect(readAppVersion()).toMatch(/^\d+\.\d+\.\d+/);
   });
 
+  it("defaults cluster role to standalone and reads node env", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-env-"));
+    expect(loadEnv({ CONFIG_DIR: dir }).role).toBe("standalone");
+    expect(loadEnv({ CONFIG_DIR: dir }).nodeName).toBeNull();
+    expect(loadEnv({ CONFIG_DIR: dir }).masterUrl).toBeNull();
+    const worker = loadEnv({
+      CONFIG_DIR: dir,
+      POLISHARR_ROLE: "worker",
+      POLISHARR_NODE_NAME: "5090",
+      POLISHARR_MASTER_URL: "http://192.168.1.10:7373",
+      POLISHARR_CLUSTER_TOKEN: "secret-token",
+    });
+    expect(worker.role).toBe("worker");
+    expect(worker.nodeName).toBe("5090");
+    expect(worker.masterUrl).toBe("http://192.168.1.10:7373");
+    expect(worker.clusterTokenEnv).toBe("secret-token");
+    expect(loadEnv({ CONFIG_DIR: dir, POLISHARR_ROLE: "master" }).role).toBe("master");
+    expect(loadEnv({ CONFIG_DIR: dir, POLISHARR_ROLE: "replica" }).role).toBe("standalone");
+  });
+
   it("reads an optional language-identification command", () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-env-"));
     expect(loadEnv({ CONFIG_DIR: dir }).whisperLid).toBeNull();

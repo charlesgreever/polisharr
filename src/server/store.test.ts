@@ -65,6 +65,41 @@ describe("store schema migration", () => {
     expect(again.getSettings().writeMode).toBe("direct");
   });
 
+  it("persists this machine as a cluster node across reopen", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-nodes-"));
+    const path = join(dir, "polisharr.db");
+    const store = new Store(path);
+    stores.push(store);
+    const id = store.localNodeId();
+    store.upsertNode({
+      id,
+      name: "homeserver",
+      role: "standalone",
+      lastSeen: 1,
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+      concurrency: 2,
+      enabled: true,
+      version: "0.0.0",
+      currentJobId: null,
+    });
+    const reopened = new Store(path);
+    stores.push(reopened);
+    expect(reopened.localNodeId()).toBe(id);
+    expect(reopened.listNodes()).toEqual([
+      {
+        id,
+        name: "homeserver",
+        role: "standalone",
+        lastSeen: 1,
+        hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+        concurrency: 2,
+        enabled: true,
+        version: "0.0.0",
+        currentJobId: null,
+      },
+    ]);
+  });
+
   it("fills missing automatic suggestion defaults from older settings", () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-suggestion-settings-"));
     const path = join(dir, "polisharr.db");
@@ -234,6 +269,56 @@ describe("store schema migration", () => {
     expect(store.getJob("job-running")).toMatchObject({
       status: "queued", phase: "queued", progress: 0, error: "Recovered after Polisharr restarted.",
     });
+  });
+
+  it("lets only one claim win and returns an expired lease to the same node", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-lease-"));
+    const store = new Store(join(dir, "polisharr.db"));
+    stores.push(store);
+    store.upsertNode({
+      id: "worker-1",
+      name: "5090",
+      role: "worker",
+      lastSeen: 1_000,
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+      concurrency: 1,
+      enabled: true,
+      version: "1",
+      currentJobId: null,
+    });
+    store.insertJob({
+      id: "job-1",
+      itemId: "item-1",
+      suggestionId: null,
+      status: "queued",
+      phase: "queued",
+      progress: 0,
+      error: null,
+      warning: null,
+      runNow: false,
+      createdAt: 1,
+      writeMode: "sidecar",
+      assignedNodeId: "worker-1",
+      plan: { origin: "bulk", video: { kind: "copy" }, audio: [], subtitles: [], container: "mkv", writeMode: "sidecar", warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" },
+    });
+    const first = store.claimQueuedJobs("worker-1", 1, 1_000, 30_000);
+    const second = store.claimQueuedJobs("worker-1", 1, 1_000, 30_000);
+    const other = store.claimQueuedJobs("worker-2", 1, 1_000, 30_000);
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(0);
+    expect(other).toHaveLength(0);
+    expect(store.getJob("job-1")).toMatchObject({ status: "running", assignedNodeId: "worker-1", nodeId: "worker-1" });
+    expect(store.expireLeases(1_000 + 30_000 + 1)).toBe(1);
+    expect(store.getJob("job-1")).toMatchObject({
+      status: "queued",
+      assignedNodeId: "worker-1",
+      nodeId: null,
+    });
+    expect(store.claimQueuedJobs("worker-1", 1, 50_000, 30_000)).toHaveLength(1);
+    expect(store.recoverInterruptedJobs(50_000, "homeserver")).toBe(0);
+    expect(store.getJob("job-1")?.status).toBe("running");
+    store.updateJob("job-1", { status: "cancelled" });
+    expect(store.cancelledIdsForNode("worker-1")).toEqual(["job-1"]);
   });
 
   it("records first seen and file-changed times so auto-queue can ignore old library leftovers", async () => {

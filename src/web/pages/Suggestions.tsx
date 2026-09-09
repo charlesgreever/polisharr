@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api, type SuggestionFilters, type SuggestionRow } from "../api";
+import { api, type ClusterNode, type SuggestionFilters, type SuggestionRow } from "../api";
+import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
+import { encodeNeedFromAfterCodec } from "../encode-node";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
 import { FilterChip, MediaSnapshot } from "../components/ui";
@@ -13,6 +15,9 @@ export function SuggestionsPage() {
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState("");
   const [filters, setFilters] = useState<SuggestionFilters>({});
+  const [nodes, setNodes] = useState<ClusterNode[]>([]);
+  const [defaultNodeId, setDefaultNodeId] = useState("");
+  const [encodeNodeId, setEncodeNodeId] = useState("");
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -22,6 +27,13 @@ export function SuggestionsPage() {
     }, 280);
     return () => clearTimeout(t);
   }, [q, setParams]);
+  useEffect(() => {
+    void api.nodes().then((payload) => {
+      setNodes(payload.nodes);
+      setDefaultNodeId(payload.defaultEncodeNodeId);
+      setEncodeNodeId((current) => current || payload.defaultEncodeNodeId);
+    }).catch(() => undefined);
+  }, []);
   const list = usePagedList({
     queryKey: JSON.stringify([debouncedQ, filters]),
     loadPage: (offset, limit) => api.suggestions(debouncedQ, filters, offset, limit),
@@ -53,7 +65,14 @@ export function SuggestionsPage() {
             </select>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button className="btn-secondary" type="button" onClick={() => void api.queueFiltered(debouncedQ, filters).then((result) => {
+            <EncodeNodeSelect
+              nodes={nodes}
+              value={encodeNodeId}
+              defaultNodeId={defaultNodeId}
+              need={items.some((row) => encodeNeedFromAfterCodec(row.after.codec) === "av1") ? "av1" : "hevc"}
+              onChange={setEncodeNodeId}
+            />
+            <button className="btn-secondary" type="button" onClick={() => void api.queueFiltered(debouncedQ, filters, encodeNodeId || undefined).then((result) => {
               setMsg(`Queued ${result.queued}; skipped ${result.skipped}.`);
               return list.reload();
             }).catch((error: Error) => setMsg(error.message))}>Queue filtered</button>
@@ -63,7 +82,7 @@ export function SuggestionsPage() {
               disabled={!Object.values(selected).some(Boolean)}
               onClick={() => {
                 const ids = items.filter((i) => selected[i.id]).map((i) => i.id);
-                void Promise.all(ids.map((id) => api.queue({ suggestionId: id }))).then(() => {
+                void Promise.all(ids.map((id) => api.queue({ suggestionId: id, assignedNodeId: encodeNodeId || undefined }))).then(() => {
                   setMsg(`Queued ${ids.length}.`);
                   setSelected({});
                   return list.reload();
@@ -134,7 +153,7 @@ export function SuggestionsPage() {
                   <td><MediaSnapshot snapshot={item.after} savingsBytes={item.estimatedSavingsBytes} emphasize /></td>
                   <td>
                     <div className="flex min-w-24 flex-col gap-1.5">
-                      <button className="btn" type="button" onClick={() => void api.queue({ suggestionId: item.id }).then(() => setMsg("Added to queue."))}>
+                      <button className="btn" type="button" onClick={() => void api.queue({ suggestionId: item.id, assignedNodeId: encodeNodeId || undefined }).then(() => setMsg("Added to queue."))}>
                         Queue
                       </button>
                       <button className="btn-secondary danger" type="button" onClick={() => void api.dismiss(item.id).then(list.reload)}>

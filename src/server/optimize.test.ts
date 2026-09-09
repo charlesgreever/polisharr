@@ -25,6 +25,7 @@ import {
   scaleProgress,
   assertReviewCapacity,
   shouldSkipSizeEncode,
+  optimizerWorkDir,
 } from "./optimize.ts";
 import { videoBitrateForTarget } from "./size-budget.ts";
 import type { OptimizeRequest } from "./optimize.ts";
@@ -46,6 +47,13 @@ const suggestion: Suggestion = {
   keepSubs: [3, 4],
   stripSubs: [],
 };
+
+describe("optimizer work directory", () => {
+  it("namespaces temp files per node and job so two GPUs do not share .work", () => {
+    expect(optimizerWorkDir("/review", "worker-1", "job-9")).toBe(join("/review", ".work", "worker-1", "job-9"));
+    expect(optimizerWorkDir("/review")).toBe(join("/review", ".work"));
+  });
+});
 
 const source =
   "/mnt/nas/Kids Movies/Big Hero 6 (2014)/Big Hero 6 (2014) {imdb-tt2245084}[Bluray-2160p][HDR][10bit][HEVC][TrueHD Atmos 7.1].mkv";

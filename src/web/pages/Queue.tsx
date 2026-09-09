@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type JobRow } from "../api";
+import { api, type ClusterNode, type JobRow } from "../api";
+import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
+import { encodeNeedFromPlan } from "../encode-node";
 import { Card } from "../components/Card";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
@@ -9,6 +11,13 @@ import { usePagedList } from "../use-paged-list";
 export const WORKING_NOW_HEADING = "Working now";
 export const WAITING_HEADING = "Waiting";
 export const FINISHED_HEADING = "Finished";
+
+export function queueNodeLine(job: { assignedNodeName?: string | null; waitingForNode?: boolean; status: string }): string | null {
+  if (!job.assignedNodeName) return null;
+  if (job.waitingForNode) return `Waiting for ${job.assignedNodeName}`;
+  if (job.status === "running") return `On ${job.assignedNodeName}`;
+  return `On ${job.assignedNodeName}`;
+}
 
 export function partitionQueueJobs<T extends { status: string }>(items: T[]): {
   working: T[];
@@ -42,9 +51,17 @@ export function queueVisibleHeadings(items: Array<{ status: string }>): string[]
 export function QueuePage() {
   const list = usePagedList({ loadPage: api.jobs, keyOf: (row: JobRow) => row.id, pollMs: 1000 });
   const items = list.items;
+  const [nodes, setNodes] = useState<ClusterNode[]>([]);
+  const [defaultNodeId, setDefaultNodeId] = useState("");
   const [mutationError, setMutationError] = useState("");
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<Record<string, string>>({});
+  useEffect(() => {
+    void api.nodes().then((payload) => {
+      setNodes(payload.nodes);
+      setDefaultNodeId(payload.defaultEncodeNodeId);
+    }).catch(() => undefined);
+  }, []);
   const { working, waiting, finished } = partitionQueueJobs(items);
   const waitingIds = waiting.map((job) => job.id);
   const finishedCount = Math.max(list.finishedCount, finished.length);
@@ -81,6 +98,8 @@ export function QueuePage() {
     busy,
     waitingIds,
     logs,
+    nodes,
+    defaultNodeId,
     onMove: moveJob,
     onMutate: mutate,
     onReload: list.reload,
@@ -131,6 +150,8 @@ type JobActions = {
   busy: boolean;
   waitingIds: string[];
   logs: Record<string, string>;
+  nodes: ClusterNode[];
+  defaultNodeId: string;
   onMove: (id: string, delta: number) => Promise<void>;
   onMutate: (action: () => Promise<unknown>) => Promise<void>;
   onReload: () => Promise<void>;
@@ -138,12 +159,14 @@ type JobActions = {
 };
 
 function WorkingNowCard({ job, actions }: { job: JobRow; actions: JobActions }) {
+  const nodeLine = queueNodeLine(job);
   return (
     <Card
       title={<JobTitle job={job} />}
       actions={<JobButtons job={job} actions={actions} kind="working" />}
     >
       <p className="m-0 text-sm text-muted">{phaseLabel(job.phase, job.status)}</p>
+      {nodeLine && <p className="mt-1 text-sm text-muted">{nodeLine}</p>}
       <p className="mt-1 text-sm text-muted">{planLabel(job)}</p>
       <div className="job-progress mt-3">
         <div className="job-progress-bar" style={{ width: `${Math.max(1, Math.round(job.progress * 100))}%` }} />
@@ -185,7 +208,7 @@ function QueueTable({
                 <td className="min-w-44">
                   <JobTitle job={job} />
                 </td>
-                <td>{job.status}</td>
+                <td>{job.waitingForNode && job.assignedNodeName ? `Waiting for ${job.assignedNodeName}` : job.status}</td>
                 <td>{planLabel(job)}</td>
                 {kind === "waiting" && <td>{phaseLabel(job.phase, job.status)}</td>}
                 <td>
@@ -239,6 +262,18 @@ function JobButtons({ job, actions, kind }: { job: JobRow; actions: JobActions; 
         <button className="btn-secondary" type="button" onClick={() => void api.cancel(job.id).then(actions.onReload)}>
           Cancel
         </button>
+      )}
+      {kind === "waiting" && (
+        <span className="ml-1 inline-block min-w-[10rem] align-middle">
+          <EncodeNodeSelect
+            nodes={actions.nodes}
+            value={job.assignedNodeId ?? actions.defaultNodeId}
+            defaultNodeId={actions.defaultNodeId}
+            need={encodeNeedFromPlan(job.plan)}
+            disabled={actions.busy}
+            onChange={(nodeId) => void actions.onMutate(() => api.assignJob(job.id, nodeId))}
+          />
+        </span>
       )}
       {kind === "waiting" && job.status === "held" && (
         <button className="btn ml-1" type="button" onClick={() => void api.runNow(job.id).then(actions.onReload)}>

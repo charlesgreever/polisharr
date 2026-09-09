@@ -114,7 +114,7 @@ export function MoviesPage() {
     void api.settings().then((settings) => {
       setHouseVideoTarget(settings.videoTarget === "av1" ? "av1" : "hevc");
     }).catch(() => undefined);
-    void api.hardware().then((hardware) => setAv1Available(Boolean(hardware.av1))).catch(() => undefined);
+    void api.nodes().then((payload) => setAv1Available(Boolean(payload.av1Available))).catch(() => undefined);
   }, []);
 
   useEffect(() => {

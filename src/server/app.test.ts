@@ -64,10 +64,11 @@ async function setup() {
 }
 
 describe("public HTTP behavior", () => {
-  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void } } }> = [];
+  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; workerLoop?: { stop: () => void } } }> = [];
   afterEach(() => {
     for (const a of apps) {
       a.app.jobs.stop();
+      a.app.workerLoop?.stop();
       a.store.close();
     }
     apps.length = 0;
@@ -2136,6 +2137,430 @@ describe("public HTTP behavior", () => {
     release();
     await walk;
     expect(created.store.getInspectState().walking).toBe(false);
+  });
+
+  it("lists this machine as the only encode node without a cluster token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373", POLISHARR_NODE_NAME: "homeserver" });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null };
+    const created = createApp({ env, hardware: async () => hw });
+    apps.push({ store: created.store, app: created });
+    expect((await created.app.request("/api/nodes")).status).toBe(401);
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    const listed = await created.app.request("/api/nodes", { headers });
+    const body = (await listed.json()) as {
+      thisNodeId: string;
+      defaultEncodeNodeId: string;
+      nodes: Array<{ name: string; role: string; roleLabel: string; thisNode: boolean; hardwareLabel: string; concurrency: number; online: boolean }>;
+    };
+    expect(body.nodes).toHaveLength(1);
+    expect(body.nodes[0]?.name).toBe("homeserver");
+    expect(body.nodes[0]?.role).toBe("standalone");
+    expect(body.nodes[0]?.roleLabel).toBe("This machine");
+    expect(body.nodes[0]?.thisNode).toBe(true);
+    expect(body.nodes[0]?.online).toBe(true);
+    expect(body.nodes[0]?.hardwareLabel).toBe("NVIDIA GPU, AV1 encoder listed");
+    expect(body.nodes[0]?.concurrency).toBe(1);
+    expect(body.defaultEncodeNodeId).toBe(body.thisNodeId);
+    const settings = (await (await created.app.request("/api/settings", { headers })).json()) as { hasClusterToken?: boolean; thisNodeId?: string };
+    expect(settings.hasClusterToken).toBe(false);
+    expect(settings.thisNodeId).toBe(body.thisNodeId);
+  });
+
+  it("lets a worker hello a master and marks it offline after the stale window", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    let now = 1_000;
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null };
+    const created = createApp({ env, hardware: async () => hw, clock: () => now });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    const denied = await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      body: JSON.stringify({ nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: hw, concurrency: 1 }),
+    });
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ error: "The cluster token is wrong." });
+    const hello = await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: hw, concurrency: 1 }),
+    });
+    expect(hello.status).toBe(200);
+    const listed = (await (await created.app.request("/api/nodes", { headers })).json()) as {
+      nodes: Array<{ id: string; name: string; role: string; online: boolean; thisNode: boolean }>;
+      defaultEncodeNodeId: string;
+    };
+    const worker = listed.nodes.find((node) => node.id === "worker-1");
+    const masterNode = listed.nodes.find((node) => node.thisNode);
+    expect(worker).toMatchObject({ name: "5090", role: "worker", online: true });
+    expect(masterNode).toMatchObject({ name: "homeserver", role: "master", online: true });
+    now = 1_000 + 60_000 + 1;
+    const stale = (await (await created.app.request("/api/nodes", { headers })).json()) as {
+      nodes: Array<{ id: string; online: boolean }>;
+    };
+    expect(stale.nodes.find((node) => node.id === "worker-1")?.online).toBe(false);
+    const beat = await created.app.request("/api/cluster/heartbeat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", hardware: hw, concurrency: 1 }),
+    });
+    expect(beat.status).toBe(200);
+    const fresh = (await (await created.app.request("/api/nodes", { headers })).json()) as {
+      nodes: Array<{ id: string; online: boolean }>;
+    };
+    expect(fresh.nodes.find((node) => node.id === "worker-1")?.online).toBe(true);
+    const unknown = await created.app.request("/api/cluster/heartbeat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "missing", hardware: hw }),
+    });
+    expect(unknown.status).toBe(404);
+    const saved = await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ defaultEncodeNodeId: "worker-1" }),
+    });
+    expect(saved.status).toBe(200);
+    const settings = (await (await created.app.request("/api/settings", { headers })).json()) as { defaultEncodeNodeId: string };
+    expect(settings.defaultEncodeNodeId).toBe("worker-1");
+  });
+
+  it("leases a job to the assigned worker and writes Review from a remote sidecar", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null };
+    const created = createApp({
+      env,
+      hardware: async () => hw,
+      readable: async () => true,
+      probe: async () => ({
+        format: { duration: "3600" },
+        streams: [
+          { codec_type: "video", codec_name: "h264", width: 1920, height: 1080 },
+          { codec_type: "audio", codec_name: "aac", channels: 6, tags: { language: "eng" }, index: 1 },
+          { codec_type: "audio", codec_name: "aac", channels: 2, tags: { language: "spa" }, index: 2 },
+        ],
+      }),
+      fetch: (async (url: string) => {
+        if (String(url).includes("/movie")) {
+          return new Response(JSON.stringify([{
+            id: 10,
+            title: "American Underdog",
+            path: "/mnt/nas/movies/underdog.mkv",
+            sizeOnDisk: 8_000_000_000,
+            movieFile: { path: "/mnt/nas/movies/underdog.mkv", size: 8_000_000_000, quality: { quality: { name: "Bluray-1080p" } } },
+          }]));
+        }
+        if (String(url).includes("system/status")) return new Response(JSON.stringify({ appName: "Radarr", version: "5" }));
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch,
+      optimizer: async () => {
+        throw new Error("The master must not run a job assigned to a worker.");
+      },
+    });
+    created.jobs.stop();
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ languageConfirmed: true, preferredLanguage: "eng", reviewPath: join(dir, "review") }),
+    });
+    await created.app.request("/api/library/refresh", { method: "POST", headers });
+    await created.inspectPending();
+    await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: hw, concurrency: 1 }),
+    });
+    const suggestions = (await (await created.app.request("/api/suggestions", { headers })).json()) as { items: Array<{ id: string }> };
+    expect(suggestions.items.length).toBeGreaterThan(0);
+    const queued = await created.app.request("/api/queue", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ suggestionId: suggestions.items[0]?.id, assignedNodeId: "worker-1" }),
+    });
+    expect(queued.status).toBe(200);
+    const queuedBody = (await queued.json()) as { id: string };
+    expect(created.store.getJob(queuedBody.id)).toMatchObject({ status: "queued", assignedNodeId: "worker-1" });
+    await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-2", name: "intel", version: "0.2.18", hardware: hw, concurrency: 1 }),
+    });
+    const empty = await created.app.request("/api/cluster/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-2", freeSlots: 1 }),
+    });
+    expect(((await empty.json()) as { jobs: unknown[] }).jobs).toHaveLength(0);
+    const claimed = await created.app.request("/api/cluster/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", freeSlots: 1 }),
+    });
+    const claimedBody = (await claimed.json()) as { jobs: Array<{ id: string; leaseToken: string; sourcePath: string }> };
+    expect(claimedBody.jobs).toHaveLength(1);
+    expect(claimedBody.jobs[0]?.id).toBe(queuedBody.id);
+    const again = await created.app.request("/api/cluster/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", freeSlots: 1 }),
+    });
+    expect(((await again.json()) as { jobs: unknown[] }).jobs).toHaveLength(0);
+    const progressed = await created.app.request(`/api/cluster/jobs/${queuedBody.id}/progress`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ leaseToken: claimedBody.jobs[0]?.leaseToken, phase: "transcoding", progress: 0.4, log: "frame=1\n" }),
+    });
+    expect(progressed.status).toBe(200);
+    expect(created.store.getJob(queuedBody.id)).toMatchObject({ phase: "transcoding", progress: 0.4 });
+    const sidecarPath = join(dir, "out.mkv");
+    writeFileSync(sidecarPath, "SIDECAR");
+    const done = await created.app.request(`/api/cluster/jobs/${queuedBody.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({
+        leaseToken: claimedBody.jobs[0]?.leaseToken,
+        sidecarPath,
+        output: {
+          sourceSig: "out|1",
+          sourceMethod: "ffprobe",
+          listingState: "complete",
+          durationSec: 3600,
+          sizeBytes: 3_000_000_000,
+          sizePerHourGb: 3,
+          videoCodec: "hevc",
+          width: 1920,
+          height: 1080,
+          bitDepth: 8,
+          hdr: "none",
+          audio: [{ index: 1, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false }],
+          subtitles: [],
+          hasChapters: false,
+          hasAttachments: false,
+        },
+      }),
+    });
+    expect(done.status).toBe(200);
+    expect(created.store.getJob(queuedBody.id)?.status).toBe("succeeded");
+    expect(created.store.listReviews()).toHaveLength(1);
+    expect(created.store.listReviews()[0]?.sidecarPath).toBe(sidecarPath);
+    const listed = (await (await created.app.request("/api/jobs", { headers })).json()) as {
+      items: Array<{ id: string; assignedNodeName: string | null }>;
+    };
+    expect(listed.items.find((job) => job.id === queuedBody.id)?.assignedNodeName).toBe("5090");
+  });
+
+  it("rejects an AV1 job on a HEVC-only node, offers cluster AV1, and skips claims on a drained node", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null };
+    const created = createApp({ env, hardware: async () => hw });
+    created.jobs.stop();
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({
+        nodeId: "intel",
+        name: "intel",
+        version: "0.2.18",
+        hardware: { backend: "vaapi", cuda: false, vaapi: true, av1: false, reason: null },
+        concurrency: 1,
+      }),
+    });
+    await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({
+        nodeId: "5090",
+        name: "5090",
+        version: "0.2.18",
+        hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+        concurrency: 1,
+      }),
+    });
+    const listed = (await (await created.app.request("/api/nodes", { headers })).json()) as { av1Available: boolean };
+    expect(listed.av1Available).toBe(true);
+    const instanceId = created.store.upsertInstance({
+      kind: "radarr",
+      name: "Radarr",
+      url: "http://radarr",
+      secret: "k",
+      enabled: true,
+    });
+    created.store.upsertItem({
+      id: `${instanceId}:movie:1`,
+      instanceId,
+      arrId: 1,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Film",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: "/mnt/nas/movies/film.mkv",
+      sizeBytes: 8,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    created.store.saveInspection(`${instanceId}:movie:1`, {
+      sourceSig: "p|1",
+      sourceMethod: "ffprobe",
+      listingState: "complete",
+      durationSec: 3600,
+      sizeBytes: 8,
+      sizePerHourGb: 1,
+      videoCodec: "h264",
+      width: 1920,
+      height: 1080,
+      bitDepth: 8,
+      hdr: "none",
+      audio: [],
+      subtitles: [],
+      hasChapters: false,
+      hasAttachments: false,
+    });
+    const av1Plan = {
+      origin: "custom" as const,
+      video: { kind: "size" as const, codec: "av1" as const, targetBytes: 3, downscale1080p: false, bitDepth: 8 },
+      audio: [],
+      subtitles: [],
+      container: "mkv" as const,
+      writeMode: "sidecar" as const,
+      warning: null,
+      reasons: ["AV1"],
+      estimatedOutputBytes: 3,
+      category: "movie1080p" as const,
+    };
+    const denied = created.jobs.enqueueCustom(`${instanceId}:movie:1`, av1Plan, { assignedNodeId: "intel" });
+    expect(denied).toMatchObject({ error: "That encode node cannot run this plan.", status: 400 });
+    const ok = created.jobs.enqueueCustom(`${instanceId}:movie:1`, av1Plan, { assignedNodeId: "5090" });
+    expect("id" in ok).toBe(true);
+    if (!("id" in ok)) return;
+    await created.app.request("/api/nodes/5090", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    const claimed = await created.app.request("/api/cluster/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "5090", freeSlots: 1 }),
+    });
+    expect(((await claimed.json()) as { jobs: unknown[] }).jobs).toHaveLength(0);
+    expect(created.store.getJob(ok.id)?.status).toBe("queued");
+    await created.app.request(`/api/jobs/${ok.id}/assign`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ nodeId: "intel" }),
+    });
+    expect(created.store.getJob(ok.id)?.assignedNodeId).toBe("5090");
+  });
+
+  it("does not accept cluster hello on standalone", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await ctx.app.app.request("/api/settings/cluster-token", { method: "POST", headers });
+    const hello = await ctx.app.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer unused" },
+      body: JSON.stringify({ nodeId: "worker-1", name: "5090", version: "0.2.18" }),
+    });
+    expect(hello.status).toBe(404);
+    expect(await hello.json()).toEqual({
+      error: "This Polisharr is not accepting workers. Set POLISHARR_ROLE=master on the always-on host.",
+    });
+  });
+
+  it("keeps a worker from creating an admin or mutating the library", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "worker",
+      POLISHARR_NODE_NAME: "5090",
+      POLISHARR_MASTER_URL: "http://192.168.1.10:7373",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null };
+    const created = createApp({
+      env,
+      hardware: async () => hw,
+      fetch: (async () => new Response("{}", { status: 500 })) as typeof fetch,
+    });
+    apps.push({ store: created.store, app: created });
+    const status = (await (await created.app.request("/api/auth/status")).json()) as { role: string };
+    expect(status.role).toBe("worker");
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    expect(setupRes.status).toBe(409);
+    expect(await setupRes.json()).toEqual({ error: "This container is a worker. Open the master to manage the library." });
+    expect(created.store.userCount()).toBe(0);
+    const queue = await created.app.request("/api/queue", { method: "POST", body: JSON.stringify({}) });
+    expect(queue.status).toBe(409);
+    const worker = (await (await created.app.request("/api/worker")).json()) as {
+      name: string;
+      masterUrl: string;
+      hardwareLabel: string;
+      detail: string;
+    };
+    expect(worker.name).toBe("5090");
+    expect(worker.masterUrl).toBe("http://192.168.1.10:7373");
+    expect(worker.hardwareLabel).toContain("NVIDIA GPU");
+    expect(worker.detail).toContain("http://192.168.1.10:7373");
+  });
+
+  it("mints a cluster token once and never echoes it from settings", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    expect((await ctx.app.app.request("/api/settings/cluster-token", { method: "POST" })).status).toBe(401);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    const minted = await ctx.app.app.request("/api/settings/cluster-token", { method: "POST", headers });
+    const body = (await minted.json()) as { token?: string };
+    expect(body.token).toMatch(/^[a-f0-9]{48}$/);
+    const listed = await ctx.app.app.request("/api/settings", { headers });
+    const settings = (await listed.json()) as { hasClusterToken?: boolean };
+    expect(settings.hasClusterToken).toBe(true);
+    expect(JSON.stringify(settings)).not.toContain(body.token);
   });
 
   it("mints a webhook token once and never echoes it from settings", async () => {

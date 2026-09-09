@@ -88,6 +88,8 @@ export type Settings = {
   writeMode: WriteMode;
   profileAutoAssign: boolean;
   queueNewImportsSince: number;
+  /** Empty means this machine. Set when a second encode node exists. */
+  defaultEncodeNodeId: string;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -107,6 +109,7 @@ export const DEFAULT_SETTINGS: Settings = {
   writeMode: "sidecar",
   profileAutoAssign: true,
   queueNewImportsSince: 0,
+  defaultEncodeNodeId: "",
 };
 
 export type ArrInstance = {
@@ -260,6 +263,10 @@ export type Job = {
   createdAt: number;
   writeMode: WriteMode;
   promoteError: string | null;
+  assignedNodeId: string | null;
+  nodeId: string | null;
+  assignedNodeName?: string | null;
+  waitingForNode?: boolean;
 };
 
 export type ReviewItem = {

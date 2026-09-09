@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, type Exclusion, type FirstRun, type Hardware, type SettingsPayload } from "../api";
+import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type SettingsPayload } from "../api";
 import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
@@ -20,6 +20,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
   const [exclusion, setExclusion] = useState<{ kind: Exclusion["kind"]; value: string }>({ kind: "path", value: "" });
   const [webhookToken, setWebhookToken] = useState<string | null>(null);
   const [widgetKey, setWidgetKey] = useState<string | null>(null);
+  const [clusterToken, setClusterToken] = useState<string | null>(null);
+  const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
@@ -31,6 +33,11 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
     load();
     void api.hardware().then(setHw);
     void api.exclusions().then((result) => setExclusions(result.exclusions));
+    void api.nodes().then((payload) => setNodes(payload.nodes));
+    const id = setInterval(() => {
+      void api.nodes().then((payload) => setNodes(payload.nodes)).catch(() => undefined);
+    }, 10_000);
+    return () => clearInterval(id);
   }, []);
 
   const save = () => {
@@ -159,10 +166,105 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       <EncodeSettings
         data={data}
         hardwareLabel={hw ? `${hw.backend}${hw.av1 ? ", AV1 encoder listed" : ", AV1 encoder not listed"}` : "checking…"}
-        av1Available={Boolean(hw?.av1)}
+        av1Available={Boolean(nodes.some((node) => node.online && node.enabled && node.hardware.av1) || hw?.av1)}
         onChange={(patch) => setData({ ...data, ...patch })}
         onSave={save}
       />
+      <div className="glass space-y-4 p-5">
+        <h2 className="font-semibold">Nodes</h2>
+        <p className="help m-0">
+          This container is one encode node: a GPU box that can run optimize jobs. Settings, the library, Review, and Keep stay here. On the always-on host set POLISHARR_ROLE=master so another GPU box can join. Generate a cluster token, then set that token on the worker. The token is shown once.
+        </p>
+        {nodes.length > 1 && (
+          <Field label="Default encode node">
+            <select
+              className={FIELD_CONTROL}
+              value={data.defaultEncodeNodeId ?? data.thisNodeId ?? ""}
+              onChange={(event) => {
+                const next = { ...data, defaultEncodeNodeId: event.target.value };
+                setData(next);
+                void api.saveSettings(next).then(() => {
+                  setMsg("Default encode node saved. Jobs already in Queue keep the node they were given.");
+                  onChange();
+                }).catch((error: Error) => setMsg(error.message));
+              }}
+            >
+              {nodes.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.name}{node.online ? "" : " (offline)"}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {nodes.length > 1 && (
+          <p className="help m-0">
+            New jobs run on the default encode node. If that node is offline, the job waits; it does not move to another GPU.
+          </p>
+        )}
+        <ul className="space-y-3 text-sm">
+          {nodes.map((node) => (
+            <li key={node.id} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
+              <div className="font-medium text-ink">{node.name}</div>
+              <div className="text-muted">{node.roleLabel} · {node.hardwareLabel} · {node.online ? "Online" : "Offline"}{node.enabled ? "" : " · Drained"}</div>
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="block text-sm">
+                  <span className="mb-1 block font-medium text-muted">Concurrent jobs</span>
+                  <input
+                    className="h-10 w-24"
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={node.concurrency}
+                    onChange={(event) => {
+                      const concurrency = Number(event.target.value);
+                      void api.saveNode(node.id, { concurrency }).then((result) => {
+                        setNodes((current) => current.map((row) => row.id === node.id ? result.node : row));
+                        setMsg("Node slots saved.");
+                      }).catch((error: Error) => setMsg(error.message));
+                    }}
+                  />
+                </label>
+                <button
+                  className="btn-secondary h-10"
+                  type="button"
+                  onClick={() => {
+                    void api.saveNode(node.id, { enabled: !node.enabled }).then((result) => {
+                      setNodes((current) => current.map((row) => row.id === node.id ? result.node : row));
+                      setMsg(result.node.enabled ? `${node.name} can take new jobs.` : `${node.name} is drained. Waiting jobs stay assigned.`);
+                    }).catch((error: Error) => setMsg(error.message));
+                  }}
+                >
+                  {node.enabled ? "Drain" : "Enable"}
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        {clusterToken ? (
+          <SecretOnce
+            label="Cluster token (shown once)"
+            value={clusterToken}
+            onCopied={() => setMsg("Cluster token copied.")}
+            onFailed={() => setMsg("Copy failed. Select the token and copy it yourself.")}
+          />
+        ) : (
+          <p className="help">{data.hasClusterToken ? "A cluster token is saved. Generate a new one to replace it." : "No cluster token yet. Generate one before you add another GPU box."}</p>
+        )}
+        <button
+          className="btn"
+          type="button"
+          onClick={() =>
+            void api.mintClusterToken().then((result) => {
+              setClusterToken(result.token);
+              load();
+              setMsg("Cluster token generated. Copy it now; Polisharr will not show it again.");
+            }).catch((e: Error) => setMsg(e.message))
+          }
+        >
+          {data.hasClusterToken ? "Rotate cluster token" : "Generate cluster token"}
+        </button>
+      </div>
       <div className="glass space-y-4 p-5">
         <h2 className="font-semibold">Suggestion exclusions</h2>
         <p className="help m-0">An exclusion hides matching files from Suggestions. It does not delete files or cancel queued work.</p>

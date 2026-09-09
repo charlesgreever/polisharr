@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FINISHED_HEADING,
   partitionQueueJobs,
+  queueNodeLine,
   queueToolbar,
   queueVisibleHeadings,
   WAITING_HEADING,
@@ -48,5 +49,11 @@ describe("Queue sections", () => {
     ]);
     expect(queueVisibleHeadings([job("wait", "queued")])).toEqual([WAITING_HEADING]);
     expect(queueVisibleHeadings([])).toEqual([]);
+  });
+
+  it("names the encode node without calling it Encode target", () => {
+    expect(queueNodeLine({ status: "running", assignedNodeName: "5090" })).toBe("On 5090");
+    expect(queueNodeLine({ status: "queued", assignedNodeName: "5090", waitingForNode: true })).toBe("Waiting for 5090");
+    expect(queueNodeLine({ status: "queued" })).toBeNull();
   });
 });

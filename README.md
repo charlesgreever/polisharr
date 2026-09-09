@@ -5,7 +5,7 @@ Polisharr is a companion container for Radarr and Sonarr. It inspects the same l
 This tree is a greenfield rewrite. Do not import the previous application code.
 
 **PRD:** [docs/v2 prd.md](docs/v2%20prd.md) (v2). The rewrite PRD is [docs/prd.md](docs/prd.md).
-**Plan:** remaining work is [plans/review-follow-up.md](plans/review-follow-up.md). Shipped v2 work: [plans/v2-implementation-plan.md](plans/v2-implementation-plan.md). Earlier review-gap work: [plans/review-gap-remediation.md](plans/review-gap-remediation.md).
+**Plan:** remaining work is [plans/review-follow-up.md](plans/review-follow-up.md). Multi-node (one master, extra GPU boxes): [plans/multi-node.md](plans/multi-node.md). Shipped v2 work: [plans/v2-implementation-plan.md](plans/v2-implementation-plan.md). Earlier review-gap work: [plans/review-gap-remediation.md](plans/review-gap-remediation.md).
 **Engineering standard:** [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md)
 **Prose standard:** [CODING_STANDARDS.md](CODING_STANDARDS.md)
 
@@ -18,7 +18,7 @@ This tree is a greenfield rewrite. Do not import the previous application code.
 - Flags files over the GB-per-hour cap, extra languages, and missing AAC stereo
 - Can suggest converting MP4 files to MKV before a hardware encode, or as remux-only work
 - Filters Suggestions by media facts or warning state and manages path, profile, tag, and title exclusions
-- Lets you queue a custom plan from a title page: track edits, remux, size mode, or encoder quality. The title page shows file name and path. Queue stays off until the plan differs from the source. AV1 appears only when the GPU can encode it. Untagged audio can **Identify language** from a 45-second clip when `WHISPER_LID` is set. Untagged text subtitles can identify language from a few minutes of words (no extra install). Untagged PGS can identify language from a short OCR sample when `PGS_OCR` is set. A weak sample stays untagged and offers another start time. The library file does not change until Keep.
+- Lets you queue a custom plan from a title page: track edits, remux, size mode, or encoder quality. The title page shows file name and path. Queue stays off until the plan differs from the source. AV1 appears when an encode node can encode it. Untagged audio can **Identify language** from a 45-second clip when `WHISPER_LID` is set. Untagged text subtitles can identify language from a few minutes of words (no extra install). Untagged PGS can identify language from a short OCR sample when `PGS_OCR` is set. A weak sample stays untagged and offers another start time. The library file does not change until Keep.
 - Optional language identification: the image ships `/usr/local/bin/whisper-lid` (faster-whisper, tiny model). Set `WHISPER_LID` to that path. The first listen downloads the model into `/config/whisper`. CUDA is used when an NVIDIA device is present; otherwise the clip is identified on CPU. If `WHISPER_LID` is unset, the title page does not offer audio Identify language. PGS Identify language uses `/usr/local/bin/pgs-ocr` (Tesseract OSD+English on a 180-second sample). Set `PGS_OCR` to that path. It does not convert the PGS track to SRT.
 - Home shows a Status strip, large files-optimized and space-saved tiles, and links into Suggestions, Queue, Review, and Errors. Direct write counts in the tallies the same way Keep does.
 - Settings uses stacked labels and everyday size-cap names. Title-page audio actions keep a fixed-width dropdown so Keep and Replace with downmix do not jump.
@@ -83,10 +83,14 @@ Under **Default suggestion operations**, **Convert MP4 to MKV** is off by defaul
 | `PORT` | `7373` | Listen port |
 | `POLISHARR_WIDGET_KEY` | unset | Optional Homepage widget key |
 | `POLISHARR_TRUST_PROXY` | unset | Set to `1` only behind a trusted reverse proxy |
+| `POLISHARR_ROLE` | `standalone` | `standalone` (one box), `master` (UI and library), or `worker` (encode only) |
+| `POLISHARR_NODE_NAME` | hostname | Label in Settings → Nodes and the Encode node picker |
+| `POLISHARR_MASTER_URL` | unset | Worker only: URL of the master, for example `http://192.168.1.10:7373` |
+| `POLISHARR_CLUSTER_TOKEN` | unset | Shared secret. Generate it on the master; set the same value on each worker |
 
 ## Encode target and preferred audio
 
-Settings **Target** under Encode is the house codec for automatic Suggestions: HEVC, or AV1 when the GPU can encode it. **Transcode video below Target Encode** flags H.264, MPEG-2, VC-1, and similar codecs even when the file is under its size cap. When the target is AV1, it also flags HEVC. Already-AV1 files stay as they are.
+Settings **Target** under Encode is the house codec for automatic Suggestions: HEVC, or AV1 when an encode node can encode it. **Transcode video below Target Encode** flags H.264, MPEG-2, VC-1, and similar codecs even when the file is under its size cap. When the target is AV1, it also flags HEVC. Already-AV1 files stay as they are.
 
 Each movie row and that movie's title page have **Encode target**. Pick HEVC, AV1, or **House default** to follow Settings. Saving recomputes the automatic suggestion for that film. The Codec control on a custom title plan is only for the job you queue there.
 
@@ -99,6 +103,18 @@ Series headers also have **Preferred audio**:
 - **Keep surround** turns automatic stereo off for that show.
 
 Add stereo on a row still works for one episode. Queue still writes a sidecar. Keep still replaces the library file.
+
+## Extra GPU boxes
+
+One Polisharr is the **master**: UI, settings, library sync, Suggestions, Review, and Keep. Put that container on the always-on host next to Radarr and Sonarr. Set `POLISHARR_ROLE=master`. Each extra GPU box is a **worker**: it only runs encodes. Copy [compose.worker.yaml](compose.worker.yaml), give it its own `/config`, and bind the **same** media path the Arrs report (and the same review folder).
+
+**Encode target** is still HEVC vs AV1. **Encode node** is which machine runs ffmpeg. Settings → Nodes sets the house default and per-node job slots. Queue, Suggestions, and the title page can pick a different node for one job. If that node is off or drained, the job waits; it does not move to another GPU.
+
+On the master, Settings → Nodes generates a cluster token. Copy it once into `POLISHARR_CLUSTER_TOKEN` on the worker, with `POLISHARR_MASTER_URL` pointing at the master. Do not share `/config` or `polisharr.db` across containers. Webhooks still hit the master.
+
+A worker writes a sidecar on the shared review path. Direct write still replaces the library file on the master after the integrity check, then refreshes Arr. Queue new Arr imports still writes a sidecar and uses the house encode node.
+
+The worker's published port is only a stub page (hardware, master URL, join status). Open the master to manage the library.
 
 ## Run locally
 

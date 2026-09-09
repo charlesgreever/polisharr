@@ -14,15 +14,23 @@ import { SettingsPage } from "./pages/Settings";
 import { TitlePage } from "./pages/Title";
 import { LoginPage } from "./pages/Login";
 import { SetupPage } from "./pages/Setup";
+import { WorkerPage } from "./pages/Worker";
 
 export function App() {
-  const [auth, setAuth] = useState<{ authenticated: boolean; firstRun: FirstRun; version?: string } | null>(null);
+  const [auth, setAuth] = useState<{ authenticated: boolean; firstRun: FirstRun; version?: string; role?: "standalone" | "master" | "worker" } | null>(null);
 
   useEffect(() => {
     void api.status().then(setAuth).catch(() => setAuth({ authenticated: false, firstRun: emptyFirst() }));
   }, []);
 
-  const signedOut = !auth || !auth.firstRun.hasAdmin || !auth.authenticated;
+  if (!auth) {
+    return <main className="auth-page" />;
+  }
+  if (auth.role === "worker") {
+    return <WorkerPage />;
+  }
+
+  const signedOut = !auth.firstRun.hasAdmin || !auth.authenticated;
   if (signedOut) {
     const firstRun = auth?.firstRun ?? { hasAdmin: true, languageConfirmed: false, hasReviewPath: false, hasArr: false, complete: false };
     return (

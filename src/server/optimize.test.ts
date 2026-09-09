@@ -549,6 +549,80 @@ describe("ffmpeg encode arguments", () => {
     expect(av1[av1.indexOf("-bufsize") + 1]).toBe(String(Number(av1[av1.indexOf("-b:v") + 1]) * 2));
   });
 
+  it("gives size-mode AV1 more video bitrate when TrueHD size is measured, not guessed", () => {
+    const targetBytes = 4_509_715_661;
+    const durationSec = 4052.373;
+    const baseReport: InspectionReport = {
+      sourceSig: "p|1",
+      sourceMethod: "ffprobe",
+      listingState: "complete",
+      durationSec,
+      sizeBytes: 13_131_642_742,
+      sizePerHourGb: 10.86,
+      videoCodec: "hevc",
+      width: 3840,
+      height: 1920,
+      bitDepth: 10,
+      hdr: "hdr10",
+      audio: [
+        { index: 1, language: "eng", channels: 8, codec: "truehd", title: "TrueHD 7.1 Atmos", untagged: false, commentary: false },
+        { index: 2, language: "eng", channels: 6, codec: "ac3", title: "AC-3 5.1", untagged: false, commentary: false, bitrateBps: 448_000 },
+        { index: 3, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
+      ],
+      subtitles: [],
+      hasChapters: false,
+      hasAttachments: false,
+    };
+    const plan = {
+      origin: "custom" as const,
+      video: { kind: "size" as const, codec: "av1" as const, targetBytes, downscale1080p: false, bitDepth: 10 },
+      audio: [],
+      subtitles: [],
+      container: "mkv" as const,
+      writeMode: "direct" as const,
+      warning: null,
+      reasons: [],
+      estimatedOutputBytes: targetBytes,
+      category: "tv4k" as const,
+    };
+    const guessed = encodeArgs(source, "/tmp/out.mkv", {
+      sourcePath: source,
+      reviewDir: "/tmp/review",
+      report: baseReport,
+      plan,
+      target: "av1",
+      backend: "cuda",
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      mkvmerge: "mkvmerge",
+      conservative: false,
+    });
+    const measured = encodeArgs(source, "/tmp/out.mkv", {
+      sourcePath: source,
+      reviewDir: "/tmp/review",
+      report: {
+        ...baseReport,
+        audio: [
+          { ...baseReport.audio[0]!, sizeBytes: 1_421_238_866 },
+          { ...baseReport.audio[1]!, sizeBytes: 226_931_712 },
+          { ...baseReport.audio[2]!, sizeBytes: 82_478_280 },
+        ],
+      },
+      plan,
+      target: "av1",
+      backend: "cuda",
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      mkvmerge: "mkvmerge",
+      conservative: false,
+    });
+    const guessedBps = Number(guessed[guessed.indexOf("-b:v") + 1]);
+    const measuredBps = Number(measured[measured.indexOf("-b:v") + 1]);
+    expect(guessedBps).toBeLessThan(4_000_000);
+    expect(measuredBps).toBeGreaterThan(5_000_000);
+    expect(measuredBps).toBeGreaterThan(guessedBps);
+  });
+
   it("does not pass HEVC main10 when encoding 10-bit AV1", () => {
     const args = encodeArgs(source, "/tmp/out.mkv", {
       sourcePath: source,
@@ -1367,7 +1441,7 @@ describe("ISO remux and custom audio arguments", () => {
         video: {
           kind: "size" as const,
           codec: "hevc" as const,
-          targetBytes: Math.round(2.5 * (durationSec / 3600) * 1024 ** 3),
+          targetBytes: Math.round(1.0 * (durationSec / 3600) * 1024 ** 3),
           downscale1080p: false,
           bitDepth: 8,
         },
@@ -1376,8 +1450,8 @@ describe("ISO remux and custom audio arguments", () => {
         container: "mkv" as const,
         writeMode: "sidecar" as const,
         warning: null,
-        reasons: ["Target 2.5 GB/hr"],
-        estimatedOutputBytes: Math.round(2.5 * (durationSec / 3600) * 1024 ** 3),
+        reasons: ["Target 1.0 GB/hr"],
+        estimatedOutputBytes: Math.round(1.0 * (durationSec / 3600) * 1024 ** 3),
         category: "movie1080p" as const,
       },
       report: {

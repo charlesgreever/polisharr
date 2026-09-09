@@ -1,7 +1,5 @@
 /** Fraction of the GB/hr cap a file may exceed before Polisharr treats it as over. */
 export const SIZE_CAP_TOLERANCE = 0.05;
-/** Fraction of the file-size target left unused so CBR/VBR overshoot still lands under the cap. */
-const ENCODER_SLACK = 0.2;
 const MUX_OVERHEAD_BYTES = 8_000_000;
 const MIN_VIDEO_BPS = 800_000;
 const MAX_VIDEO_BPS = 300_000_000;
@@ -32,8 +30,12 @@ export function aggressiveTargetBytes(previousTargetBytes: number): number {
   return Math.max(1, Math.round(previousTargetBytes * 0.8));
 }
 
-export function typicalAudioBitrateBps(track: AudioBitrateTrack): number {
+export function typicalAudioBitrateBps(track: AudioBitrateTrack, durationSec?: number): number {
   if (track.bitrateBps && track.bitrateBps > 0) return track.bitrateBps;
+  // Lossless tracks usually have no bit_rate in ffprobe; use the measured track size.
+  if (track.sizeBytes && track.sizeBytes > 0 && durationSec && durationSec > 1) {
+    return Math.round((track.sizeBytes * 8) / durationSec);
+  }
   const codec = `${track.codec} ${track.title ?? ""}`.toLowerCase();
   const channels = Math.max(1, track.channels || 2);
   if (/truehd|mlp/.test(codec)) return channels > 6 ? 5_000_000 : 3_000_000;
@@ -48,8 +50,8 @@ export function typicalAudioBitrateBps(track: AudioBitrateTrack): number {
   return 256_000;
 }
 
-export function copiedAudioBitrateBps(tracks: AudioBitrateTrack[]): number {
-  return tracks.reduce((sum, track) => sum + typicalAudioBitrateBps(track), 0);
+export function copiedAudioBitrateBps(tracks: AudioBitrateTrack[], durationSec?: number): number {
+  return tracks.reduce((sum, track) => sum + typicalAudioBitrateBps(track, durationSec), 0);
 }
 
 export function typicalSubtitleBitrateBps(track: SubtitleSizeTrack): number {
@@ -70,7 +72,7 @@ export function remainingSizeAfterTrackPlan(input: {
   stripSubs?: SubtitleSizeTrack[];
   extraAudioBitrateBps?: number;
 }): { remainingBytes: number; remainingSizePerHourGb: number } {
-  const strippedAudio = copiedAudioBitrateBps(input.stripAudio);
+  const strippedAudio = copiedAudioBitrateBps(input.stripAudio, input.durationSec);
   const strippedSubs = (input.stripSubs ?? []).reduce((sum, track) => sum + typicalSubtitleBitrateBps(track), 0);
   const extra = input.extraAudioBitrateBps ?? 0;
   const remainingBytes = Math.max(
@@ -91,7 +93,7 @@ export function audioFillsSizeCap(input: {
 }): boolean {
   if (!(input.durationSec > 1) || !(input.targetBytes > 0)) return false;
   const audioBytes = bytesForBitrate(input.audioBitrateBps, input.durationSec);
-  const usable = Math.max(0, input.targetBytes * (1 - ENCODER_SLACK) - audioBytes - MUX_OVERHEAD_BYTES);
+  const usable = Math.max(0, input.targetBytes - audioBytes - MUX_OVERHEAD_BYTES);
   const bitrate = Math.round((usable * 8) / input.durationSec);
   return bitrate < MIN_VIDEO_BPS && audioBytes >= bytesForBitrate(MIN_VIDEO_BPS, input.durationSec);
 }
@@ -102,7 +104,7 @@ export function raisedTargetBytes(input: {
   audioBitrateBps: number;
 }): number {
   const audioBytes = bytesForBitrate(input.audioBitrateBps, input.durationSec);
-  return Math.max(input.capBytes, Math.round((input.capBytes + audioBytes + MUX_OVERHEAD_BYTES) / (1 - ENCODER_SLACK)));
+  return Math.max(input.capBytes, input.capBytes + audioBytes + MUX_OVERHEAD_BYTES);
 }
 
 export function videoBitrateForTarget(input: {
@@ -112,7 +114,7 @@ export function videoBitrateForTarget(input: {
   codec?: "hevc" | "av1";
 }): number {
   const audioBytes = (input.audioBitrateBps / 8) * input.durationSec;
-  const usable = Math.max(0, input.targetBytes * (1 - ENCODER_SLACK) - audioBytes - MUX_OVERHEAD_BYTES);
+  const usable = Math.max(0, input.targetBytes - audioBytes - MUX_OVERHEAD_BYTES);
   let bitrate = Math.round((usable * 8) / input.durationSec);
   if (bitrate > MAX_VIDEO_BPS) {
     const gb = (input.targetBytes / 1024 ** 3).toFixed(1);

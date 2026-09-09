@@ -12,15 +12,40 @@ import {
 } from "./size-budget.ts";
 
 describe("size budget", () => {
-  it("aims video bitrate 20% under the file target so encoder overshoot still fits", () => {
+  it("aims video bitrate at the typed file target, not 20% under it", () => {
     const durationSec = 3600;
     const targetBytes = 2.5 * 1024 ** 3;
     const bitrate = videoBitrateForTarget({ targetBytes, durationSec, audioBitrateBps: 0 });
     const raw = (targetBytes * 8) / durationSec;
-    expect(bitrate / raw).toBeGreaterThan(0.79);
-    expect(bitrate / raw).toBeLessThan(0.81);
+    expect(bitrate / raw).toBeGreaterThan(0.99);
+    expect(bitrate / raw).toBeLessThan(1);
     const av1 = videoBitrateForTarget({ targetBytes, durationSec, audioBitrateBps: 0, codec: "av1" });
     expect(av1).toBe(bitrate);
+  });
+
+  it("uses measured TrueHD bytes so a 4.2 GB target is not eaten by a 5 Mbps guess", () => {
+    // House of the Dragon S01E08 custom AV1 job: typed 4.20 GB, landed at 2.22 GB.
+    const durationSec = 4052.373;
+    const targetBytes = 4_509_715_661;
+    const tracks = [
+      { codec: "truehd", channels: 8, title: "TrueHD 7.1 Atmos", sizeBytes: 1_421_238_866 },
+      { codec: "ac3", channels: 6, title: "AC-3 5.1", bitrateBps: 448_000, sizeBytes: 226_931_712 },
+      { codec: "aac", channels: 2, sizeBytes: 82_478_280 },
+    ];
+    const audioBytes = tracks.reduce((sum, track) => sum + (track.sizeBytes ?? 0), 0);
+    const audioBps = copiedAudioBitrateBps(tracks, durationSec);
+    const videoBps = videoBitrateForTarget({
+      targetBytes,
+      durationSec,
+      audioBitrateBps: audioBps,
+      codec: "av1",
+    });
+    const predictedBytes = Math.round((videoBps / 8) * durationSec) + audioBytes;
+    expect(typicalAudioBitrateBps(tracks[0]!, durationSec)).toBeGreaterThan(2_700_000);
+    expect(typicalAudioBitrateBps(tracks[0]!, durationSec)).toBeLessThan(2_900_000);
+    expect(typicalAudioBitrateBps({ codec: "truehd", channels: 8, title: "TrueHD 7.1 Atmos" })).toBe(5_000_000);
+    expect(predictedBytes / targetBytes).toBeGreaterThan(0.95);
+    expect(predictedBytes / targetBytes).toBeLessThan(1.05);
   });
 
   it("flags a custom size-mode output against the typed target, not only GB/hour", () => {

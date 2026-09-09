@@ -110,7 +110,7 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
     ? report.sizePerHourGb
     : remaining.remainingSizePerHourGb;
   const overCap = exceedsSizeCap(remainingGbPerHour, cap);
-  const keptAudioBps = copiedAudioBitrateBps(keepAudio) + extraAudioBitrateBps;
+  const keptAudioBps = copiedAudioBitrateBps(keepAudio, report.durationSec) + extraAudioBitrateBps;
   const capBytes = Math.round(cap * hours * 1024 ** 3);
   const audioBound = audioFillsSizeCap({
     targetBytes: capBytes,

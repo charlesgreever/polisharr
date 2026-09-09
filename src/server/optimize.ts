@@ -109,14 +109,14 @@ export function shouldSkipSizeEncode(plan: ExecutablePlan, working: InspectionRe
   return audioFillsSizeCap({
     targetBytes: plan.video.targetBytes,
     durationSec,
-    audioBitrateBps: copiedAudioBitrateBps(working.audio),
+    audioBitrateBps: copiedAudioBitrateBps(working.audio, durationSec),
   });
 }
 
 function sizePlanForWorkingFile(plan: ExecutablePlan, working: InspectionReport): ExecutablePlan {
   if (plan.video.kind !== "size") return plan;
   const durationSec = Math.max(working.durationSec, 1);
-  const audioBitrateBps = copiedAudioBitrateBps(working.audio);
+  const audioBitrateBps = copiedAudioBitrateBps(working.audio, durationSec);
   if (!audioFillsSizeCap({ targetBytes: plan.video.targetBytes, durationSec, audioBitrateBps })) return plan;
   if (plan.origin === "custom") return plan;
   return {
@@ -755,7 +755,7 @@ export function nvencBitrate(req: OptimizeRequest, video: ExecutablePlan["video"
   return videoBitrateForTarget({
     targetBytes,
     durationSec,
-    audioBitrateBps: copiedAudioBitrateBps(req.report.audio),
+    audioBitrateBps: copiedAudioBitrateBps(req.report.audio, durationSec),
     codec: codec === "av1" ? "av1" : "hevc",
   });
 }

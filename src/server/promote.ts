@@ -45,7 +45,8 @@ export async function recoverStagedReplace(destPath: string): Promise<void> {
   const staged = stagedNewPath(destPath);
   const destOk = await pathExists(destPath);
   const backupOk = await pathExists(backup);
-  if (!destOk && backupOk) {
+  if (backupOk) {
+    if (destOk) await unlink(destPath).catch(() => undefined);
     await rename(backup, destPath);
   }
   await unlink(staged).catch(() => undefined);
@@ -64,6 +65,9 @@ export async function replaceLibraryFile(outputPath: string, destPath: string, o
   // Move the original aside, then copy the sidecar onto dest. Do not write dest.opt-new
   // in the Arr library folder: a series refresh can pick that sibling up and the rename fails with ENOENT.
   const backup = stagedBackupPath(destPath);
+  if (await pathExists(backup)) {
+    throw new Error("A previous Keep is still being recovered for this library file.");
+  }
   let destMoved = false;
   try {
     await rename(destPath, backup);

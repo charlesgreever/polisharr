@@ -61,8 +61,15 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
     : settings.suggestionDefaults.removeNonPreferredAudio
       ? report.audio.filter((t) => shouldKeepAudio(t, lang, report.audio.length))
       : report.audio;
-  const languageStrip = report.audio.filter((t) => !keepAudio.includes(t));
-  let stripAudio = languageStrip;
+  let stripAudio = report.audio.filter((t) => !keepAudio.includes(t));
+  if (keepAudio.length === 0) {
+    const fallback = report.audio.find((track) => track.channels > 0 && !track.commentary)
+      ?? report.audio.find((track) => track.channels > 0);
+    if (fallback) {
+      keepAudio = [fallback];
+      stripAudio = stripAudio.filter((track) => track.index !== fallback.index);
+    }
+  }
   const keepSubs = settings.suggestionDefaults.removeNonPreferredSubtitles
     ? report.subtitles.filter((t) => t.language === lang || (t.untagged && report.subtitles.length === 1))
     : report.subtitles;
@@ -147,7 +154,7 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
   }
   if (remux && /\.iso$/i.test(item.path)) reasons.push("Convert the disc image to MKV.");
   else if (remux) reasons.push("Convert the MP4 container to MKV before any video encode.");
-  if (languageStrip.length) reasons.push("Drop audio tracks that are not in your preferred language.");
+  if (stripAudio.length) reasons.push("Drop audio tracks that are not in your preferred language.");
   if (stripSubs.length) reasons.push("Drop subtitle tracks that are not in your preferred language.");
   if (surroundToReplace.length && addStereo) {
     reasons.push("Replace surround audio with AAC stereo so a TV can play dialogue.");
@@ -215,6 +222,7 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
     },
     dismissed: false,
     keepAudio: keepAudio.map((t) => t.index),
+    keepAudioLanguages: Object.fromEntries(keepAudio.filter((t) => t.languagePending && t.language !== "und").map((t) => [String(t.index), t.language])),
     stripAudio: stripAudio.map((t) => t.index),
     keepSubs: keepSubs.map((t) => t.index),
     stripSubs: stripSubs.map((t) => t.index),

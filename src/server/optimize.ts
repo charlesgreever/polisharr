@@ -35,6 +35,7 @@ export type OptimizeRequest = {
   onPhase?: (phase: "muxing" | "creating_stereo" | "transcoding" | "finishing", progress: number) => void;
   onLog?: (text: string) => void;
   isCancelled?: () => boolean;
+  jobId?: string;
 };
 
 export type OptimizeResult = {
@@ -70,7 +71,7 @@ export function planFromSuggestion(suggestion: Suggestion, writeMode: WriteMode 
       ? { kind: "size", codec, targetBytes, downscale1080p: false, bitDepth: 8, mustEncode: suggestion.mustEncode !== false }
       : { kind: "copy" },
     audio: [
-      ...suggestion.keepAudio.map((index) => ({ op: "keep" as const, index })),
+      ...suggestion.keepAudio.map((index) => ({ op: "keep" as const, index, language: suggestion.keepAudioLanguages?.[String(index)] })),
       ...suggestion.stripAudio.filter((index) => index !== replaceSource).map((index) => ({ op: "remove" as const, index })),
       ...(replaceSource != null
         ? [{ op: "replace_downmix" as const, index: replaceSource, channels: 2 }]
@@ -137,7 +138,8 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
     await assertReviewCapacity(req.reviewDir, Math.max(req.report.sizeBytes, plannedBytes) + 256 * 1024 ** 2, options.capacity);
     const workDir = join(req.reviewDir, ".work");
     await mkdir(workDir, { recursive: true });
-    const sidecarPath = join(req.reviewDir, `${basename(req.sourcePath).replace(/\.[^.]+$/, "")}.mkv`);
+    const suffix = req.jobId ? `-${req.jobId}` : "";
+    const sidecarPath = join(req.reviewDir, `${basename(req.sourcePath).replace(/\.[^.]+$/, "")}${suffix}.mkv`);
     const temps: string[] = [];
     try {
       let current = req.sourcePath;
@@ -231,6 +233,12 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
 }
 
 function assertTrackIntegrity(plan: ExecutablePlan, output: InspectionReport): void {
+  if (!output.videoCodec || output.videoCodec === "unknown" || output.width <= 0 || output.height <= 0) {
+    throw new Error("The finished file has no playable video stream.");
+  }
+  if (plan.video.kind !== "copy" && !new RegExp(plan.video.codec === "av1" ? "av1" : "hevc|h265", "i").test(output.videoCodec)) {
+    throw new Error(`The finished file has ${output.videoCodec} video; the plan requested ${plan.video.codec.toUpperCase()}.`);
+  }
   const expectedAudio = plan.audio.filter((op) => op.op !== "remove").length;
   const expectedSubtitles = plan.subtitles.filter((op) => op.op === "keep").length;
   if (output.audio.length < expectedAudio) {
@@ -238,6 +246,9 @@ function assertTrackIntegrity(plan: ExecutablePlan, output: InspectionReport): v
   }
   if (output.subtitles.length < expectedSubtitles) {
     throw new Error("The finished file is missing one or more planned subtitle tracks.");
+  }
+  if (expectedAudio > 0 && output.audio.every((track) => track.channels <= 0)) {
+    throw new Error("The finished file has no usable audio tracks.");
   }
 }
 
@@ -276,7 +287,7 @@ async function createSubtitleExtras(
   for (const op of plan.subtitles) {
     if (op.op !== "keep") continue;
     const track = req.report.subtitles.find((item) => item.index === op.index);
-    if (!track || !isTextSubtitleCodec(track.codec)) continue;
+    if (!track || !/mov_text|eia_608|eia_708|webvtt/i.test(track.codec)) continue;
     req.onPhase?.("muxing", 0.22);
     const dest = join(workDir, `${Date.now()}-sub-${op.index}.srt`);
     temps.push(dest);
@@ -409,6 +420,14 @@ async function identifyMkvmergeTrackIds(
     };
   } catch (error) {
     const err = error as { message?: string; stderr?: string; stdout?: string };
+    if (err.message?.includes("Unexpected end of JSON") || err.message?.includes("Unexpected token")) {
+      // Older mkvmerge wrappers can emit no JSON for identify. Fall back to the
+      // normal Matroska ordering: video, audio, then subtitles.
+      return {
+        audio: new Map(report.audio.map((track, index) => [track.index, index + 1] as const)),
+        subtitles: new Map(report.subtitles.map((track, index) => [track.index, index + 1 + report.audio.length] as const)),
+      };
+    }
     throw new Error(formatToolError(mkvmerge, { message: err.message, stderr: err.stderr, stdout: err.stdout }));
   }
 }
@@ -666,7 +685,8 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
     // hwaccel flags must precede -i or ffmpeg still decodes on the CPU.
     args.push("-hwaccel", "cuda", "-hwaccel_output_format", "cuda");
   }
-  args.push("-i", source, "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?");
+  const videoMap = req.report.videoIndex == null ? "0:v:0" : `0:${req.report.videoIndex}`;
+  args.push("-i", source, "-map", videoMap, "-map", "0:a?", "-map", "0:s?", "-map", "0:t?");
   if (req.backend === "vaapi") {
     const format = tenBit ? "p010" : "nv12";
     const filters = [`format=${format}`, "hwupload=extra_hw_frames=64"];
@@ -708,10 +728,10 @@ export function isTextSubtitleCodec(codec: string): boolean {
 }
 
 export function subtitleEncodeArgs(report: InspectionReport): string[] {
-  const flags = report.subtitles.map((track) => isTextSubtitleCodec(track.codec));
-  if (flags.length === 0 || flags.every((text) => !text)) return ["-c:s", "copy"];
-  if (flags.every(Boolean)) return ["-c:s", "srt"];
-  return flags.flatMap((text, index) => ["-c:s:" + String(index), text ? "srt" : "copy"]);
+  const converts = report.subtitles.map((track) => /mov_text|eia_608|eia_708|webvtt/i.test(track.codec));
+  if (converts.length === 0 || converts.every((convert) => !convert)) return ["-c:s", "copy"];
+  if (converts.every(Boolean)) return ["-c:s", "srt"];
+  return converts.flatMap((convert, index) => ["-c:s:" + String(index), convert ? "srt" : "copy"]);
 }
 
 function sizeModeRateControl(backend: OptimizeRequest["backend"], bitrate: string): string[] {

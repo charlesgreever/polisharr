@@ -79,7 +79,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <select className={FIELD_CONTROL} value={data.writeMode ?? "sidecar"} onChange={(e) => {
             const value = e.target.value;
             if (value !== "sidecar" && value !== "direct") return;
-            const next = { ...data, writeMode: value };
+            const next = { ...data, writeMode: value as "sidecar" | "direct" };
             setData(next);
             void api.saveSettings(next).then(() => {
               setMsg(value === "direct"

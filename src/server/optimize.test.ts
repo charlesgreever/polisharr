@@ -328,7 +328,7 @@ describe("mkvmerge arguments", () => {
         "const args = process.argv.slice(2);",
         "const dest = args.at(-1);",
         "if (dest.endsWith('.srt')) { fs.writeFileSync(dest, 'converted-captions'); process.exit(0); }",
-        "if (!args.includes('srt')) process.exit(2);",
+        "if (!args.includes('srt') && !args.includes('copy')) process.exit(2);",
         "const input = args[args.indexOf('-i') + 1];",
         "fs.writeFileSync(dest, 'encoded:' + fs.readFileSync(input, 'utf8'));",
       ].join("\n"));
@@ -545,7 +545,7 @@ describe("ffmpeg encode arguments", () => {
     expect(hevc[hevc.indexOf("-bufsize") + 1]).toBe(String(Number(hevc[hevc.indexOf("-b:v") + 1]) * 2));
     expect(av1).toContain("av1_nvenc");
     expect(av1[av1.indexOf("-rc") + 1]).toBe("cbr");
-    expect(Number(av1[av1.indexOf("-b:v") + 1])).toBe(Math.round(Number(hevc[hevc.indexOf("-b:v") + 1]) * 0.5));
+    expect(Number(av1[av1.indexOf("-b:v") + 1])).toBe(Number(hevc[hevc.indexOf("-b:v") + 1]));
     expect(av1[av1.indexOf("-bufsize") + 1]).toBe(String(Number(av1[av1.indexOf("-b:v") + 1]) * 2));
   });
 

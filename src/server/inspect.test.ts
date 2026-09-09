@@ -18,6 +18,17 @@ import {
 import { isoFailedFfmpeg, isoListedFfmpeg, mkv4kHdrFfprobe, mkvNormalFfprobe } from "./fixtures/index.ts";
 
 describe("parseFfprobe", () => {
+  it("records the playable video stream instead of cover art", () => {
+    const report = parseFfprobe("movie.mkv", 1, {
+      format: { duration: "10" },
+      streams: [
+        { index: 0, codec_type: "video", codec_name: "mjpeg", width: 600, height: 900, disposition: { attached_pic: 1 } },
+        { index: 1, codec_type: "video", codec_name: "hevc", width: 3840, height: 2160 },
+      ],
+    });
+    expect(report.videoIndex).toBe(1);
+    expect(report.videoCodec).toBe("hevc");
+  });
   it("ignores cover art when choosing 4K size", () => {
     const report = parseFfprobe("/media/Avatar.mkv", 16_000_000_000, {
       format: { duration: "5900" },

@@ -136,6 +136,9 @@ export type AudioTrack = {
   untagged: boolean;
   commentary: boolean;
   languagePending?: boolean;
+  bitrateBps?: number;
+  sizeBytes?: number;
+  default?: boolean;
 };
 
 export type SubtitleTrack = {
@@ -147,6 +150,10 @@ export type SubtitleTrack = {
   forced: boolean;
   sdh: boolean;
   languagePending?: boolean;
+  bitrateBps?: number;
+  sizeBytes?: number;
+  default?: boolean;
+  hearingImpaired?: boolean;
 };
 
 export type InspectionReport = {
@@ -158,6 +165,7 @@ export type InspectionReport = {
   sizeBytes: number;
   sizePerHourGb: number;
   videoCodec: string;
+  videoIndex?: number;
   width: number;
   height: number;
   bitDepth: number;
@@ -166,6 +174,8 @@ export type InspectionReport = {
   subtitles: SubtitleTrack[];
   hasChapters: boolean;
   hasAttachments: boolean;
+  attachmentBytes?: number;
+  chapterCount?: number;
 };
 
 export type SuggestionNowAfter = {
@@ -187,6 +197,7 @@ export type Suggestion = {
   after: SuggestionNowAfter;
   dismissed: boolean;
   keepAudio: number[];
+  keepAudioLanguages?: Record<string, string>;
   stripAudio: number[];
   keepSubs: number[];
   stripSubs: number[];

@@ -2,15 +2,13 @@
 export const SIZE_CAP_TOLERANCE = 0.05;
 /** Fraction of the file-size target left unused so CBR/VBR overshoot still lands under the cap. */
 const ENCODER_SLACK = 0.2;
-/** NVENC AV1 CBR: 1.0→2.48 GB/hr, 0.7→2.20 GB/hr vs a ~2.0 GB/hr cap. Scale is not 1:1. */
-const AV1_BITRATE_SCALE = 0.5;
 const MUX_OVERHEAD_BYTES = 8_000_000;
 const MIN_VIDEO_BPS = 800_000;
 const MAX_VIDEO_BPS = 300_000_000;
 const BITMAP_SUBTITLE_BPS = 40_000;
 
-export type AudioBitrateTrack = { codec: string; channels: number; title?: string };
-export type SubtitleSizeTrack = { codec: string };
+export type AudioBitrateTrack = { codec: string; channels: number; title?: string; bitrateBps?: number; sizeBytes?: number };
+export type SubtitleSizeTrack = { codec: string; bitrateBps?: number; sizeBytes?: number };
 
 export function exceedsSizeCap(sizePerHourGb: number, cap: number): boolean {
   return sizePerHourGb > cap * (1 + SIZE_CAP_TOLERANCE);
@@ -34,7 +32,8 @@ export function aggressiveTargetBytes(previousTargetBytes: number): number {
   return Math.max(1, Math.round(previousTargetBytes * 0.8));
 }
 
-export function typicalAudioBitrateBps(track: { codec: string; channels: number; title?: string }): number {
+export function typicalAudioBitrateBps(track: AudioBitrateTrack): number {
+  if (track.bitrateBps && track.bitrateBps > 0) return track.bitrateBps;
   const codec = `${track.codec} ${track.title ?? ""}`.toLowerCase();
   const channels = Math.max(1, track.channels || 2);
   if (/truehd|mlp/.test(codec)) return channels > 6 ? 5_000_000 : 3_000_000;
@@ -54,6 +53,7 @@ export function copiedAudioBitrateBps(tracks: AudioBitrateTrack[]): number {
 }
 
 export function typicalSubtitleBitrateBps(track: SubtitleSizeTrack): number {
+  if (track.bitrateBps && track.bitrateBps > 0) return track.bitrateBps;
   if (/pgs|dvd_sub|dvb_sub|xsub|vobsub|hdmv/i.test(track.codec)) return BITMAP_SUBTITLE_BPS;
   return 0;
 }
@@ -131,6 +131,5 @@ export function videoBitrateForTarget(input: {
     }
     bitrate = MIN_VIDEO_BPS;
   }
-  if (input.codec === "av1") bitrate = Math.max(MIN_VIDEO_BPS, Math.round(bitrate * AV1_BITRATE_SCALE));
   return bitrate;
 }

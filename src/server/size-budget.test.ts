@@ -20,7 +20,7 @@ describe("size budget", () => {
     expect(bitrate / raw).toBeGreaterThan(0.79);
     expect(bitrate / raw).toBeLessThan(0.81);
     const av1 = videoBitrateForTarget({ targetBytes, durationSec, audioBitrateBps: 0, codec: "av1" });
-    expect(av1).toBe(Math.round(bitrate * 0.5));
+    expect(av1).toBe(bitrate);
   });
 
   it("flags a custom size-mode output against the typed target, not only GB/hour", () => {

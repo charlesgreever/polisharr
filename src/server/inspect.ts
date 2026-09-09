@@ -14,6 +14,8 @@ type ProbeStream = {
   pix_fmt?: unknown;
   color_transfer?: unknown;
   side_data_list?: unknown;
+  bit_rate?: unknown;
+  duration?: unknown;
   index?: unknown;
 };
 
@@ -36,6 +38,7 @@ export function parseFfprobe(path: string, sizeBytes: number, probe: Record<stri
     sizeBytes,
     sizePerHourGb: hours > 0 ? sizeBytes / (1024 ** 3) / hours : 0,
     videoCodec: stringOr(video?.codec_name, "unknown"),
+    videoIndex: video ? intOr(video.index, 0) : undefined,
     width,
     height,
     bitDepth: bitDepth(video),
@@ -44,6 +47,8 @@ export function parseFfprobe(path: string, sizeBytes: number, probe: Record<stri
     subtitles,
     hasChapters: Array.isArray(probe.chapters) && probe.chapters.length > 0,
     hasAttachments: streams.some((s) => s.codec_type === "attachment"),
+    attachmentBytes: streams.filter((s) => s.codec_type === "attachment").reduce((sum, s) => sum + intOr(s.size, 0), 0),
+    chapterCount: Array.isArray(probe.chapters) ? probe.chapters.length : 0,
   };
 }
 
@@ -77,6 +82,9 @@ function parseAudio(stream: Record<string, unknown>, i: number): InspectionRepor
     title,
     untagged: language === "und",
     commentary: /comment/i.test(title),
+    bitrateBps: intOr(stream.bit_rate, 0) || undefined,
+    sizeBytes: intOr(tags.NUMBER_OF_BYTES ?? tags.number_of_bytes, 0) || undefined,
+    default: dispositionDefault(stream.disposition),
   };
 }
 
@@ -93,6 +101,10 @@ function parseSub(stream: Record<string, unknown>, i: number): InspectionReport[
     untagged: language === "und",
     forced: disp.forced === 1 || /forced/i.test(title),
     sdh: /sdh|hearing/i.test(title),
+    hearingImpaired: /sdh|hearing/i.test(title) || dispositionHearing(disp),
+    bitrateBps: intOr(stream.bit_rate, 0) || undefined,
+    sizeBytes: intOr(tags.NUMBER_OF_BYTES ?? tags.number_of_bytes, 0) || undefined,
+    default: dispositionDefault(disp),
   };
 }
 
@@ -126,7 +138,8 @@ export function isUntaggedLanguage(value: string | undefined): boolean {
 
 export function normalizeLang(value: string): string {
   const v = value.toLowerCase();
-  if (v === "en" || v === "eng" || v === "english") return "eng";
+  const aliases: Record<string, string> = { en: "eng", english: "eng", fr: "fra", fre: "fra", french: "fra", de: "deu", ger: "deu", german: "deu", es: "spa", spanish: "spa", it: "ita", italian: "ita", pt: "por", portuguese: "por", ja: "jpn", japanese: "jpn", ko: "kor", korean: "kor", zh: "zho", chinese: "zho", ru: "rus", russian: "rus" };
+  if (aliases[v]) return aliases[v];
   if (isUntaggedLanguage(v)) return "und";
   return v.slice(0, 3);
 }
@@ -143,6 +156,7 @@ export function normalizeInspection(raw: Record<string, unknown>, path = "", siz
     sizeBytes: typeof raw.sizeBytes === "number" ? raw.sizeBytes : sizeBytes,
     sizePerHourGb: typeof raw.sizePerHourGb === "number" ? raw.sizePerHourGb : 0,
     videoCodec: typeof raw.videoCodec === "string" ? raw.videoCodec : "unknown",
+    videoIndex: typeof raw.videoIndex === "number" ? raw.videoIndex : undefined,
     width: typeof raw.width === "number" ? raw.width : 0,
     height: typeof raw.height === "number" ? raw.height : 0,
     bitDepth: typeof raw.bitDepth === "number" ? raw.bitDepth : 8,
@@ -151,7 +165,19 @@ export function normalizeInspection(raw: Record<string, unknown>, path = "", siz
     subtitles: Array.isArray(raw.subtitles) ? (raw.subtitles as InspectionReport["subtitles"]).map(withNormalizedLanguage) : [],
     hasChapters: Boolean(raw.hasChapters),
     hasAttachments: Boolean(raw.hasAttachments),
+    attachmentBytes: typeof raw.attachmentBytes === "number" ? raw.attachmentBytes : undefined,
+    chapterCount: typeof raw.chapterCount === "number" ? raw.chapterCount : undefined,
   };
+}
+
+function dispositionDefault(value: unknown): boolean {
+  const d = asRecord(value);
+  return d.default === 1 || d.default === "1";
+}
+
+function dispositionHearing(value: unknown): boolean {
+  const d = asRecord(value);
+  return d.hearing_impaired === 1 || d.hearing_impaired === "1";
 }
 
 function withNormalizedLanguage<T extends { language: string; untagged: boolean; languagePending?: boolean }>(track: T): T {

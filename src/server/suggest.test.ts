@@ -52,6 +52,25 @@ function report(over: Partial<InspectionReport> = {}): InspectionReport {
 }
 
 describe("suggestion engine", () => {
+  it("keeps a usable soundtrack when preferred-language pruning matches nothing", () => {
+    const suggestion = buildSuggestion({
+      item: movie,
+      report: report({
+        audio: [
+          { index: 1, language: "spa", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
+          { index: 2, language: "fra", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
+        ],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+    });
+    expect(suggestion?.keepAudio).toEqual([1]);
+    expect(suggestion?.stripAudio).toEqual([2]);
+  });
   it("does not transcode a file that is only a little over the size cap", () => {
     const suggestion = buildSuggestion({
       item: movie,

@@ -235,6 +235,7 @@ export class JobService {
         },
         onLog: (text) => this.opts.store.appendJobLog(id, text),
         isCancelled: () => this.cancelled.has(id),
+        jobId: id,
       });
       if (this.cancelled.has(id)) {
         await safeUnlink(result.sidecarPath);

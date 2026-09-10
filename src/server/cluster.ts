@@ -175,18 +175,19 @@ export function parseClusterClaim(value: unknown): { ok: true; nodeId: string; f
   return { ok: true, nodeId, freeSlots };
 }
 
-export function parseRemoteProgress(value: unknown): { ok: true; leaseToken: string; phase: string; progress: number; log: string } | { ok: false; error: string } {
+export function parseRemoteProgress(value: unknown): { ok: true; leaseToken: string; phase: string | null; progress: number | null; log: string } | { ok: false; error: string } {
   const raw = record(value);
   const leaseToken = trimString(raw.leaseToken);
   if (!leaseToken) return { ok: false, error: "A lease token is required." };
-  const phase = trimString(raw.phase);
-  const progress = raw.progress;
-  if (typeof progress !== "number" || !Number.isFinite(progress)) return { ok: false, error: "Progress is required." };
+  const phase = trimString(raw.phase) || null;
+  if (raw.progress !== undefined && (typeof raw.progress !== "number" || !Number.isFinite(raw.progress))) {
+    return { ok: false, error: "Progress is invalid." };
+  }
   return {
     ok: true,
     leaseToken,
     phase,
-    progress: Math.min(1, Math.max(0, progress)),
+    progress: typeof raw.progress === "number" ? Math.min(1, Math.max(0, raw.progress)) : null,
     log: typeof raw.log === "string" ? raw.log : "",
   };
 }

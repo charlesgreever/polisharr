@@ -267,7 +267,7 @@ async function createAudioExtras(
   const extras: AudioExtra[] = [];
   for (const op of plan.audio) {
     if (op.op !== "replace_aac" && op.op !== "replace_downmix" && op.op !== "add_downmix") continue;
-    req.onPhase?.("creating_stereo", 0.15);
+    req.onPhase?.("creating_stereo", 0.12);
     const dest = join(workDir, `${Date.now()}-${op.op}-${op.index}.aac`);
     temps.push(dest);
     const sourceTrack = req.report.audio.find((t) => t.index === op.index);
@@ -275,7 +275,15 @@ async function createAudioExtras(
       ? sourceTrack?.channels ?? 2
       : op.channels;
     const language = sourceTrack?.language || "und";
-    await run(req.ffmpeg, audioAacArgs(source, dest, op.index, channels, req.conservative ? "128k" : "160k", language));
+    const durationSec = Math.max(req.report.durationSec, 1);
+    await run(req.ffmpeg, audioAacArgs(source, dest, op.index, channels, req.conservative ? "128k" : "160k", language), {
+      onLog: req.onLog,
+      onChunk: (text) => {
+        const sec = parseFfmpegProgress(text);
+        if (sec != null) req.onPhase?.("creating_stereo", scaleProgress(0.12, 0.28, sec / durationSec));
+      },
+      isCancelled: req.isCancelled,
+    });
     extras.push({ path: dest, language });
   }
   return extras;
@@ -627,6 +635,9 @@ export function audioAacArgs(
     "-nostdin",
     "-loglevel",
     "error",
+    "-nostats",
+    "-progress",
+    "pipe:1",
     "-y",
     "-i",
     source,

@@ -2336,6 +2336,20 @@ describe("public HTTP behavior", () => {
     });
     expect(progressed.status).toBe(200);
     expect(created.store.getJob(queuedBody.id)).toMatchObject({ phase: "transcoding", progress: 0.4 });
+    const logOnly = await created.app.request(`/api/cluster/jobs/${queuedBody.id}/progress`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ leaseToken: claimedBody.jobs[0]?.leaseToken, log: "frame=2\n" }),
+    });
+    expect(logOnly.status).toBe(200);
+    expect(created.store.getJob(queuedBody.id)).toMatchObject({ phase: "transcoding", progress: 0.4 });
+    const oldWorkerLog = await created.app.request(`/api/cluster/jobs/${queuedBody.id}/progress`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ leaseToken: claimedBody.jobs[0]?.leaseToken, phase: "transcoding", progress: 0, log: "frame=3\n" }),
+    });
+    expect(oldWorkerLog.status).toBe(200);
+    expect(created.store.getJob(queuedBody.id)).toMatchObject({ phase: "transcoding", progress: 0.4 });
     const sidecarPath = join(dir, "out.mkv");
     writeFileSync(sidecarPath, "SIDECAR");
     const done = await created.app.request(`/api/cluster/jobs/${queuedBody.id}/complete`, {

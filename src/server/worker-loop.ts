@@ -42,6 +42,7 @@ type Inflight = {
 
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | undefined;
+  private ticking = false;
   private registered = false;
   private status: WorkerJoinStatus = "connecting";
   private detail = "";
@@ -82,6 +83,16 @@ export class WorkerLoop {
   }
 
   async tick(): Promise<void> {
+    if (this.ticking) return;
+    this.ticking = true;
+    try {
+      await this.tickOnce();
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async tickOnce(): Promise<void> {
     if (!this.opts.masterUrl || !this.opts.token) return;
     if (this.registered) {
       const runningJobIds = [...this.inflight.keys()];
@@ -192,8 +203,6 @@ export class WorkerLoop {
         onLog: (text) => {
           void this.postJson(`/api/cluster/jobs/${job.id}/progress`, {
             leaseToken: slot.leaseToken,
-            phase: "transcoding",
-            progress: 0,
             log: text,
           });
         },

@@ -1537,6 +1537,8 @@ describe("ISO remux and custom audio arguments", () => {
     expect(args).toContain("0:1");
     expect(args).toContain("6");
     expect(args).toContain("aac");
+    expect(args).toContain("-progress");
+    expect(args).toContain("pipe:1");
     expect(args.join(" ")).not.toContain("language=");
   });
 

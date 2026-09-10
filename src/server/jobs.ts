@@ -245,16 +245,18 @@ export class JobService {
   progressRemote(
     id: string,
     leaseToken: string,
-    phase: string,
-    progress: number,
+    phase: string | null,
+    progress: number | null,
     log: string,
   ): { ok: true } | { cancelled: true } | { error: string; status: number } {
     const job = this.opts.store.getJob(id);
     if (!job) return { error: "That job does not exist.", status: 404 };
     if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
     if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
-    const nextPhase = jobPhaseOr(phase, job.phase);
-    this.opts.store.updateJob(id, { phase: nextPhase, progress });
+    const logOnly = Boolean(log) && (progress == null || progress === 0);
+    const nextPhase = logOnly || !phase ? job.phase : jobPhaseOr(phase, job.phase);
+    const nextProgress = logOnly || progress == null ? job.progress : progress;
+    this.opts.store.updateJob(id, { phase: nextPhase, progress: nextProgress });
     this.opts.store.renewNodeLeases(job.nodeId ?? "", [id], this.now() + LEASE_MS);
     if (log) this.opts.store.appendJobLog(id, log);
     return { ok: true };

@@ -13,6 +13,7 @@ import {
   parseHardwareInfo,
   parseNodeRole,
   parseRemoteComplete,
+  parseRemoteProgress,
 } from "./cluster.ts";
 
 describe("cluster node identity", () => {
@@ -103,5 +104,13 @@ describe("cluster node identity", () => {
       output: { videoCodec: "hevc", sizeBytes: 3 },
     })).toMatchObject({ ok: true, sidecarPath: "/review/out.mkv" });
     expect(parseRemoteComplete({ leaseToken: "tok" }).ok).toBe(false);
+    expect(parseRemoteProgress({ leaseToken: "tok", log: "frame=1\n" })).toEqual({
+      ok: true,
+      leaseToken: "tok",
+      phase: null,
+      progress: null,
+      log: "frame=1\n",
+    });
+    expect(parseRemoteProgress({ leaseToken: "tok", phase: "transcoding", progress: 0.4 }).ok).toBe(true);
   });
 });

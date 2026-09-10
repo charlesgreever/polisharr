@@ -13,6 +13,8 @@ import { effectiveWriteMode, profileAssignmentEligible } from "./types.ts";
 import { isoInspectionLooksStale, normalizeInspection } from "./inspect.ts";
 import { refreshAndRenameArr } from "./arr.ts";
 import { encodeNeedFromPlan, LEASE_MS, nodeCanEncode, type RemoteJobDocument } from "./cluster.ts";
+import { encodeApiLabel } from "./hardware.ts";
+import { isArrSearchOnly } from "./arr-search.ts";
 
 export type EnqueueOptions = {
   runNow?: boolean;
@@ -57,6 +59,17 @@ export class JobService {
     return this.opts.localNodeId?.() ?? this.opts.store.localNodeId();
   }
 
+  private reviewProvenance(job: Job): Pick<ReviewItem, "nodeName" | "encodeApi" | "gpuName" | "encodeMs"> {
+    const node = this.opts.store.getNode(job.nodeId ?? job.assignedNodeId ?? "")
+      ?? this.opts.store.getNode(this.localNodeId());
+    return {
+      nodeName: node?.name ?? null,
+      encodeApi: encodeApiLabel(node?.hardware.backend),
+      gpuName: node?.hardware.gpuName ?? null,
+      encodeMs: job.startedAt != null ? Math.max(0, this.now() - job.startedAt) : null,
+    };
+  }
+
   assignedNodeId(override?: string): string {
     const local = this.localNodeId();
     if (override) return override;
@@ -78,7 +91,7 @@ export class JobService {
     if (!item) return { error: "That title is not in the library.", status: 404 };
     const busy = this.enqueueLock(item);
     if (busy) return busy;
-    if (suggestion.actions.includes("search_language") && suggestion.actions.every((action) => action === "search_language")) {
+    if (isArrSearchOnly(suggestion.actions)) {
       return {
         error: "This title needs a Radarr or Sonarr search, not an encode. Open the title page to confirm.",
         status: 400,
@@ -329,6 +342,7 @@ export class JobService {
           tracks: `${output.audio.length} audio / ${output.subtitles.length} subtitles`,
         },
         error: null,
+        ...this.reviewProvenance(job),
       });
       this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
       if (flagged) this.opts.store.addHistory(item.id, "flagged", 0, this.now());
@@ -423,7 +437,13 @@ export class JobService {
       return;
     }
     this.running.add(id);
-    this.opts.store.updateJob(id, { status: "running", phase: "muxing", progress: 0.05, nodeId: this.localNodeId() });
+    this.opts.store.updateJob(id, {
+      status: "running",
+      phase: "muxing",
+      progress: 0.05,
+      nodeId: this.localNodeId(),
+      startedAt: job.startedAt ?? this.now(),
+    });
     try {
       const hardware = await this.opts.hardware();
       const resolved = resolvePlan(job.plan, job.writeMode);
@@ -514,6 +534,7 @@ export class JobService {
           tracks: `${result.output.audio.length} audio / ${result.output.subtitles.length} subtitles`,
         },
         error: null,
+        ...this.reviewProvenance(job),
       });
       this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1 });
       if (flagged) this.opts.store.addHistory(item.id, "flagged", 0, this.now());

@@ -2,7 +2,7 @@ import type { ArrKind, SizeCaps, SizeCategory } from "./types.ts";
 import { DEFAULT_SIZE_CAPS } from "./types.ts";
 
 const RADARR_CATEGORIES: SizeCategory[] = ["movie1080p", "movie4kSdr", "movie4kHdr"];
-const SONARR_CATEGORIES: SizeCategory[] = ["tv1080p", "tv4k"];
+const SONARR_CATEGORIES: SizeCategory[] = ["tv1080p", "tv4k", "tv4kHdr"];
 
 export const PROFILE_NAMES: Record<SizeCategory, string> = {
   movie1080p: "Polisharr Movie 1080p",
@@ -10,6 +10,7 @@ export const PROFILE_NAMES: Record<SizeCategory, string> = {
   movie4kHdr: "Polisharr Movie 4K HDR",
   tv1080p: "Polisharr TV 1080p",
   tv4k: "Polisharr TV 4K",
+  tv4kHdr: "Polisharr TV 4K HDR",
 };
 
 export type ProfilePreview = {
@@ -297,7 +298,7 @@ function containsAllowedQuality(raw: unknown): boolean {
 function categoryAllowsQuality(category: SizeCategory, qualityName: string): boolean {
   const name = qualityName.toLowerCase();
   if (name.includes("remux")) return false;
-  const is4k = category === "movie4kSdr" || category === "movie4kHdr" || category === "tv4k";
+  const is4k = category === "movie4kSdr" || category === "movie4kHdr" || category === "tv4k" || category === "tv4kHdr";
   return is4k ? /2160|4k|uhd/.test(name) : !/2160|4k|uhd/.test(name);
 }
 

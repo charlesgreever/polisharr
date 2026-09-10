@@ -302,7 +302,7 @@ export function TitlePage() {
           <button
             className="btn mt-1"
             type="button"
-            disabled={locked}
+            disabled={locked || item.suggestion.actions.every((action) => action === "search_language" || action === "search_release")}
             onClick={() => void api.queue({ itemId: item.id, assignedNodeId: encodeNodeId || undefined }).then(() => setMsg("Bulk plan queued.")).catch((e: Error) => setMsg(e.message))}
           >
             Queue suggested work
@@ -591,6 +591,20 @@ export function TitlePage() {
             }}
           >
             {`Ask ${arrName} to search for a preferred-language copy`}
+          </button>
+        )}
+        {(report?.doviProfile === 5 || (report?.hdr === "dolby_vision" && report?.doviCompatId === 0)) && (
+          <button
+            className="btn-secondary"
+            type="button"
+            onClick={() => {
+              if (!window.confirm(`This is Dolby Vision Profile 5. ${arrName} will remove the current file and search for an HDR10 or Dolby Vision Profile 8 release.`)) return;
+              void api.searchPreferred(id)
+                .then(() => setMsg(`${arrName} will search for a different release.`))
+                .catch((e: Error) => setMsg(e.message));
+            }}
+          >
+            {`Ask ${arrName} to search for a different release`}
           </button>
         )}
       </Section>

@@ -10,6 +10,10 @@ export type PreferredLanguageSearch = {
   episodeFileId: number | null;
 };
 
+export function isArrSearchOnly(actions: string[]): boolean {
+  return actions.length > 0 && actions.every((action) => action === "search_language" || action === "search_release");
+}
+
 export function soleNonPreferredAudio(
   audio: InspectionReport["audio"],
   preferred: string,

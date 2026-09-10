@@ -13,8 +13,8 @@ export type JobPhase =
   | "finishing"
   | "idle";
 export type ReviewStatus = "pending" | "keeping" | "discarding";
-export type SizeCategory = "movie1080p" | "movie4kSdr" | "movie4kHdr" | "tv1080p" | "tv4k";
-export type SuggestionAction = "transcode" | "remux" | "tracks" | "add_stereo" | "search_language";
+export type SizeCategory = "movie1080p" | "movie4kSdr" | "movie4kHdr" | "tv1080p" | "tv4k" | "tv4kHdr";
+export type SuggestionAction = "transcode" | "remux" | "tracks" | "add_stereo" | "search_language" | "search_release";
 export type VideoTarget = "hevc" | "av1";
 
 export function parseVideoTarget(value: unknown): VideoTarget | null {
@@ -36,6 +36,7 @@ export type SizeCaps = {
   movie4kHdr: number;
   tv1080p: number;
   tv4k: number;
+  tv4kHdr: number;
 };
 
 export type SuggestionDefaults = {
@@ -57,6 +58,7 @@ export const DEFAULT_SIZE_CAPS: SizeCaps = {
   movie4kHdr: 8,
   tv1080p: 1.0,
   tv4k: 4.0,
+  tv4kHdr: 6.0,
 };
 
 export const DEFAULT_SUGGESTION_DEFAULTS: SuggestionDefaults = {
@@ -173,6 +175,8 @@ export type InspectionReport = {
   height: number;
   bitDepth: number;
   hdr: "none" | "hdr10" | "hdr10plus" | "dolby_vision";
+  doviProfile?: number | null;
+  doviCompatId?: number | null;
   audio: AudioTrack[];
   subtitles: SubtitleTrack[];
   hasChapters: boolean;
@@ -265,6 +269,7 @@ export type Job = {
   promoteError: string | null;
   assignedNodeId: string | null;
   nodeId: string | null;
+  startedAt: number | null;
   assignedNodeName?: string | null;
   waitingForNode?: boolean;
 };
@@ -282,6 +287,10 @@ export type ReviewItem = {
   source: SuggestionNowAfter & { durationSec: number; tracks: string };
   sidecar: SuggestionNowAfter & { durationSec: number; tracks: string };
   error: string | null;
+  nodeName?: string | null;
+  encodeApi?: string | null;
+  gpuName?: string | null;
+  encodeMs?: number | null;
 };
 
 export type HistoryRow = {
@@ -300,6 +309,7 @@ export type HardwareInfo = {
   av1: boolean;
   reason: string | null;
   vaapiDevice?: string | null;
+  gpuName?: string | null;
 };
 
 export type HomePayload = {

@@ -215,6 +215,7 @@ export class Store {
     this.ensureColumn("jobs", "node_id", "TEXT");
     this.ensureColumn("jobs", "lease_until", "INTEGER");
     this.ensureColumn("jobs", "lease_token", "TEXT");
+    this.ensureColumn("jobs", "started_at", "INTEGER");
     this.ensureColumn("library_items", "arr_series_id", "INTEGER");
     this.ensureColumn("library_items", "arr_episode_file_id", "INTEGER");
     this.ensureColumn("library_items", "first_seen_at", "INTEGER NOT NULL DEFAULT 0");
@@ -839,7 +840,7 @@ export class Store {
     return { walking: row.walking === 1, pending: row.pending, inspected: row.inspected, failed: row.failed };
   }
 
-  insertJob(job: Omit<Job, "displayTitle" | "writeMode" | "promoteError" | "assignedNodeId" | "nodeId"> & {
+  insertJob(job: Omit<Job, "displayTitle" | "writeMode" | "promoteError" | "assignedNodeId" | "nodeId" | "startedAt"> & {
     plan: unknown;
     position?: number;
     writeMode?: "sidecar" | "direct";
@@ -884,12 +885,13 @@ export class Store {
     promoteError: string | null;
     writeMode: "sidecar" | "direct";
     nodeId: string | null;
+    startedAt: number | null;
   }>): void {
     const current = this.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!current) return;
     this.db
       .prepare(
-        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=? WHERE id=?",
+        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=? WHERE id=?",
       )
       .run(
         patch.status ?? current.status,
@@ -901,6 +903,7 @@ export class Store {
         patch.writeMode ?? current.write_mode ?? "sidecar",
         patch.promoteError === undefined ? current.promote_error : patch.promoteError,
         patch.nodeId === undefined ? current.node_id : patch.nodeId,
+        patch.startedAt === undefined ? current.started_at : patch.startedAt,
         id,
       );
   }
@@ -1023,12 +1026,12 @@ export class Store {
       const claimed: Array<(Job & { plan: JobPlan; leaseToken: string })> = [];
       const take = this.db.prepare(
         `UPDATE jobs SET status = 'running', phase = 'muxing', progress = 0.05, error = NULL,
-           node_id = ?, lease_until = ?, lease_token = ?
+           node_id = ?, lease_until = ?, lease_token = ?, started_at = COALESCE(started_at, ?)
          WHERE id = ? AND status = 'queued' AND assigned_node_id = ?`,
       );
       for (const row of rows) {
         const token = randomUUID();
-        const result = take.run(nodeId, now + leaseMs, token, row.id, nodeId);
+        const result = take.run(nodeId, now + leaseMs, token, now, row.id, nodeId);
         if (result.changes !== 1) continue;
         const job = this.getJob(row.id);
         if (job) claimed.push({ ...job, leaseToken: token });
@@ -1109,7 +1112,14 @@ export class Store {
         row.flagReason,
         row.sourcePath,
         row.sidecarPath,
-        JSON.stringify({ source: row.source, sidecar: row.sidecar }),
+        JSON.stringify({
+          source: row.source,
+          sidecar: row.sidecar,
+          nodeName: row.nodeName ?? null,
+          encodeApi: row.encodeApi ?? null,
+          gpuName: row.gpuName ?? null,
+          encodeMs: row.encodeMs ?? null,
+        }),
         row.error,
       );
   }
@@ -1402,12 +1412,20 @@ function mapJob(row: Record<string, unknown>): Job & { plan: JobPlan } {
     promoteError: row.promote_error == null ? null : String(row.promote_error),
     assignedNodeId: row.assigned_node_id == null || row.assigned_node_id === "" ? null : String(row.assigned_node_id),
     nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
+    startedAt: row.started_at == null ? null : Number(row.started_at),
     plan: JSON.parse(String(row.plan)) as JobPlan,
   };
 }
 
 function mapReview(row: Record<string, unknown>): ReviewItem {
-  const compare = JSON.parse(String(row.compare)) as { source: ReviewItem["source"]; sidecar: ReviewItem["sidecar"] };
+  const compare = JSON.parse(String(row.compare)) as {
+    source: ReviewItem["source"];
+    sidecar: ReviewItem["sidecar"];
+    nodeName?: unknown;
+    encodeApi?: unknown;
+    gpuName?: unknown;
+    encodeMs?: unknown;
+  };
   return {
     id: String(row.id),
     jobId: String(row.job_id),
@@ -1421,6 +1439,10 @@ function mapReview(row: Record<string, unknown>): ReviewItem {
     source: compare.source,
     sidecar: compare.sidecar,
     error: row.error == null ? null : String(row.error),
+    nodeName: typeof compare.nodeName === "string" ? compare.nodeName : null,
+    encodeApi: typeof compare.encodeApi === "string" ? compare.encodeApi : null,
+    gpuName: typeof compare.gpuName === "string" ? compare.gpuName : null,
+    encodeMs: typeof compare.encodeMs === "number" && Number.isFinite(compare.encodeMs) ? compare.encodeMs : null,
   };
 }
 
@@ -1542,13 +1564,14 @@ function suggestionWhere(query: string, filters: SuggestionFilters, settings: Se
   if (filters.overCap !== undefined) {
     const comparison = filters.overCap ? ">" : "<=";
     conditions.push(`CAST(json_extract(ins.report, '$.sizePerHourGb') AS REAL) ${comparison} CASE json_extract(s.payload, '$.category')
-      WHEN 'movie1080p' THEN ? WHEN 'movie4kSdr' THEN ? WHEN 'movie4kHdr' THEN ? WHEN 'tv1080p' THEN ? WHEN 'tv4k' THEN ? END`);
+      WHEN 'movie1080p' THEN ? WHEN 'movie4kSdr' THEN ? WHEN 'movie4kHdr' THEN ? WHEN 'tv1080p' THEN ? WHEN 'tv4k' THEN ? WHEN 'tv4kHdr' THEN ? END`);
     params.push(
       settings.sizeCaps.movie1080p,
       settings.sizeCaps.movie4kSdr,
       settings.sizeCaps.movie4kHdr,
       settings.sizeCaps.tv1080p,
       settings.sizeCaps.tv4k,
+      settings.sizeCaps.tv4kHdr,
     );
   }
   if (filters.extraTracks !== undefined) {

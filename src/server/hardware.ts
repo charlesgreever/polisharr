@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { promisify } from "node:util";
 import type { HardwareBackend, HardwareInfo } from "./types.ts";
 
@@ -56,7 +56,8 @@ export function detectHardware(ffmpeg = "ffmpeg", devices: () => EncodeDevices =
   return async () => {
     try {
       const { stderr, stdout } = await execFileAsync(ffmpeg, ["-hide_banner", "-encoders"], { timeout: 8000 });
-      return chooseBackend(parseEncoders(`${stdout}\n${stderr}`), devices());
+      const info = chooseBackend(parseEncoders(`${stdout}\n${stderr}`), devices());
+      return { ...info, gpuName: await probeGpuName() };
     } catch (error) {
       return {
         backend: "none",
@@ -65,9 +66,47 @@ export function detectHardware(ffmpeg = "ffmpeg", devices: () => EncodeDevices =
         av1: false,
         reason: error instanceof Error ? error.message : "ffmpeg is not available.",
         vaapiDevice: null,
+        gpuName: null,
       };
     }
   };
+}
+
+const PCI_GPU_NAMES: Record<string, string> = {
+  "0x8086:0xe223": "Intel Battlemage G31",
+  "0x1002:0x164e": "AMD Raphael",
+};
+
+export function gpuNameFromPci(vendor: string, device: string): string | null {
+  const key = `${vendor.trim().toLowerCase()}:${device.trim().toLowerCase()}`;
+  if (PCI_GPU_NAMES[key]) return PCI_GPU_NAMES[key];
+  if (vendor.trim().toLowerCase() === "0x8086") return "Intel GPU";
+  if (vendor.trim().toLowerCase() === "0x1002") return "AMD GPU";
+  if (vendor.trim().toLowerCase() === "0x10de") return "NVIDIA GPU";
+  return null;
+}
+
+export function encodeApiLabel(backend: HardwareBackend | undefined): string | null {
+  if (backend === "cuda") return "CUDA";
+  if (backend === "vaapi") return "VAAPI";
+  return null;
+}
+
+export async function probeGpuName(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("nvidia-smi", ["--query-gpu=name", "--format=csv,noheader"], { timeout: 3000 });
+    const name = stdout.split("\n").map((line) => line.trim()).find(Boolean);
+    if (name) return name;
+  } catch {
+    // No NVIDIA tool on this node.
+  }
+  try {
+    const vendor = readFileSync("/sys/class/drm/renderD128/device/vendor", "utf8");
+    const device = readFileSync("/sys/class/drm/renderD128/device/device", "utf8");
+    return gpuNameFromPci(vendor, device);
+  } catch {
+    return null;
+  }
 }
 
 function listRenderNodes(): string[] {

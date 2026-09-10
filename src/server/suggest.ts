@@ -18,6 +18,7 @@ import {
   typicalAudioBitrateBps,
 } from "./size-budget.ts";
 import { soleNonPreferredAudio } from "./arr-search.ts";
+import { isDolbyVisionProfile5 } from "./inspect.ts";
 
 export type SuggestInput = {
   item: LibraryItem;
@@ -37,7 +38,10 @@ export function sizeCategory(item: LibraryItem, report: InspectionReport): SizeC
   const isTv = item.type === "episode";
   const fourK = is4k(item, report);
   const hdr = report.hdr !== "none" || /hdr|dolby|dv/i.test(`${item.quality} ${item.resolution}`);
-  if (isTv) return fourK ? "tv4k" : "tv1080p";
+  if (isTv) {
+    if (!fourK) return "tv1080p";
+    return hdr ? "tv4kHdr" : "tv4k";
+  }
   if (fourK) return hdr ? "movie4kHdr" : "movie4kSdr";
   return "movie1080p";
 }
@@ -123,10 +127,12 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
   const target: VideoTarget = input.videoTarget === "av1" && input.av1Available ? "av1" : "hevc";
   const transcodeForCap = settings.suggestionDefaults.transcodeToSizeCap && overCap && !audioBound && (belowHevc || /hevc|h265/.test(codec));
   const transcodeForCodec = settings.suggestionDefaults.transcodeBelowHevc && codecIsBelowEncodeTarget(report.videoCodec, target);
-  const transcode =
+  const wantTranscode =
     !alreadyAv1 &&
     !input.sizeExempt &&
     (input.forceTranscode || transcodeForCap || transcodeForCodec);
+  const skipDvP5 = isDolbyVisionProfile5(report);
+  const transcode = wantTranscode && !skipDvP5;
   const remux = (settings.suggestionDefaults.convertMp4ToMkv && /\.mp4$/i.test(item.path))
     || (settings.suggestionDefaults.convertIsoToMkv && /\.iso$/i.test(item.path));
 
@@ -137,6 +143,7 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
   if (addStereo) actions.push("add_stereo");
   const searchLanguage = settings.suggestionDefaults.searchPreferredLanguage && onlyWrongLanguage;
   if (searchLanguage && actions.length === 0) actions.push("search_language");
+  if (skipDvP5 && !actions.includes("search_release")) actions.push("search_release");
   if (actions.length === 0) return null;
 
   const reasons: string[] = [];
@@ -169,7 +176,10 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
   if (transcode && input.hardwareAvailable === false) {
     warnings.push("Hardware encode is unavailable. This transcode will fail until CUDA or VAAPI is available.");
   }
-  if (transcode && (report.hdr === "dolby_vision" || report.hdr === "hdr10plus")) {
+  if (skipDvP5) {
+    warnings.push("This file is Dolby Vision Profile 5. Re-encoding it as ordinary HDR makes the picture look yellow.");
+    reasons.push("Ask Radarr or Sonarr to search for an HDR10 or Dolby Vision Profile 8 release.");
+  } else if (transcode && (report.hdr === "dolby_vision" || report.hdr === "hdr10plus")) {
     warnings.push("Dolby Vision or HDR10+ metadata may be lost when this file is re-encoded.");
   }
   if (audioBound && (overCap || transcode)) {

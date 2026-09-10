@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deleteArrFileAndSearch, soleNonPreferredAudio } from "./arr-search.ts";
+import { deleteArrFileAndSearch, isArrSearchOnly, soleNonPreferredAudio } from "./arr-search.ts";
 
 describe("preferred-language Arr search", () => {
   it("detects a single non-preferred soundtrack and ignores und and mixed files", () => {
@@ -16,6 +16,9 @@ describe("preferred-language Arr search", () => {
       { index: 1, language: "deu", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false },
       { index: 2, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
     ], "eng")).toBe(false);
+    expect(isArrSearchOnly(["search_release"])).toBe(true);
+    expect(isArrSearchOnly(["search_language"])).toBe(true);
+    expect(isArrSearchOnly(["search_release", "add_stereo"])).toBe(false);
   });
 
   it("deletes the Radarr file then starts a search", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseBackend, parseEncoders } from "./hardware.ts";
+import { chooseBackend, encodeApiLabel, gpuNameFromPci, parseEncoders } from "./hardware.ts";
 
 const jellyfinBoth = `
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
@@ -56,6 +56,16 @@ describe("hardware backend choice", () => {
     expect(hw.backend).toBe("cuda");
     expect(hw.cuda).toBe(true);
     expect(hw.av1).toBe(true);
+  });
+
+  it("names PCI devices and maps backends to CUDA or VAAPI, not QuickSync", () => {
+    expect(gpuNameFromPci("0x8086", "0xe223")).toBe("Intel Battlemage G31");
+    expect(gpuNameFromPci("0x1002", "0x164e")).toBe("AMD Raphael");
+    expect(gpuNameFromPci("0x8086", "0x1234")).toBe("Intel GPU");
+    expect(encodeApiLabel("cuda")).toBe("CUDA");
+    expect(encodeApiLabel("vaapi")).toBe("VAAPI");
+    expect(encodeApiLabel("vaapi")).not.toBe("QuickSync");
+    expect(encodeApiLabel("none")).toBeNull();
   });
 
   it("fails closed when encoders are listed but no GPU device is visible", () => {

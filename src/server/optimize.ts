@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { copyFile, mkdir, stat, statfs, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
-import { isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
+import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
 import type { ExecutablePlan, InspectionReport, Suggestion, WriteMode } from "./types.ts";
 import { keepWritesLanguage, planHasVideoTranscode } from "./types.ts";
 import {
@@ -190,6 +190,9 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
             ? encodeReport
             : req.report;
         if (!shouldSkipSizeEncode(plan, durationReport)) {
+          if (isDolbyVisionProfile5(req.report)) {
+            throw new Error("This file is Dolby Vision Profile 5. Re-encoding it as ordinary HDR makes the picture look yellow. Keep the original video.");
+          }
           if (req.backend === "none") {
             throw new Error("Hardware encode is unavailable. Polisharr will not fall back to a software encode.");
           }

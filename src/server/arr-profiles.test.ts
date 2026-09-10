@@ -8,7 +8,7 @@ import {
   syncProfiles,
 } from "./arr-profiles.ts";
 
-const caps = { movie1080p: 2.5, movie4kSdr: 6, movie4kHdr: 8, tv1080p: 1, tv4k: 4 };
+const caps = { movie1080p: 2.5, movie4kSdr: 6, movie4kHdr: 8, tv1080p: 1, tv4k: 4, tv4kHdr: 6 };
 
 const ultraHd = {
   id: 5,
@@ -27,6 +27,7 @@ describe("Arr profile previews", () => {
     const previews = profilePreviews(caps);
     expect(previews[0]?.name).toMatch(/^Polisharr /);
     expect(previews.find((p) => p.category === "movie1080p")?.mbPerMin).toBe(42.7);
+    expect(previews.find((p) => p.category === "tv4kHdr")?.name).toBe("Polisharr TV 4K HDR");
   });
 
   it("prefers an existing no-upgrade profile that already allows the current quality", () => {
@@ -148,7 +149,7 @@ describe("Arr profile HTTP", () => {
         return new Response(JSON.stringify({ id: 21, name: "Polisharr TV 1080p", upgradeAllowed: false, items: [] }), { status: 200 });
       }) as typeof fetch,
     });
-    expect(result.created).toEqual(["Polisharr TV 1080p", "Polisharr TV 4K"]);
+    expect(result.created).toEqual(["Polisharr TV 1080p", "Polisharr TV 4K", "Polisharr TV 4K HDR"]);
     expect(posted).toEqual(result.created);
     expect(posted.some((name) => /Movie/.test(name))).toBe(false);
   });

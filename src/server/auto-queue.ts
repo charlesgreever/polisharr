@@ -1,4 +1,5 @@
 import type { LibraryItem, Settings, Suggestion } from "./types.ts";
+import { isArrSearchOnly } from "./arr-search.ts";
 
 export function shouldQueueNewImport(input: {
   settings: Settings;
@@ -10,9 +11,7 @@ export function shouldQueueNewImport(input: {
   if (settings.queueNewImportsSince <= 0) return false;
   if (!settings.languageConfirmed || !settings.reviewPath.trim()) return false;
   if (!suggestion) return false;
-  if (suggestion.actions.includes("search_language") && suggestion.actions.every((action) => action === "search_language")) {
-    return false;
-  }
+  if (isArrSearchOnly(suggestion.actions)) return false;
   const kept = item.keptSizeBytes ?? 0;
   if (kept > 0 && item.sizeBytes === kept) return false;
   return (item.fileChangedAt ?? 0) >= settings.queueNewImportsSince;

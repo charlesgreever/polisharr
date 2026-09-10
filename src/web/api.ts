@@ -174,7 +174,7 @@ export type SeriesSummary = {
 
 export type FirstRun = { hasAdmin: boolean; languageConfirmed: boolean; hasReviewPath: boolean; hasArr: boolean; complete: boolean };
 export type HardwareBackend = "cuda" | "vaapi" | "none";
-export type Hardware = { backend: HardwareBackend; cuda: boolean; vaapi: boolean; av1: boolean; reason: string | null; vaapiDevice?: string | null };
+export type Hardware = { backend: HardwareBackend; cuda: boolean; vaapi: boolean; av1: boolean; reason: string | null; vaapiDevice?: string | null; gpuName?: string | null };
 export type ClusterNode = {
   id: string;
   name: string;
@@ -325,6 +325,10 @@ export type ReviewRow = {
   source: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
   sidecar: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
   error: string | null;
+  nodeName?: string | null;
+  encodeApi?: string | null;
+  gpuName?: string | null;
+  encodeMs?: number | null;
 };
 export type HistoryRow = { id: string; displayTitle: string; outcome: "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched"; bytesSaved: number; createdAt: number };
 export type HomePayload = {
@@ -360,6 +364,8 @@ export type InspectionReport = {
   height: number;
   bitDepth: number;
   hdr: string;
+  doviProfile?: number | null;
+  doviCompatId?: number | null;
   sizeBytes: number;
   durationSec: number;
   sizePerHourGb?: number;

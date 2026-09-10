@@ -2381,6 +2381,12 @@ describe("public HTTP behavior", () => {
     expect(created.store.getJob(queuedBody.id)?.status).toBe("succeeded");
     expect(created.store.listReviews()).toHaveLength(1);
     expect(created.store.listReviews()[0]?.sidecarPath).toBe(sidecarPath);
+    expect(created.store.listReviews()[0]).toMatchObject({
+      nodeName: "5090",
+      encodeApi: "CUDA",
+    });
+    expect(created.store.listReviews()[0]?.encodeApi).not.toBe("QuickSync");
+    expect(created.store.listReviews()[0]?.encodeMs).toBeGreaterThanOrEqual(0);
     const listed = (await (await created.app.request("/api/jobs", { headers })).json()) as {
       items: Array<{ id: string; assignedNodeName: string | null }>;
     };

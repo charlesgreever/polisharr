@@ -25,7 +25,7 @@ import { deleteArrFileAndSearch, soleNonPreferredAudio } from "./arr-search.ts";
 import { displayTitle, matchesTitleSearch } from "./titles.ts";
 import { JobService } from "./jobs.ts";
 import { ffmpegOptimizer, isoRemuxInputs, toolLocaleEnv, type Optimizer } from "./optimize.ts";
-import { isIsoPath } from "./inspect.ts";
+import { isDolbyVisionProfile5, isIsoPath } from "./inspect.ts";
 import {
   applyLanguageToReport,
   detectLanguageClip,
@@ -856,8 +856,11 @@ export function createApp(opts: AppOptions) {
       return c.json({ error: "Finish or cancel the current work on this title first." }, 409);
     }
     const report = store.getInspection(item.id);
-    if (!report || !soleNonPreferredAudio(report.audio, store.getSettings().preferredLanguage)) {
-      return c.json({ error: "This title does not have a single non-preferred audio track." }, 400);
+    if (!report) return c.json({ error: "This file has not been inspected yet, or the path is unreadable." }, 400);
+    const languageSearch = soleNonPreferredAudio(report.audio, store.getSettings().preferredLanguage);
+    const doviP5Search = isDolbyVisionProfile5(report);
+    if (!languageSearch && !doviP5Search) {
+      return c.json({ error: "This title does not need a Radarr or Sonarr search." }, 400);
     }
     const inst = store.getInstance(item.instanceId);
     if (!inst || (inst.kind !== "radarr" && inst.kind !== "sonarr") || !inst.secret) {

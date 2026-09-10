@@ -14,6 +14,7 @@ describe("settings boundary", () => {
   });
 
   it("normalizes persisted values into closed domain types", () => {
+    expect(parseStoredSettings({ sizeCaps: { movie1080p: 2.5, movie4kSdr: 6, movie4kHdr: 8, tv1080p: 1, tv4k: 4 } }).sizeCaps.tv4kHdr).toBe(6);
     expect(parseStoredSettings({ writeMode: "erase", videoTarget: "vp9", concurrency: 0 })).toMatchObject({
       writeMode: "sidecar",
       videoTarget: "hevc",

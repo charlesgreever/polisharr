@@ -106,6 +106,68 @@ describe("suggestion engine", () => {
     expect(suggestion?.warning).toMatch(/Dolby Vision/);
   });
 
+  it("scores a 2160p HDR episode against the TV 4K HDR cap, not the SDR TV 4K cap", () => {
+    const episode: LibraryItem = {
+      ...movie,
+      id: "e1",
+      instanceId: "sonarr",
+      instanceName: "Sonarr",
+      type: "episode",
+      title: "Driftmark",
+      showTitle: "House of the Dragon",
+      season: 1,
+      episode: 7,
+      quality: "Bluray-2160p",
+    };
+    expect(sizeCategory(episode, report({ hdr: "hdr10", sizePerHourGb: 5 }))).toBe("tv4kHdr");
+    expect(sizeCategory(episode, report({ hdr: "none", sizePerHourGb: 5, bitDepth: 8 }))).toBe("tv4k");
+    const hdr = buildSuggestion({
+      item: episode,
+      report: report({ hdr: "hdr10", videoCodec: "hevc", sizePerHourGb: 9, audio: [
+        { index: 1, language: "eng", channels: 8, codec: "truehd", title: "", untagged: false, commentary: false },
+      ], subtitles: [] }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: false,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+    });
+    expect(hdr?.category).toBe("tv4kHdr");
+    expect(hdr?.after.sizePerHourGb).toBe(6);
+  });
+
+  it("does not transcode Dolby Vision Profile 5 because the picture would look yellow", () => {
+    const episode: LibraryItem = {
+      ...movie,
+      id: "e1",
+      type: "episode",
+      title: "A Son for a Son",
+      showTitle: "House of the Dragon",
+    };
+    const suggestion = buildSuggestion({
+      item: episode,
+      report: report({
+        hdr: "dolby_vision",
+        doviProfile: 5,
+        doviCompatId: 0,
+        videoCodec: "hevc",
+        sizePerHourGb: 9,
+        audio: [{ index: 1, language: "eng", channels: 6, codec: "eac3", title: "", untagged: false, commentary: false }],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: false,
+      excluded: false,
+      videoTarget: "av1",
+      av1Available: true,
+    });
+    expect(suggestion?.actions ?? []).not.toContain("transcode");
+    expect(suggestion?.actions ?? []).toContain("search_release");
+    expect(suggestion?.warning ?? "").toMatch(/Profile 5/);
+    expect(suggestion?.warning ?? "").toMatch(/yellow/);
+    expect(suggestion?.reasons.some((reason) => /Profile 8|HDR10/.test(reason))).toBe(true);
+  });
+
   it("marks a transcode when no hardware encoder is available", () => {
     const suggestion = buildSuggestion({
       item: movie,

@@ -43,6 +43,8 @@ export function parseFfprobe(path: string, sizeBytes: number, probe: Record<stri
     height,
     bitDepth: bitDepth(video),
     hdr: hdrKind(video, format),
+    doviProfile: doviField(video, "dv_profile"),
+    doviCompatId: doviField(video, "dv_bl_signal_compatibility_id"),
     audio,
     subtitles,
     hasChapters: Array.isArray(probe.chapters) && probe.chapters.length > 0,
@@ -131,6 +133,22 @@ function hdrKind(
   return "none";
 }
 
+function doviField(video: Record<string, unknown> | undefined, key: "dv_profile" | "dv_bl_signal_compatibility_id"): number | null {
+  const list = Array.isArray(video?.side_data_list) ? video.side_data_list : [];
+  for (const raw of list) {
+    const row = asRecord(raw);
+    if (!stringOr(row.side_data_type, "").toLowerCase().includes("dovi")) continue;
+    if (typeof row[key] === "number" && Number.isFinite(row[key])) return row[key];
+  }
+  return null;
+}
+
+/** Profile 5 has no HDR10-compatible base layer. Re-encoding it as YUV/PQ looks yellow. */
+export function isDolbyVisionProfile5(report: Pick<InspectionReport, "hdr" | "doviProfile" | "doviCompatId">): boolean {
+  if (report.doviProfile === 5) return true;
+  return report.hdr === "dolby_vision" && report.doviCompatId === 0;
+}
+
 export function isUntaggedLanguage(value: string | undefined): boolean {
   const v = (value ?? "und").trim().toLowerCase();
   return v === "" || v === "und" || v === "unknown" || v === "any";
@@ -161,6 +179,8 @@ export function normalizeInspection(raw: Record<string, unknown>, path = "", siz
     height: typeof raw.height === "number" ? raw.height : 0,
     bitDepth: typeof raw.bitDepth === "number" ? raw.bitDepth : 8,
     hdr: raw.hdr === "hdr10" || raw.hdr === "hdr10plus" || raw.hdr === "dolby_vision" ? raw.hdr : "none",
+    doviProfile: typeof raw.doviProfile === "number" ? raw.doviProfile : null,
+    doviCompatId: typeof raw.doviCompatId === "number" ? raw.doviCompatId : null,
     audio: Array.isArray(raw.audio) ? (raw.audio as InspectionReport["audio"]).map(withNormalizedLanguage) : [],
     subtitles: Array.isArray(raw.subtitles) ? (raw.subtitles as InspectionReport["subtitles"]).map(withNormalizedLanguage) : [],
     hasChapters: Boolean(raw.hasChapters),

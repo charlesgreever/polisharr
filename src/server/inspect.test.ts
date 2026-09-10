@@ -11,6 +11,7 @@ import {
   parseFfprobe,
   parseFfmpegListing,
   parseListedDuration,
+  isDolbyVisionProfile5,
   pickPlayableVideo,
   trackEditingAvailable,
   unlistedIsoReport,
@@ -43,6 +44,52 @@ describe("parseFfprobe", () => {
     expect(report.bitDepth).toBe(10);
     expect(report.hdr).toBe("dolby_vision");
     expect(report.sizePerHourGb).toBeGreaterThan(8);
+  });
+
+  it("records Dolby Vision Profile 5 from the stream side data", () => {
+    const report = parseFfprobe("/media/p5.mkv", 9_000_000_000, {
+      format: { duration: "3600" },
+      streams: [{
+        codec_type: "video",
+        codec_name: "hevc",
+        width: 3840,
+        height: 1920,
+        pix_fmt: "yuv420p10le",
+        color_range: "pc",
+        side_data_list: [{
+          side_data_type: "DOVI configuration record",
+          dv_profile: 5,
+          dv_bl_signal_compatibility_id: 0,
+        }],
+      }],
+    });
+    expect(report.hdr).toBe("dolby_vision");
+    expect(report.doviProfile).toBe(5);
+    expect(report.doviCompatId).toBe(0);
+    expect(isDolbyVisionProfile5(report)).toBe(true);
+  });
+
+  it("does not treat HDR10-compatible Dolby Vision Profile 8 as Profile 5", () => {
+    const report = parseFfprobe("/media/p8.mkv", 9_000_000_000, {
+      format: { duration: "3600" },
+      streams: [{
+        codec_type: "video",
+        codec_name: "hevc",
+        width: 3840,
+        height: 1920,
+        pix_fmt: "yuv420p10le",
+        color_space: "bt2020nc",
+        color_transfer: "smpte2084",
+        color_primaries: "bt2020",
+        side_data_list: [{
+          side_data_type: "DOVI configuration record",
+          dv_profile: 8,
+          dv_bl_signal_compatibility_id: 1,
+        }],
+      }],
+    });
+    expect(report.doviProfile).toBe(8);
+    expect(isDolbyVisionProfile5(report)).toBe(false);
   });
 
   it("treats muxer language any as untagged", () => {

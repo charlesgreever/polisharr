@@ -4,7 +4,7 @@ import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
-import { FIELD_CONTROL, sizeCapLabel } from "../settings-copy";
+import { FIELD_CONTROL, SIZE_CAP_GRID } from "../settings-copy";
 
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
   const [data, setData] = useState<SettingsPayload | null>(null);
@@ -132,11 +132,35 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       </div>
       <div className="glass space-y-4 p-5">
         <h2 className="font-semibold">Size caps (GB per hour)</h2>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {Object.entries(data.sizeCaps).map(([key, value]) => (
-            <Field key={key} label={sizeCapLabel(key)}>
-              <input className="h-10 w-28" type="number" step="0.1" value={value} onChange={(e) => setData({ ...data, sizeCaps: { ...data.sizeCaps, [key]: Number(e.target.value) } })} />
-            </Field>
+        <p className="help m-0">Automatic Suggestions transcode when the file is above the cap for its kind.</p>
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+          {SIZE_CAP_GRID.map((column) => (
+            <div key={column.heading} className="space-y-3">
+              <h3 className="text-sm font-semibold tracking-wide text-muted">{column.heading}</h3>
+              <div className="grid grid-cols-1 gap-3">
+                {column.cells.map((cell) => {
+                  const preview = (data.profilePreviews ?? []).find((row) => row.category === cell.key);
+                  return (
+                    <Field key={cell.key} label={cell.row}>
+                      <input
+                        className={FIELD_CONTROL}
+                        type="number"
+                        step="0.1"
+                        min="0.1"
+                        value={data.sizeCaps[cell.key] ?? ""}
+                        onChange={(event) => setData({
+                          ...data,
+                          sizeCaps: { ...data.sizeCaps, [cell.key]: Number(event.target.value) },
+                        })}
+                      />
+                      {preview && (
+                        <span className="help m-0">{preview.gbPerHour.toFixed(2)} GB/hr · {preview.mbPerMin.toFixed(1)} MB/min</span>
+                      )}
+                    </Field>
+                  );
+                })}
+              </div>
+            </div>
           ))}
         </div>
         <SuggestionDefaultsSettings
@@ -145,11 +169,6 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           onChange={(suggestionDefaults) => setData({ ...data, suggestionDefaults })}
           onSave={save}
         />
-        <div className="space-y-1 text-sm">
-          {(data.profilePreviews ?? []).map((p) => (
-            <div key={p.category}>{p.name}: {p.gbPerHour.toFixed(2)} GB/hr · {p.mbPerMin.toFixed(1)} MB/min</div>
-          ))}
-        </div>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, formatDuration, formatGbHour, formatSize, type ReviewRow } from "../api";
+import { reviewEncodeLine } from "../review-copy";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
 import { usePagedList } from "../use-paged-list";
@@ -70,7 +71,7 @@ export function ReviewPage() {
         </div>
       </PageHead>
       <Help>
-        Review compares the original and the sidecar: size, codec, duration, tracks, and GB per hour. Keep replaces the library file. Discard throws the sidecar away. Encode smaller queues a tighter size target after a miss. The original stays until Keep finishes. If Polisharr restarts during Keep, the card comes back so you can try again, unless the new file is already in the library. Keep all promotes every waiting sidecar after you confirm.
+        Review compares the original and the sidecar: size, codec, duration, tracks, and GB per hour. The card names the encode node, the GPU API, the device, and how long the job ran. Keep replaces the library file. Discard throws the sidecar away. Encode smaller queues a tighter size target after a miss. The original stays until Keep finishes. If Polisharr restarts during Keep, the card comes back so you can try again, unless the new file is already in the library. Keep all promotes every waiting sidecar after you confirm.
       </Help>
       {confirmAll && (
         <div className="modal-scrim" role="presentation" onClick={() => setConfirmAll(false)}>
@@ -123,6 +124,10 @@ export function ReviewPage() {
                 />
                 <div className="min-w-0 flex-1 space-y-3">
                   <div className="font-semibold">{item.displayTitle}</div>
+                  {(() => {
+                    const line = reviewEncodeLine(item);
+                    return line ? <div className="text-sm text-muted">{line}</div> : null;
+                  })()}
                   {item.flagged && <div className="text-sm text-accent">{item.flagReason}</div>}
                   {item.error && <div className="text-sm text-bad">{item.error}</div>}
                   <div className="contact-sheet">

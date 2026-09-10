@@ -829,10 +829,53 @@ describe("ffmpeg encode arguments", () => {
     expect(args).toContain("hevc_vaapi");
     expect(args).not.toContain("hevc_nvenc");
     expect(args.join(" ")).toContain("vaapi=va:/dev/dri/renderD128");
-    expect(args.join(" ")).toContain("format=nv12,hwupload=extra_hw_frames=64,scale_vaapi=w=1920:h=1080");
+    expect(args.indexOf("-hwaccel")).toBeLessThan(args.indexOf("-i"));
+    expect(args[args.indexOf("-hwaccel") + 1]).toBe("vaapi");
+    expect(args[args.indexOf("-hwaccel_output_format") + 1]).toBe("vaapi");
+    expect(args.join(" ")).toContain("scale_vaapi=w=1920:h=1080:format=nv12");
+    expect(args.join(" ")).not.toContain("hwupload");
     expect(args).toContain("-qp");
     expect(args).not.toContain("yuv420p");
     expect(args).not.toContain("p010le");
+  });
+
+  it("keeps VAAPI decode off for MPEG-4 so the encode still runs", () => {
+    const plan = planFromSuggestion({ ...suggestion, actions: ["transcode"] });
+    const args = encodeArgs(source, "/tmp/out.mkv", {
+      sourcePath: source,
+      reviewDir: "/tmp/review",
+      plan: {
+        ...plan,
+        video: { kind: "size", codec: "hevc", targetBytes: 4_000_000_000, downscale1080p: false, bitDepth: 8 },
+      },
+      report: {
+        sourceSig: "p|1",
+        sourceMethod: "ffprobe",
+        listingState: "complete",
+        durationSec: 3600,
+        sizeBytes: 4_000_000_000,
+        sizePerHourGb: 4,
+        videoCodec: "mpeg4",
+        width: 1920,
+        height: 1080,
+        bitDepth: 8,
+        hdr: "none",
+        audio: [],
+        subtitles: [],
+        hasChapters: false,
+        hasAttachments: false,
+      },
+      target: "hevc",
+      backend: "vaapi",
+      vaapiDevice: "/dev/dri/renderD128",
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      mkvmerge: "mkvmerge",
+      conservative: false,
+    });
+    expect(args).toContain("hevc_vaapi");
+    expect(args).not.toContain("-hwaccel");
+    expect(args.join(" ")).toContain("format=nv12,hwupload=extra_hw_frames=64");
   });
 
   it("converts timed-text subtitles to SubRip instead of copying them", () => {

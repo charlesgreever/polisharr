@@ -662,9 +662,14 @@ export function formatToolError(bin: string, error: { message?: string; stderr?:
 
 // NVDEC on Turing+ (including Ada) actually decodes these. MPEG-4 Part 2 and friends stay on the CPU so the encode still runs.
 const NVDEC_CODECS = new Set(["av1", "h264", "hevc", "mjpeg", "mpeg1video", "mpeg2video", "vc1", "vp8", "vp9"]);
+const VAAPI_DECODE_CODECS = new Set(["av1", "h264", "hevc", "mjpeg", "mpeg1video", "mpeg2video", "vc1", "vp8", "vp9"]);
 
 function usesNvdec(backend: OptimizeRequest["backend"], codec: string): boolean {
   return backend === "cuda" && NVDEC_CODECS.has(codec.toLowerCase());
+}
+
+function usesVaapiDecode(backend: OptimizeRequest["backend"], codec: string): boolean {
+  return backend === "vaapi" && VAAPI_DECODE_CODECS.has(codec.toLowerCase());
 }
 
 function cudaVideoFilter(downscale: boolean, tenBit: boolean): string {
@@ -682,10 +687,15 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   const tenBit = (video && video.kind !== "copy" ? video.bitDepth : req.report.bitDepth) >= 10;
   const downscale = video?.kind !== "copy" && Boolean(video?.downscale1080p);
   const nvdec = usesNvdec(req.backend, req.report.videoCodec);
+  const vaapiDecode = usesVaapiDecode(req.backend, req.report.videoCodec);
   const args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y"];
   if (req.backend === "vaapi") {
     const device = req.vaapiDevice || "/dev/dri/renderD128";
     args.push("-init_hw_device", `vaapi=va:${device}`, "-filter_hw_device", "va");
+    if (vaapiDecode) {
+      // hwaccel flags must precede -i or ffmpeg still decodes on the CPU, then hwupload.
+      args.push("-hwaccel", "vaapi", "-hwaccel_device", "va", "-hwaccel_output_format", "vaapi");
+    }
   } else if (nvdec) {
     // hwaccel flags must precede -i or ffmpeg still decodes on the CPU.
     args.push("-hwaccel", "cuda", "-hwaccel_output_format", "cuda");
@@ -694,9 +704,13 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   args.push("-i", source, "-map", videoMap, "-map", "0:a?", "-map", "0:s?", "-map", "0:t?");
   if (req.backend === "vaapi") {
     const format = tenBit ? "p010" : "nv12";
-    const filters = [`format=${format}`, "hwupload=extra_hw_frames=64"];
-    if (downscale) filters.push("scale_vaapi=w=1920:h=1080");
-    args.push("-vf", filters.join(","));
+    if (vaapiDecode) {
+      args.push("-vf", downscale ? `scale_vaapi=w=1920:h=1080:format=${format}` : `scale_vaapi=format=${format}`);
+    } else {
+      const filters = [`format=${format}`, "hwupload=extra_hw_frames=64"];
+      if (downscale) filters.push("scale_vaapi=w=1920:h=1080");
+      args.push("-vf", filters.join(","));
+    }
   } else if (nvdec) {
     args.push("-vf", cudaVideoFilter(downscale, tenBit));
   } else if (downscale) {

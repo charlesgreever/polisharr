@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { access, stat, unlink } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import type { Store } from "./store.ts";
 import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewItem, Settings, Suggestion } from "./types.ts";
 import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
-import { CancelledError, isExecutablePlan, planFromSuggestion, resolvePlan } from "./optimize.ts";
+import { CancelledError, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
 import { aggressiveTargetBytes, missedOutputTarget } from "./size-budget.ts";
 import { classifyInterruptedKeep, KEEP_INTERRUPTED, SIDECAR_GONE } from "./review-recovery.ts";
 import { clearStagedBackup, promote, promotedPath, recoverStagedReplace, type PromoteInput, type PromoteResult } from "./promote.ts";
@@ -471,24 +471,24 @@ export class JobService {
         nodeId: this.localNodeId(),
       });
       if (this.cancelled.has(id)) {
-        await safeUnlink(result.sidecarPath);
+        await removeReviewArtifact(result.sidecarPath);
         return;
       }
       if (plan.writeMode === "direct") {
         const destPath = promotedPath(item.path, plan);
         if (this.cancelled.has(id)) {
-          await safeUnlink(result.sidecarPath);
+          await removeReviewArtifact(result.sidecarPath);
           return;
         }
         const outcome = await this.promoteOutput(item, result.sidecarPath, report.sizeBytes, result.output.sizeBytes, plan);
         if (this.cancelled.has(id) && !outcome.replaced) {
-          await safeUnlink(result.sidecarPath);
+          await removeReviewArtifact(result.sidecarPath);
           await recoverStagedReplace(destPath);
           if (destPath !== item.path) await recoverStagedReplace(item.path);
           return;
         }
         if (!outcome.replaced) {
-          await safeUnlink(result.sidecarPath);
+          await removeReviewArtifact(result.sidecarPath);
           this.opts.store.updateJob(id, { status: "failed", error: outcome.error ?? "Direct write failed." });
           this.opts.store.addHistory(item.id, "failed", 0, this.now());
           return;
@@ -645,7 +645,7 @@ export class JobService {
 
   private async finalizeCompletedKeep(review: ReviewItem, destPath: string): Promise<void> {
     try {
-      await unlink(review.sidecarPath);
+      await removeReviewArtifact(review.sidecarPath);
     } catch {
       // Sidecar may already have been removed after a successful replace.
     }
@@ -777,11 +777,7 @@ export class JobService {
   private async unlinkSidecarIfLast(review: ReviewItem): Promise<void> {
     const others = this.opts.store.reviewsForSidecarPath(review.sidecarPath).filter((row) => row.id !== review.id);
     if (others.length > 0) return;
-    try {
-      await unlink(review.sidecarPath);
-    } catch {
-      // The sidecar may already be gone.
-    }
+    await removeReviewArtifact(review.sidecarPath);
   }
 
   private deleteReviewsForSidecar(sidecarPath: string): void {
@@ -861,13 +857,7 @@ export function insideWindow(start: string, end: string, now: Date): boolean {
   return cur >= s || cur < e;
 }
 
-async function safeUnlink(path: string): Promise<void> {
-  try {
-    await unlink(path);
-  } catch {
-    // Partial output may not exist.
-  }
-}
+
 
 async function fileExists(path: string): Promise<boolean> {
   try {

@@ -1,4 +1,3 @@
-import { unlink } from "node:fs/promises";
 import {
   CLUSTER_NOT_MASTER,
   CLUSTER_UNKNOWN_NODE,
@@ -8,7 +7,7 @@ import {
   type RemoteJobDocument,
 } from "./cluster.ts";
 import type { HardwareInfo, InspectionReport } from "./types.ts";
-import { CancelledError, isExecutablePlan, resolvePlan, type Optimizer } from "./optimize.ts";
+import { CancelledError, isExecutablePlan, removeReviewArtifact, resolvePlan, type Optimizer } from "./optimize.ts";
 
 export type WorkerJoinStatus = "misconfigured" | "connecting" | "connected" | "unreachable" | "rejected";
 
@@ -210,7 +209,7 @@ export class WorkerLoop {
       });
       slot.sidecarPath = result.sidecarPath;
       if (slot.cancelled || this.inflight.get(job.id)?.cancelled) {
-        await safeUnlink(result.sidecarPath);
+        await removeReviewArtifact(result.sidecarPath);
         return;
       }
       const done = await this.postJson(`/api/cluster/jobs/${job.id}/complete`, {
@@ -218,10 +217,10 @@ export class WorkerLoop {
         sidecarPath: result.sidecarPath,
         output: result.output,
       });
-      if (!done.ok && done.status === 409) await safeUnlink(result.sidecarPath);
+      if (!done.ok && done.status === 409) await removeReviewArtifact(result.sidecarPath);
     } catch (error) {
       if (error instanceof CancelledError || slot.cancelled) {
-        if (slot.sidecarPath) await safeUnlink(slot.sidecarPath);
+        if (slot.sidecarPath) await removeReviewArtifact(slot.sidecarPath);
         return;
       }
       const message = error instanceof Error ? error.message : "The job failed.";
@@ -288,10 +287,4 @@ export function joinMasterPath(masterUrl: string, path: string): string | null {
   }
 }
 
-async function safeUnlink(path: string): Promise<void> {
-  try {
-    await unlink(path);
-  } catch {
-    // The sidecar may already be gone after cancel.
-  }
-}
+

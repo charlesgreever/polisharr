@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,8 @@ import {
   nvencBitrate,
   optimizeSteps,
   toolLocaleEnv,
+  appleDoublePath,
+  removeReviewArtifact,
   parseFfmpegProgress,
   parseMkvmergeProgress,
   planFromSuggestion,
@@ -52,6 +55,25 @@ describe("optimizer work directory", () => {
   it("namespaces temp files per node and job so two GPUs do not share .work", () => {
     expect(optimizerWorkDir("/review", "worker-1", "job-9")).toBe(join("/review", ".work", "worker-1", "job-9"));
     expect(optimizerWorkDir("/review")).toBe(join("/review", ".work"));
+  });
+});
+
+describe("macOS AppleDouble leftovers", () => {
+  it("names the AppleDouble fork beside a sidecar and skips a fork path", () => {
+    expect(appleDoublePath("/mnt/nas/review-path/title-job.mkv")).toBe("/mnt/nas/review-path/._title-job.mkv");
+    expect(appleDoublePath("/mnt/nas/review-path/._title-job.mkv")).toBeNull();
+  });
+
+  it("deletes a sidecar and the macOS AppleDouble fork next to it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-appledouble-"));
+    const sidecar = join(dir, "title-job.mkv");
+    const fork = join(dir, "._title-job.mkv");
+    await writeFile(sidecar, "sidecar");
+    await writeFile(fork, "fork");
+    await removeReviewArtifact(sidecar);
+    expect(existsSync(sidecar)).toBe(false);
+    expect(existsSync(fork)).toBe(false);
+    await rm(dir, { recursive: true, force: true });
   });
 });
 
@@ -138,7 +160,7 @@ describe("mkvmerge arguments", () => {
   });
 
   it("runs mkvmerge with a UTF-8 locale so JSON identify is not truncated", async () => {
-    expect(toolLocaleEnv()).toMatchObject({ LANG: "C.UTF-8", LC_ALL: "C.UTF-8" });
+    expect(toolLocaleEnv()).toMatchObject({ LANG: "C.UTF-8", LC_ALL: "C.UTF-8", COPYFILE_DISABLE: "1" });
     const dir = await mkdtemp(join(tmpdir(), "polisharr-mkvmerge-locale-"));
     try {
       const sourcePath = join(dir, "episode.mkv");
@@ -216,8 +238,11 @@ describe("mkvmerge arguments", () => {
         ffprobe,
         mkvmerge,
         conservative: false,
+        jobId: "job-9",
+        nodeId: "mac-1",
       });
       expect(result.sidecarPath.endsWith(".mkv")).toBe(true);
+      expect(existsSync(optimizerWorkDir(reviewDir, "mac-1", "job-9"))).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

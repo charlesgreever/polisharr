@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdir, stat, statfs, unlink } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { copyFile, mkdir, rmdir, stat, statfs, unlink } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
 import type { ExecutablePlan, InspectionReport, Suggestion, WriteMode } from "./types.ts";
@@ -16,7 +16,36 @@ import {
 const execFileAsync = promisify(execFile);
 
 export function toolLocaleEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
+  // COPYFILE_DISABLE stops macOS from writing AppleDouble `._*` forks next to ffmpeg/mkvmerge output on SMB.
+  return { ...process.env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8", COPYFILE_DISABLE: "1" };
+}
+
+export function appleDoublePath(filePath: string): string | null {
+  const name = basename(filePath);
+  if (!name || name.startsWith("._")) return null;
+  return join(dirname(filePath), `._${name}`);
+}
+
+export async function removeReviewArtifact(path: string): Promise<void> {
+  await tryUnlink(path);
+  const fork = appleDoublePath(path);
+  if (fork) await tryUnlink(fork);
+}
+
+export async function removeEmptyDir(path: string): Promise<void> {
+  try {
+    await rmdir(path);
+  } catch {
+    // Still in use, not empty, or already gone.
+  }
+}
+
+async function tryUnlink(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch {
+    // The file may never have been created.
+  }
 }
 
 export type OptimizeRequest = {
@@ -232,10 +261,11 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
       assertTrackIntegrity(plan, output);
       return { sidecarPath, output };
     } catch (error) {
-      await safeUnlink(sidecarPath);
+      await removeReviewArtifact(sidecarPath);
       throw error;
     } finally {
-      await Promise.all(temps.map(safeUnlink));
+      await Promise.all(temps.map(removeReviewArtifact));
+      await removeEmptyDir(workDir);
     }
   };
 }
@@ -606,7 +636,7 @@ async function remuxIso(
       });
       const remuxed = await probeOutput(ffprobe, dest).catch(() => null);
       if (!remuxed || isoRemuxIsShort(report.durationSec, remuxed.durationSec)) {
-        await safeUnlink(dest);
+        await removeReviewArtifact(dest);
         const minutes = Math.max(1, Math.round((remuxed?.durationSec ?? 0) / 60));
         const listed = Math.max(1, Math.round(report.durationSec / 60));
         lastError = new Error(
@@ -617,7 +647,7 @@ async function remuxIso(
       return;
     } catch (error) {
       lastError = error;
-      await safeUnlink(dest);
+      await removeReviewArtifact(dest);
     }
   }
   throw lastError instanceof Error
@@ -917,10 +947,4 @@ async function probeOutput(ffprobe: string, path: string): Promise<InspectionRep
   return parseFfprobe(path, size, JSON.parse(stdout) as Record<string, unknown>);
 }
 
-async function safeUnlink(path: string): Promise<void> {
-  try {
-    await unlink(path);
-  } catch {
-    // The temp file may never have been created.
-  }
-}
+

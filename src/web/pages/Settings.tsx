@@ -192,7 +192,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       <div className="glass space-y-4 p-5">
         <h2 className="font-semibold">Nodes</h2>
         <p className="help m-0">
-          This container is one encode node: a GPU box that can run optimize jobs. Settings, the library, Review, and Keep stay here. On the always-on host set POLISHARR_ROLE=master so another GPU box can join. Generate a cluster token, then set that token on the worker. The token is shown once.
+          This computer is one encode node: a GPU box that can run optimize jobs. Settings, the library, Review, and Keep stay here. On the always-on host set POLISHARR_ROLE=master so another GPU box can join. Generate a cluster token, then set that token on the worker. The token is shown once. Remove a worker that will not come back. An online worker joins again on its next hello. Move or cancel that node’s waiting jobs first.
         </p>
         {nodes.length > 1 && (
           <Field label="Default encode node">
@@ -256,6 +256,23 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                 >
                   {node.enabled ? "Drain" : "Enable"}
                 </button>
+                {!node.thisNode && (
+                  <button
+                    className="btn-secondary danger h-10"
+                    type="button"
+                    onClick={() => {
+                      void api.deleteNode(node.id).then((payload) => {
+                        setNodes(payload.nodes);
+                        if (data && payload.defaultEncodeNodeId !== data.defaultEncodeNodeId) {
+                          setData({ ...data, defaultEncodeNodeId: payload.defaultEncodeNodeId });
+                        }
+                        setMsg(`${node.name} removed.`);
+                      }).catch((error: Error) => setMsg(error.message));
+                    }}
+                  >
+                    Remove
+                  </button>
+                )}
               </div>
             </li>
           ))}

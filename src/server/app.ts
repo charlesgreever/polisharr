@@ -346,6 +346,28 @@ export function createApp(opts: AppOptions) {
     return c.json({ ok: true, node: publicNode(store.getNode(node.id)!, store.localNodeId()) });
   });
 
+  app.delete("/api/nodes/:id", async (c) => {
+    const thisNode = await refreshLocalNode();
+    const id = c.req.param("id");
+    if (id === thisNode.id) {
+      return c.json({ error: "This computer is the master. It cannot be removed." }, 400);
+    }
+    const node = store.getNode(id);
+    if (!node) return c.json({ error: "That encode node is not registered." }, 404);
+    const jobs = store.listJobs().filter((job) => job.assignedNodeId === id || job.nodeId === id);
+    if (jobs.some((job) => job.status === "running")) {
+      return c.json({ error: "Stop the running job on this node first." }, 409);
+    }
+    if (jobs.some((job) => job.status === "queued" || job.status === "held")) {
+      return c.json({ error: "Move or cancel waiting jobs on this node first." }, 409);
+    }
+    if (store.getSettings().defaultEncodeNodeId === id) {
+      store.saveSettings({ ...store.getSettings(), defaultEncodeNodeId: "" });
+    }
+    store.deleteNode(id);
+    return c.json({ ok: true, ...nodesPayload(thisNode.id) });
+  });
+
   app.get("/api/worker", async (c) => {
     if (!isWorker) return c.json({ error: "This container is not a worker." }, 404);
     const hardwareInfo = await hardware();

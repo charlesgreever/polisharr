@@ -110,7 +110,7 @@ Add stereo on a row still works for one episode. Queue still writes a sidecar. K
 
 One Polisharr is the **master**: UI, settings, library sync, Suggestions, Review, and Keep. Put that container on the always-on host next to Radarr and Sonarr. Set `POLISHARR_ROLE=master`. Each extra GPU box is a **worker**: it only runs encodes. Copy [compose.worker.yaml](compose.worker.yaml), give it its own `/config`, and bind the **same** media path the Arrs report (and the same review folder). An M-series Mac worker is a native process, not that Linux compose file.
 
-**Encode target** is still HEVC vs AV1. **Encode node** is which machine runs ffmpeg. Settings → Nodes sets the house default and per-node job slots. Queue, Suggestions, and the title page can pick a different node for one job. If that node is off or drained, the job waits; it does not move to another GPU.
+**Encode target** is still HEVC vs AV1. **Encode node** is which machine runs ffmpeg. Settings → Nodes sets the house default and per-node job slots. Queue, Suggestions, and the title page can pick a different node for one job. If that node is off or drained, the job waits; it does not move to another GPU. Settings can Remove a worker that will not come back; this computer stays. Move or cancel that node’s waiting jobs first.
 
 On the master, Settings → Nodes generates a cluster token. Copy it once into `POLISHARR_CLUSTER_TOKEN` on the worker, with `POLISHARR_MASTER_URL` pointing at the master. Do not share `/config` or `polisharr.db` across containers. Webhooks still hit the master.
 

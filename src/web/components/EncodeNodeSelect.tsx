@@ -1,6 +1,6 @@
 import { FIELD_CONTROL } from "../settings-copy";
 import type { ClusterNode } from "../api";
-import { capableEncodeNodes, encodeNodeOptionLabel, type EncodeNeed } from "../encode-node";
+import { capableEncodeNodes, encodeNodeOptionLabel, nodeCanEncode, type EncodeNeed } from "../encode-node";
 
 export function EncodeNodeSelect({
   nodes,
@@ -29,8 +29,8 @@ export function EncodeNodeSelect({
         aria-label="Encode node"
         onChange={(event) => onChange(event.target.value)}
       >
-        {capable.map((node) => (
-          <option key={node.id} value={node.id}>
+        {nodes.map((node) => (
+          <option key={node.id} value={node.id} disabled={!nodeCanEncode(node, need)}>
             {encodeNodeOptionLabel(node)}{node.id === defaultNodeId ? " (house default)" : ""}
           </option>
         ))}

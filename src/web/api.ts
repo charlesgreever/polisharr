@@ -141,6 +141,7 @@ export const api = {
     }),
   saveNode: (id: string, body: { concurrency?: number; enabled?: boolean }) =>
     req<{ ok: true; node: ClusterNode }>(`/api/nodes/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteNode: (id: string) => req<NodesPayload>(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" }),
   assignJob: (id: string, nodeId: string) =>
     req(`/api/jobs/${encodeURIComponent(id)}/assign`, { method: "POST", body: JSON.stringify({ nodeId }) }),
   exclusions: () => req<{ exclusions: Exclusion[] }>("/api/exclusions"),

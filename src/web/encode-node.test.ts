@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capableEncodeNodes, encodeNeedFromAfterCodec, encodeNeedFromPlan, encodeNodeOptionLabel, nodeCanEncode } from "./encode-node";
+import { bulkEncodeNeed, capableEncodeNodes, encodeNeedFromAfterCodec, encodeNeedFromPlan, encodeNodeOptionLabel, nodeCanEncode } from "./encode-node";
 import type { ClusterNode } from "./api";
 
 function node(over: Partial<ClusterNode> & Pick<ClusterNode, "id" | "name" | "hardware">): ClusterNode {
@@ -35,5 +35,14 @@ describe("encode node picker", () => {
     expect(nodeCanEncode(hevcOnly, "av1")).toBe(false);
     expect(capableEncodeNodes([hevcOnly, gpu], "av1").map((row) => row.id)).toEqual(["5090"]);
     expect(encodeNodeOptionLabel({ ...hevcOnly, online: false, enabled: false })).toBe("intel (offline, drained)");
+    expect(encodeNodeOptionLabel({
+      ...hevcOnly,
+      name: "MacBook Pro",
+      online: false,
+      hardware: { backend: "none", cuda: false, vaapi: false, av1: false, reason: null },
+    })).toBe("MacBook Pro (offline, no encoder)");
+    expect(bulkEncodeNeed(["hevc", "av1"])).toBe("hevc");
+    expect(bulkEncodeNeed(["av1", "av1"])).toBe("av1");
+    expect(bulkEncodeNeed([])).toBe("hevc");
   });
 });

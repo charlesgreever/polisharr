@@ -2234,6 +2234,60 @@ describe("public HTTP behavior", () => {
     expect(settings.defaultEncodeNodeId).toBe("worker-1");
   });
 
+  it("removes a dead worker and refuses to remove this computer or a node with waiting work", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null };
+    const created = createApp({ env, hardware: async () => hw });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "mac-1", name: "MacBook Pro", version: "0.2.22", hardware: hw, concurrency: 1 }),
+    });
+    const self = (await (await created.app.request("/api/nodes", { headers })).json()) as { thisNodeId: string };
+    const refuseSelf = await created.app.request(`/api/nodes/${self.thisNodeId}`, { method: "DELETE", headers });
+    expect(refuseSelf.status).toBe(400);
+    expect(await refuseSelf.json()).toMatchObject({ error: "This computer is the master. It cannot be removed." });
+    created.store.insertJob({
+      id: "job-1",
+      itemId: "missing",
+      suggestionId: null,
+      status: "queued",
+      phase: "queued",
+      progress: 0,
+      error: null,
+      warning: null,
+      runNow: false,
+      createdAt: 1,
+      writeMode: "sidecar",
+      plan: { origin: "bulk", video: { kind: "copy" }, audio: [], subtitles: [], container: "mkv", writeMode: "sidecar", warning: null, reasons: [], estimatedOutputBytes: 1, category: "movie1080p" },
+      assignedNodeId: "mac-1",
+    });
+    const busy = await created.app.request("/api/nodes/mac-1", { method: "DELETE", headers });
+    expect(busy.status).toBe(409);
+    created.store.updateJob("job-1", { status: "cancelled" });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ defaultEncodeNodeId: "mac-1" }),
+    });
+    const removed = await created.app.request("/api/nodes/mac-1", { method: "DELETE", headers });
+    expect(removed.status).toBe(200);
+    const body = (await removed.json()) as { nodes: Array<{ id: string }>; defaultEncodeNodeId: string };
+    expect(body.nodes.map((node) => node.id)).not.toContain("mac-1");
+    expect(body.defaultEncodeNodeId).toBe(self.thisNodeId);
+    expect(created.store.getNode("mac-1")).toBeUndefined();
+  });
+
   it("leases a job to the assigned worker and writes Review from a remote sidecar", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-"));
     const env = loadEnv({

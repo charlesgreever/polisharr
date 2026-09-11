@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, type ClusterNode, type SuggestionFilters, type SuggestionRow } from "../api";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
-import { encodeNeedFromAfterCodec } from "../encode-node";
+import { bulkEncodeNeed } from "../encode-node";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
 import { FilterChip, MediaSnapshot } from "../components/ui";
@@ -69,7 +69,7 @@ export function SuggestionsPage() {
               nodes={nodes}
               value={encodeNodeId}
               defaultNodeId={defaultNodeId}
-              need={items.some((row) => encodeNeedFromAfterCodec(row.after.codec) === "av1") ? "av1" : "hevc"}
+              need={bulkEncodeNeed(items.map((row) => row.after.codec))}
               onChange={setEncodeNodeId}
             />
             <button className="btn-secondary" type="button" onClick={() => void api.queueFiltered(debouncedQ, filters, encodeNodeId || undefined).then((result) => {

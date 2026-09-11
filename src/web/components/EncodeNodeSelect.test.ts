@@ -38,7 +38,7 @@ const nodes: ClusterNode[] = [
 ];
 
 describe("Encode node select", () => {
-  it("labels the control Encode node and omits a HEVC-only GPU from an AV1 plan", () => {
+  it("labels the control Encode node and keeps a HEVC-only GPU visible but unselectable on an AV1 plan", () => {
     const html = renderToStaticMarkup(createElement(EncodeNodeSelect, {
       nodes,
       value: "5090",
@@ -49,6 +49,7 @@ describe("Encode node select", () => {
     expect(html).toContain("Encode node");
     expect(html).not.toContain("Encode target");
     expect(html).toContain("5090");
-    expect(html).not.toContain("homeserver");
+    expect(html).toContain("homeserver");
+    expect(html).toMatch(/<option[^>]*disabled[^>]*>homeserver/);
   });
 });

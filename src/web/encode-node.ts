@@ -24,10 +24,19 @@ export function capableEncodeNodes(nodes: ClusterNode[], need: EncodeNeed): Clus
   return nodes.filter((node) => nodeCanEncode(node, need));
 }
 
+export function bulkEncodeNeed(codecs: Array<string | null | undefined>): EncodeNeed {
+  if (codecs.length === 0) return "hevc";
+  const needs = codecs.map(encodeNeedFromAfterCodec);
+  if (needs.every((need) => need === "av1")) return "av1";
+  if (needs.every((need) => need === "copy")) return "copy";
+  return "hevc";
+}
+
 export function encodeNodeOptionLabel(node: ClusterNode): string {
   const flags = [
     node.online ? null : "offline",
     node.enabled ? null : "drained",
+    node.hardware.backend === "none" ? "no encoder" : null,
   ].filter((flag): flag is string => Boolean(flag));
   return flags.length > 0 ? `${node.name} (${flags.join(", ")})` : node.name;
 }

@@ -1347,6 +1347,10 @@ export class Store {
     return (this.db.prepare("SELECT * FROM nodes ORDER BY name ASC").all() as Record<string, unknown>[]).map(mapNode);
   }
 
+  deleteNode(id: string): void {
+    this.db.prepare("DELETE FROM nodes WHERE id = ?").run(id);
+  }
+
   close(): void {
     this.db.close();
   }

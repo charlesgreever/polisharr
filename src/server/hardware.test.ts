@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseBackend, encodeApiLabel, gpuNameFromPci, parseEncoders } from "./hardware.ts";
+import { chooseBackend, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, probeEncodeDevices } from "./hardware.ts";
 
 const jellyfinBoth = `
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
@@ -16,11 +16,18 @@ const hevcOnly = `
  V..... hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
 `;
 
+const brewVideotoolbox = `
+ V..... h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)
+ V..... hevc_videotoolbox    VideoToolbox H.265 Encoder (codec hevc)
+ V..... av1_videotoolbox     VideoToolbox AV1 Encoder (codec av1)
+`;
+
 describe("hardware encoder listing", () => {
   it("marks NVIDIA AV1 when av1_nvenc is listed", () => {
     const encoders = parseEncoders(jellyfinBoth);
     expect(encoders.nvenc).toBe(true);
     expect(encoders.vaapi).toBe(true);
+    expect(encoders.videotoolbox).toBe(false);
     expect(encoders.nvencAv1).toBe(true);
     expect(encoders.vaapiAv1).toBe(true);
   });
@@ -30,6 +37,13 @@ describe("hardware encoder listing", () => {
     expect(encoders.nvenc).toBe(true);
     expect(encoders.nvencAv1).toBe(false);
   });
+
+  it("marks the Apple media engine when VideoToolbox encoders are listed", () => {
+    const encoders = parseEncoders(brewVideotoolbox);
+    expect(encoders.videotoolbox).toBe(true);
+    expect(encoders.videotoolboxAv1).toBe(true);
+    expect(encoders.nvenc).toBe(false);
+  });
 });
 
 describe("hardware backend choice", () => {
@@ -38,6 +52,7 @@ describe("hardware backend choice", () => {
       nvidia: false,
       vaapi: true,
       vaapiDevice: "/dev/dri/renderD128",
+      videotoolbox: false,
     });
     expect(hw.backend).toBe("vaapi");
     expect(hw.cuda).toBe(false);
@@ -52,25 +67,62 @@ describe("hardware backend choice", () => {
       nvidia: true,
       vaapi: true,
       vaapiDevice: "/dev/dri/renderD128",
+      videotoolbox: false,
     });
     expect(hw.backend).toBe("cuda");
     expect(hw.cuda).toBe(true);
     expect(hw.av1).toBe(true);
   });
 
-  it("names PCI devices and maps backends to CUDA or VAAPI, not QuickSync", () => {
+  it("uses VideoToolbox on macOS when ffmpeg lists the Apple media engine", () => {
+    const hw = chooseBackend(parseEncoders(brewVideotoolbox), {
+      nvidia: false,
+      vaapi: false,
+      vaapiDevice: null,
+      videotoolbox: true,
+    });
+    expect(hw.backend).toBe("videotoolbox");
+    expect(hw.videotoolbox).toBe(true);
+    expect(hw.av1).toBe(true);
+    expect(hw.reason).toBeNull();
+  });
+
+  it("does not treat a Linux container on a Mac as VideoToolbox", () => {
+    const hw = chooseBackend(parseEncoders(brewVideotoolbox), {
+      nvidia: false,
+      vaapi: false,
+      vaapiDevice: null,
+      videotoolbox: false,
+    });
+    expect(hw.backend).toBe("none");
+    expect(hw.reason).toMatch(/not running on macOS/i);
+  });
+
+  it("names PCI devices and maps backends to CUDA, VAAPI, or VideoToolbox, not QuickSync", () => {
     expect(gpuNameFromPci("0x8086", "0xe223")).toBe("Intel Battlemage G31");
     expect(gpuNameFromPci("0x1002", "0x164e")).toBe("AMD Raphael");
     expect(gpuNameFromPci("0x8086", "0x1234")).toBe("Intel GPU");
+    expect(gpuNameFromSysctl("Apple M4 Pro")).toBe("Apple M4 Pro");
     expect(encodeApiLabel("cuda")).toBe("CUDA");
     expect(encodeApiLabel("vaapi")).toBe("VAAPI");
+    expect(encodeApiLabel("videotoolbox")).toBe("VideoToolbox");
     expect(encodeApiLabel("vaapi")).not.toBe("QuickSync");
     expect(encodeApiLabel("none")).toBeNull();
   });
 
   it("fails closed when encoders are listed but no GPU device is visible", () => {
-    const hw = chooseBackend(parseEncoders(jellyfinBoth), { nvidia: false, vaapi: false, vaapiDevice: null });
+    const hw = chooseBackend(parseEncoders(jellyfinBoth), {
+      nvidia: false,
+      vaapi: false,
+      vaapiDevice: null,
+      videotoolbox: false,
+    });
     expect(hw.backend).toBe("none");
     expect(hw.reason).toMatch(/no NVIDIA device/i);
+  });
+
+  it("treats darwin as the Apple media engine device and linux as not", () => {
+    expect(probeEncodeDevices([], "darwin").videotoolbox).toBe(true);
+    expect(probeEncodeDevices([], "linux").videotoolbox).toBe(false);
   });
 });

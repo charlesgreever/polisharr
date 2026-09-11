@@ -30,9 +30,16 @@ describe("cluster node identity", () => {
       backend: "cuda",
       cuda: true,
       vaapi: false,
+      videotoolbox: false,
       av1: true,
       reason: null,
       vaapiDevice: undefined,
+      gpuName: undefined,
+    });
+    expect(parseHardwareInfo({ backend: "videotoolbox", videotoolbox: true, av1: false })).toMatchObject({
+      backend: "videotoolbox",
+      videotoolbox: true,
+      cuda: false,
     });
     expect(parseHardwareInfo("nope")).toMatchObject({ backend: "none", cuda: false, av1: false });
   });
@@ -43,6 +50,9 @@ describe("cluster node identity", () => {
     );
     expect(nodeHardwareLabel({ backend: "vaapi", cuda: false, vaapi: true, av1: true, reason: null })).toBe(
       "Intel or AMD GPU, AV1 encoder listed",
+    );
+    expect(nodeHardwareLabel({ backend: "videotoolbox", cuda: false, vaapi: false, videotoolbox: true, av1: false, reason: null })).toBe(
+      "Apple media engine, AV1 encoder not listed",
     );
     expect(nodeHardwareLabel({ backend: "none", cuda: false, vaapi: false, av1: false, reason: "ffmpeg is not available." })).toBe(
       "ffmpeg is not available.",
@@ -85,7 +95,7 @@ describe("cluster node identity", () => {
       concurrency: 2,
     })).toEqual({
       ok: true,
-      hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, vaapiDevice: undefined }, concurrency: 2 },
+      hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, videotoolbox: false, vaapiDevice: undefined, gpuName: undefined }, concurrency: 2 },
     });
     expect(parseClusterHello({ name: "5090" }).ok).toBe(false);
     expect(parseClusterHeartbeat({

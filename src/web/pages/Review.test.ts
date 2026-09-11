@@ -25,6 +25,7 @@ describe("Keep all copy", () => {
     })).toBe("Ran on deskmini · VAAPI · Intel Battlemage G31 · 12 min");
     expect(reviewEncodeLine({ encodeApi: "VAAPI" })).toBe("VAAPI");
     expect(reviewEncodeLine({ encodeApi: "VAAPI" })).not.toContain("QuickSync");
+    expect(reviewEncodeLine({ encodeApi: "VideoToolbox", gpuName: "Apple M4 Pro" })).toBe("VideoToolbox · Apple M4 Pro");
     expect(reviewEncodeLine({})).toBeNull();
   });
 

@@ -1,6 +1,8 @@
 # Copy this file to compose.yaml. Set the media bind to the same path
 # Radarr and Sonarr report. NVIDIA is the default. For Intel, see the
 # commented block at the bottom. A second GPU box is compose.worker.yaml.
+# An M-series Mac cannot use this Linux image for VideoToolbox; run
+# scripts/run-macos.sh instead (README: Apple Silicon).
 #
 #   docker compose up -d
 #

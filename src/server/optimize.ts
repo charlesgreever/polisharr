@@ -26,7 +26,7 @@ export type OptimizeRequest = {
   plan?: ExecutablePlan;
   report: InspectionReport;
   target: "hevc" | "av1";
-  backend: "cuda" | "vaapi" | "none";
+  backend: "cuda" | "vaapi" | "videotoolbox" | "none";
   vaapiDevice?: string | null;
   ffmpeg: string;
   ffprobe: string;
@@ -677,6 +677,7 @@ export function formatToolError(bin: string, error: { message?: string; stderr?:
 // NVDEC on Turing+ (including Ada) actually decodes these. MPEG-4 Part 2 and friends stay on the CPU so the encode still runs.
 const NVDEC_CODECS = new Set(["av1", "h264", "hevc", "mjpeg", "mpeg1video", "mpeg2video", "vc1", "vp8", "vp9"]);
 const VAAPI_DECODE_CODECS = new Set(["av1", "h264", "hevc", "mjpeg", "mpeg1video", "mpeg2video", "vc1", "vp8", "vp9"]);
+const VIDEOTOOLBOX_DECODE_CODECS = new Set(["av1", "h264", "hevc", "mpeg2video", "prores", "prores_ks", "vp9"]);
 
 function usesNvdec(backend: OptimizeRequest["backend"], codec: string): boolean {
   return backend === "cuda" && NVDEC_CODECS.has(codec.toLowerCase());
@@ -686,22 +687,41 @@ function usesVaapiDecode(backend: OptimizeRequest["backend"], codec: string): bo
   return backend === "vaapi" && VAAPI_DECODE_CODECS.has(codec.toLowerCase());
 }
 
+function usesVideotoolboxDecode(backend: OptimizeRequest["backend"], codec: string): boolean {
+  return backend === "videotoolbox" && VIDEOTOOLBOX_DECODE_CODECS.has(codec.toLowerCase());
+}
+
 function cudaVideoFilter(downscale: boolean, tenBit: boolean): string {
   const format = tenBit ? "p010" : "nv12";
   return downscale ? `scale_cuda=w=1920:h=1080:format=${format}` : `scale_cuda=format=${format}`;
+}
+
+function videoEncoder(backend: OptimizeRequest["backend"], codec: "hevc" | "av1"): string {
+  if (codec === "av1") {
+    if (backend === "vaapi") return "av1_vaapi";
+    if (backend === "videotoolbox") return "av1_videotoolbox";
+    return "av1_nvenc";
+  }
+  if (backend === "vaapi") return "hevc_vaapi";
+  if (backend === "videotoolbox") return "hevc_videotoolbox";
+  return "hevc_nvenc";
+}
+
+/** Map NVENC/VAAPI quality (lower is better, ~18-28) to VideoToolbox -q:v (higher is better, 1-100). */
+export function videotoolboxQuality(cq: number): number {
+  return Math.max(1, Math.min(100, Math.round(100 - cq * 1.5)));
 }
 
 export function encodeArgs(source: string, dest: string, req: OptimizeRequest): string[] {
   const plan = req.plan ?? (req.suggestion ? planFromSuggestion(req.suggestion) : undefined);
   const video = plan?.video;
   const codec = video && video.kind !== "copy" ? video.codec : req.target;
-  const encoder = codec === "av1"
-    ? req.backend === "vaapi" ? "av1_vaapi" : "av1_nvenc"
-    : req.backend === "vaapi" ? "hevc_vaapi" : "hevc_nvenc";
+  const encoder = videoEncoder(req.backend, codec);
   const tenBit = (video && video.kind !== "copy" ? video.bitDepth : req.report.bitDepth) >= 10;
   const downscale = video?.kind !== "copy" && Boolean(video?.downscale1080p);
   const nvdec = usesNvdec(req.backend, req.report.videoCodec);
   const vaapiDecode = usesVaapiDecode(req.backend, req.report.videoCodec);
+  const videotoolboxDecode = usesVideotoolboxDecode(req.backend, req.report.videoCodec);
   const args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y"];
   if (req.backend === "vaapi") {
     const device = req.vaapiDevice || "/dev/dri/renderD128";
@@ -713,6 +733,8 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   } else if (nvdec) {
     // hwaccel flags must precede -i or ffmpeg still decodes on the CPU.
     args.push("-hwaccel", "cuda", "-hwaccel_output_format", "cuda");
+  } else if (videotoolboxDecode) {
+    args.push("-hwaccel", "videotoolbox");
   }
   const videoMap = req.report.videoIndex == null ? "0:v:0" : `0:${req.report.videoIndex}`;
   args.push("-i", source, "-map", videoMap, "-map", "0:a?", "-map", "0:s?", "-map", "0:t?");
@@ -731,14 +753,21 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
     args.push("-vf", "scale=1920:1080");
   }
   args.push("-c:v", encoder);
+  if (req.backend === "videotoolbox") {
+    // allow_sw=0 fails closed if the media engine is missing instead of a CPU encode.
+    args.push("-allow_sw", "0", "-realtime", "0");
+    if (codec !== "av1") args.push("-tag:v", "hvc1");
+  }
   if (tenBit && codec !== "av1") args.push("-profile:v", "main10");
   if (video?.kind === "quality") {
     if (req.backend === "vaapi") args.push("-qp", String(video.quality));
+    else if (req.backend === "videotoolbox") args.push("-q:v", String(videotoolboxQuality(video.quality)));
     else args.push("-cq", String(video.quality), "-rc", "vbr");
   } else {
     args.push(...sizeModeRateControl(req.backend, String(nvencBitrate(req, video))));
   }
-  if (req.backend !== "vaapi" && !nvdec) args.push("-pix_fmt", tenBit ? "p010le" : "yuv420p");
+  if (req.backend === "videotoolbox") args.push("-pix_fmt", tenBit ? "p010le" : "nv12");
+  else if (req.backend !== "vaapi" && !nvdec) args.push("-pix_fmt", tenBit ? "p010le" : "yuv420p");
   args.push("-c:a", "copy", ...subtitleEncodeArgs(req.report), dest);
   return args;
 }
@@ -771,6 +800,9 @@ function sizeModeRateControl(backend: OptimizeRequest["backend"], bitrate: strin
   const bufsize = String(Number(bitrate) * 2);
   if (backend === "vaapi") {
     return ["-rc_mode", "CBR", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
+  }
+  if (backend === "videotoolbox") {
+    return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
   }
   return ["-rc", "cbr", "-multipass", "qres", "-rc-lookahead", "32", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
 }

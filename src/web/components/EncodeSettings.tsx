@@ -22,7 +22,7 @@ export function EncodeSettings({
   return (
     <div className="glass space-y-3 p-4">
       <h2 className="font-semibold">Encode</h2>
-      <p className="help">Detected hardware: {hardwareLabel}. Automatic Suggestions that re-encode video use this target. AV1 appears only when the GPU can encode it.</p>
+      <p className="help">Detected hardware: {hardwareLabel}. Automatic Suggestions that re-encode video use this target. AV1 appears only when encode hardware can encode it.</p>
       <label className="block space-y-1.5 text-sm">
         <span className="font-medium text-muted">Target</span>
         <select className={FIELD_CONTROL} value={av1Available ? data.videoTarget : "hevc"} onChange={(event) => {

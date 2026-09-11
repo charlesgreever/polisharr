@@ -616,7 +616,7 @@ export function createApp(opts: AppOptions) {
     for (const item of store.listItems()) recomputeSuggestion(item.id);
   }
 
-  let lastHardware: HardwareInfo = { backend: "none", cuda: false, vaapi: false, av1: false, reason: null };
+  let lastHardware: HardwareInfo = { backend: "none", cuda: false, vaapi: false, videotoolbox: false, av1: false, reason: null };
   void hardware().then((h) => {
     lastHardware = h;
     recomputeAllSuggestions();

@@ -26,7 +26,7 @@ export type AudioMix = "stereo" | "surround";
 export function parseAudioMix(value: unknown): AudioMix | null {
   return value === "stereo" || value === "surround" ? value : null;
 }
-export type HardwareBackend = "cuda" | "vaapi" | "none";
+export type HardwareBackend = "cuda" | "vaapi" | "videotoolbox" | "none";
 export type ActivityOutcome = "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched";
 export type ExclusionKind = "path" | "profile" | "tag" | "title";
 
@@ -306,6 +306,7 @@ export type HardwareInfo = {
   backend: HardwareBackend;
   cuda: boolean;
   vaapi: boolean;
+  videotoolbox?: boolean;
   av1: boolean;
   reason: string | null;
   vaapiDevice?: string | null;

@@ -27,7 +27,7 @@ This tree is a greenfield rewrite. Do not import the previous application code.
 - Suggestion, Errors, and Queue titles open the same detail page as Movies and Series
 - Queue pins running jobs in Working now, then waiting jobs, then finished jobs, so a long batch does not hide the encode in progress
 - Size-mode encode reserves room for copied audio. A file within 5% of its GB-per-hour cap counts as meeting it.
-- Muxes tracks with MKVtoolnix and encodes video with the GPU you pass in. mkvmerge and ffmpeg run with a UTF-8 locale so titles such as 烧烤 are not truncated.
+- Muxes tracks with MKVtoolnix and encodes video with the GPU or Mac media engine you pass in. mkvmerge and ffmpeg run with a UTF-8 locale so titles such as 烧烤 are not truncated.
 - Writes a sidecar for Review by default, or replaces the library file after an integrity check when **Write finished files** is Direct write. Waiting bulk jobs use that setting when they start. Queue new Arr imports still writes a sidecar. Keep then asks Radarr or Sonarr to refresh media info and rename the library file so tokens such as `EAC3 5.1` or `H264` match the new audio and video.
 - Lets you Keep one sidecar, Keep selected, or Keep all waiting sidecars after a confirm. Flagged results can queue a smaller encode. Review shows duration and GB per hour. Keep selected reports how many were skipped.
 - Checks review-volume free space before work. After restart, interrupted jobs return to the queue. Interrupted Keep cards return to Review so you can retry or discard them. A Keep that already replaced the library file counts as kept.
@@ -35,7 +35,7 @@ This tree is a greenfield rewrite. Do not import the previous application code.
 
 ## Installation
 
-Polisharr runs as a Docker container next to Radarr and Sonarr. It reads the same library files those apps already know, so the media bind in compose must be that path on both sides. Video encode needs a GPU: NVIDIA (NVENC) or Intel (VAAPI, the Video Acceleration API). There is no CPU encode fallback.
+Polisharr runs as a Docker container next to Radarr and Sonarr. It reads the same library files those apps already know, so the media bind in compose must be that path on both sides. Video encode needs hardware: NVIDIA (NVENC), Intel or AMD (VAAPI, the Video Acceleration API), or an M-series Mac media engine (VideoToolbox). There is no CPU encode fallback. Docker on a Mac cannot reach VideoToolbox; run the native process in [Apple Silicon (M-series)](#apple-silicon-m-series).
 
 ### 1. Get compose
 
@@ -57,6 +57,8 @@ Copy [compose.example.yaml](compose.example.yaml) to `compose.yaml`. Change thes
 NVIDIA is already selected (`runtime: nvidia` and the `NVIDIA_*` variables). The host needs the NVIDIA container toolkit. `utility` provides `nvidia-smi`. `video` provides NVENC.
 
 For an Intel GPU, comment out `runtime: nvidia` and the `NVIDIA_*` variables, then uncomment `devices: /dev/dri`. ffmpeg uses `/dev/dri/renderD128`. Set `group_add` to the host `render` and `video` group ids (`getent group render video`). The entrypoint keeps those groups after it drops root; otherwise VAAPI fails with `Device creation failed: -22`.
+
+An M-series Mac does not use this Linux image for encode. See [Apple Silicon (M-series)](#apple-silicon-m-series).
 
 If Radarr and Sonarr already share a Docker network, attach Polisharr to that network so Settings can use `http://radarr:7878`.
 
@@ -106,7 +108,7 @@ Add stereo on a row still works for one episode. Queue still writes a sidecar. K
 
 ## Extra GPU boxes
 
-One Polisharr is the **master**: UI, settings, library sync, Suggestions, Review, and Keep. Put that container on the always-on host next to Radarr and Sonarr. Set `POLISHARR_ROLE=master`. Each extra GPU box is a **worker**: it only runs encodes. Copy [compose.worker.yaml](compose.worker.yaml), give it its own `/config`, and bind the **same** media path the Arrs report (and the same review folder).
+One Polisharr is the **master**: UI, settings, library sync, Suggestions, Review, and Keep. Put that container on the always-on host next to Radarr and Sonarr. Set `POLISHARR_ROLE=master`. Each extra GPU box is a **worker**: it only runs encodes. Copy [compose.worker.yaml](compose.worker.yaml), give it its own `/config`, and bind the **same** media path the Arrs report (and the same review folder). An M-series Mac worker is a native process, not that Linux compose file.
 
 **Encode target** is still HEVC vs AV1. **Encode node** is which machine runs ffmpeg. Settings → Nodes sets the house default and per-node job slots. Queue, Suggestions, and the title page can pick a different node for one job. If that node is off or drained, the job waits; it does not move to another GPU.
 
@@ -115,6 +117,37 @@ On the master, Settings → Nodes generates a cluster token. Copy it once into `
 A worker writes a sidecar on the shared review path. Direct write still replaces the library file on the master after the integrity check, then refreshes Arr. Queue new Arr imports still writes a sidecar and uses the house encode node.
 
 The worker's published port is only a stub page (hardware, master URL, join status). Open the master to manage the library.
+
+## Apple Silicon (M-series)
+
+VideoToolbox is the macOS media engine on M-series Macs. ffmpeg uses it for hardware HEVC (and AV1 when that Mac lists `av1_videotoolbox`). Docker Desktop, Colima, and Lima run a Linux VM, so a Polisharr container on a Mac never sees that engine. Encode jobs then fail closed. Polisharr does not start a CPU encode.
+
+Run Polisharr as a native macOS process. Typical layout: the master stays in Docker next to Radarr and Sonarr, and the Mac is a worker that mounts the same media path.
+
+```bash
+brew install ffmpeg mkvtoolnix node
+git clone https://github.com/charlesgreever/polisharr.git polisharr
+cd polisharr
+npm ci
+npm run build
+```
+
+On the master, Settings → Nodes generates a cluster token. Then:
+
+```bash
+export POLISHARR_ROLE=worker
+export POLISHARR_NODE_NAME="Mac Studio"
+export POLISHARR_MASTER_URL=http://192.168.1.10:7373
+export POLISHARR_CLUSTER_TOKEN=the-token-from-the-master
+export CONFIG_DIR="$PWD/config-worker"
+export HOST=0.0.0.0
+export PORT=7374
+./scripts/run-macos.sh
+```
+
+The script checks that this is macOS and that ffmpeg lists `hevc_videotoolbox`. It points `FFMPEG` / `FFPROBE` / `MKVMERGE` at the Homebrew binaries. Give the worker its own `CONFIG_DIR`. Bind or mount the same Arr library path and review folder the master uses (SMB, NFS, or a local copy of that tree). Settings → Nodes should then show **Apple media engine**.
+
+To run the whole app on the Mac (standalone), omit `POLISHARR_ROLE` and open `http://127.0.0.1:7373`.
 
 ## Run locally
 

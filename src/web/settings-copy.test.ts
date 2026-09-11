@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SIZE_CAP_GRID, sizeCapLabel, transcodeBelowTargetLabel } from "./settings-copy";
+import { SIZE_CAP_GRID, hardwareBackendLabel, sizeCapLabel, transcodeBelowTargetLabel } from "./settings-copy";
 
 describe("settings copy", () => {
   it("names size caps in everyday words", () => {
@@ -17,5 +17,12 @@ describe("settings copy", () => {
   it("names the below-target checkbox after the current Encode Target", () => {
     expect(transcodeBelowTargetLabel("hevc")).toBe("Transcode video below Target Encode (HEVC)");
     expect(transcodeBelowTargetLabel("av1")).toBe("Transcode video below Target Encode (AV1)");
+  });
+
+  it("names encode APIs the same way Review does", () => {
+    expect(hardwareBackendLabel("cuda")).toBe("CUDA");
+    expect(hardwareBackendLabel("vaapi")).toBe("VAAPI");
+    expect(hardwareBackendLabel("videotoolbox")).toBe("VideoToolbox");
+    expect(hardwareBackendLabel("none")).toBe("none");
   });
 });

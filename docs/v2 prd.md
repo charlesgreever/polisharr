@@ -138,7 +138,7 @@ Output is still a **sidecar** on the review path by default. Settings has a glob
 ### Operator, empty states, and developers
 
 82. As an operator, I want Settings to let me disable profile auto-assign without disabling profile preview or explicit sync, and to say that Arr size limits (MB/min) are global per quality name, so that Polisharr does not move titles between profiles unless I allow it.
-83. As an operator, I want hardware video encode to remain CUDA or VAAPI only, so that a custom quality slider cannot fall back to a multi-day CPU encode.
+83. As an operator, I want hardware video encode to remain CUDA, VAAPI, or VideoToolbox only, so that a custom quality slider cannot fall back to a multi-day CPU encode.
 84. As an operator, I want AAC codec replace and downmix to run in ffmpeg even when no GPU is required for audio, so that a tracks-and-audio job is not blocked on NVENC.
 85. As a library owner, I want an empty Movies or Series table to keep the v1 empty copy, so that first run still tells me to connect an Arr.
 86. As a library owner, I want a title URL for a missing id to say the title is not in the library, so that a stale bookmark is not a blank glass panel.

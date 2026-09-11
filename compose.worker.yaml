@@ -8,7 +8,8 @@
 # 4. docker compose -f compose.worker.yaml up -d
 #
 # NVIDIA is selected below. For Intel, comment runtime and NVIDIA_* and
-# uncomment devices / group_add as in compose.example.yaml.
+# uncomment devices / group_add as in compose.example.yaml. An M-series
+# Mac worker is scripts/run-macos.sh, not this Linux image.
 
 name: polisharr-worker
 services:

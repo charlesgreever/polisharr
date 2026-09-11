@@ -4,7 +4,7 @@ import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
-import { FIELD_CONTROL, SIZE_CAP_GRID } from "../settings-copy";
+import { FIELD_CONTROL, hardwareBackendLabel, SIZE_CAP_GRID } from "../settings-copy";
 
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
   const [data, setData] = useState<SettingsPayload | null>(null);
@@ -184,7 +184,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       </div>
       <EncodeSettings
         data={data}
-        hardwareLabel={hw ? `${hw.backend}${hw.av1 ? ", AV1 encoder listed" : ", AV1 encoder not listed"}` : "checking…"}
+        hardwareLabel={hw ? `${hardwareBackendLabel(hw.backend)}${hw.av1 ? ", AV1 encoder listed" : ", AV1 encoder not listed"}` : "checking…"}
         av1Available={Boolean(nodes.some((node) => node.online && node.enabled && node.hardware.av1) || hw?.av1)}
         onChange={(patch) => setData({ ...data, ...patch })}
         onSave={save}

@@ -878,6 +878,108 @@ describe("ffmpeg encode arguments", () => {
     expect(args.join(" ")).toContain("format=nv12,hwupload=extra_hw_frames=64");
   });
 
+  it("builds a VideoToolbox encode graph instead of NVENC on the Apple media engine", () => {
+    const plan = planFromSuggestion({ ...suggestion, actions: ["transcode"] });
+    const args = encodeArgs(source, "/tmp/out.mkv", {
+      sourcePath: source,
+      reviewDir: "/tmp/review",
+      suggestion,
+      plan: {
+        ...plan,
+        video: { kind: "quality", codec: "hevc", quality: 22, downscale1080p: true, bitDepth: 10 },
+      },
+      report: {
+        sourceSig: "p|1",
+        sourceMethod: "ffprobe",
+        listingState: "complete",
+        durationSec: 6000,
+        sizeBytes: 8_000_000_000,
+        sizePerHourGb: 4,
+        videoCodec: "h264",
+        width: 3840,
+        height: 2160,
+        bitDepth: 10,
+        hdr: "none",
+        audio: [],
+        subtitles: [],
+        hasChapters: false,
+        hasAttachments: false,
+      },
+      target: "hevc",
+      backend: "videotoolbox",
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      mkvmerge: "mkvmerge",
+      conservative: false,
+    });
+    expect(args).toContain("hevc_videotoolbox");
+    expect(args).not.toContain("hevc_nvenc");
+    expect(args).not.toContain("hevc_vaapi");
+    expect(args.indexOf("-hwaccel")).toBeLessThan(args.indexOf("-i"));
+    expect(args[args.indexOf("-hwaccel") + 1]).toBe("videotoolbox");
+    expect(args).toContain("-allow_sw");
+    expect(args[args.indexOf("-allow_sw") + 1]).toBe("0");
+    expect(args).toContain("-realtime");
+    expect(args[args.indexOf("-realtime") + 1]).toBe("0");
+    expect(args).toContain("hvc1");
+    expect(args).toContain("main10");
+    expect(args).toContain("p010le");
+    expect(args).toContain("scale=1920:1080");
+    expect(args).toContain("-q:v");
+    expect(args[args.indexOf("-q:v") + 1]).toBe("67");
+    expect(args).not.toContain("-cq");
+    expect(args).not.toContain("-rc");
+  });
+
+  it("uses bitrate caps for VideoToolbox size mode and AV1 when listed", () => {
+    const args = encodeArgs(source, "/tmp/out.mkv", {
+      sourcePath: source,
+      reviewDir: "/tmp/review",
+      plan: {
+        origin: "bulk",
+        video: { kind: "size", codec: "av1", targetBytes: 5 * 1024 ** 3, downscale1080p: false, bitDepth: 8 },
+        audio: [],
+        subtitles: [],
+        container: "mkv",
+        writeMode: "sidecar",
+        warning: null,
+        reasons: [],
+        estimatedOutputBytes: 5 * 1024 ** 3,
+        category: "movie1080p",
+      },
+      report: {
+        sourceSig: "p|1",
+        sourceMethod: "ffprobe",
+        listingState: "complete",
+        durationSec: 3600,
+        sizeBytes: 12_000_000_000,
+        sizePerHourGb: 12,
+        videoCodec: "hevc",
+        width: 1920,
+        height: 1080,
+        bitDepth: 8,
+        hdr: "none",
+        audio: [],
+        subtitles: [],
+        hasChapters: false,
+        hasAttachments: false,
+      },
+      target: "av1",
+      backend: "videotoolbox",
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      mkvmerge: "mkvmerge",
+      conservative: false,
+    });
+    expect(args).toContain("av1_videotoolbox");
+    expect(args).toContain("-b:v");
+    expect(args).toContain("-maxrate");
+    expect(args).toContain("nv12");
+    expect(args).not.toContain("-rc");
+    expect(args).not.toContain("hvc1");
+    expect(args).not.toContain("main10");
+  });
+
   it("converts timed-text subtitles to SubRip instead of copying them", () => {
     const report: InspectionReport = {
       sourceSig: "p|1",

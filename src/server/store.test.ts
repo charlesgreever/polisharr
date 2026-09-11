@@ -91,7 +91,7 @@ describe("store schema migration", () => {
         name: "homeserver",
         role: "standalone",
         lastSeen: 1,
-        hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+        hardware: { backend: "cuda", cuda: true, vaapi: false, videotoolbox: false, av1: true, reason: null },
         concurrency: 2,
         enabled: true,
         version: "0.0.0",

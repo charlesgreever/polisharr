@@ -31,4 +31,11 @@ export function transcodeBelowTargetLabel(target: "hevc" | "av1"): string {
   return `Transcode video below Target Encode (${target === "av1" ? "AV1" : "HEVC"})`;
 }
 
+export function hardwareBackendLabel(backend: string): string {
+  if (backend === "cuda") return "CUDA";
+  if (backend === "vaapi") return "VAAPI";
+  if (backend === "videotoolbox") return "VideoToolbox";
+  return backend;
+}
+
 export const FIELD_CONTROL = "h-10 w-full";

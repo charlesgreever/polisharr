@@ -20,11 +20,12 @@ export function parseNodeRole(value: unknown): NodeRole {
 
 export function parseHardwareInfo(value: unknown): HardwareInfo {
   const raw = value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  const backend = raw.backend === "cuda" || raw.backend === "vaapi" ? raw.backend : "none";
+  const backend = raw.backend === "cuda" || raw.backend === "vaapi" || raw.backend === "videotoolbox" ? raw.backend : "none";
   return {
     backend,
     cuda: raw.cuda === true,
     vaapi: raw.vaapi === true,
+    videotoolbox: raw.videotoolbox === true || backend === "videotoolbox",
     av1: raw.av1 === true,
     reason: typeof raw.reason === "string" ? raw.reason : backend === "none" ? "No hardware encoder is visible." : null,
     vaapiDevice: typeof raw.vaapiDevice === "string" ? raw.vaapiDevice : raw.vaapiDevice === null ? null : undefined,
@@ -38,6 +39,9 @@ export function nodeHardwareLabel(hardware: HardwareInfo): string {
   }
   if (hardware.backend === "vaapi") {
     return hardware.av1 ? "Intel or AMD GPU, AV1 encoder listed" : "Intel or AMD GPU, AV1 encoder not listed";
+  }
+  if (hardware.backend === "videotoolbox") {
+    return hardware.av1 ? "Apple media engine, AV1 encoder listed" : "Apple media engine, AV1 encoder not listed";
   }
   return hardware.reason ?? "No hardware encoder is visible.";
 }

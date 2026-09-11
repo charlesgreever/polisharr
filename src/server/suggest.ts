@@ -174,7 +174,7 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
 
   const warnings: string[] = [];
   if (transcode && input.hardwareAvailable === false) {
-    warnings.push("Hardware encode is unavailable. This transcode will fail until CUDA or VAAPI is available.");
+    warnings.push("Hardware encode is unavailable. This transcode will fail until NVIDIA, Intel/AMD, or an Apple media engine is available.");
   }
   if (skipDvP5) {
     warnings.push("This file is Dolby Vision Profile 5. Re-encoding it as ordinary HDR makes the picture look yellow.");

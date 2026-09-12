@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1112,6 +1112,32 @@ describe("public HTTP behavior", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+
+  it("reports whether Keep can rename on the review volume", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const movies = join(ctx.dir, "Movies");
+    const review = join(ctx.dir, "review-path");
+    mkdirSync(movies);
+    mkdirSync(review);
+    ctx.store.replaceLibraryRoots("radarr-a", [movies]);
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers: { cookie: cookie(setupRes) },
+      body: JSON.stringify({ reviewPath: review }),
+    });
+    const body = (await (await ctx.app.app.request("/api/settings", { headers: { cookie: cookie(setupRes) } })).json()) as {
+      storage?: { sameVolume: boolean; note: string };
+    };
+    expect(body.storage).toEqual({
+      sameVolume: true,
+      note: "Keep can rename on this volume.",
+    });
   });
 
   it("rejects malformed Settings input without changing saved values", async () => {

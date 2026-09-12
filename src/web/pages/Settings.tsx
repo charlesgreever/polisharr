@@ -42,7 +42,9 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
 
   const save = () => {
     if (!data) return;
-    void api.saveSettings(data).then(() => {
+    void api.saveSettings(data).then(() => api.settings()).then((payload) => {
+      setData(payload);
+      setUsername(payload.username ?? "");
       setMsg("Settings saved.");
       onChange();
     }).catch((error: Error) => setMsg(error.message));
@@ -78,6 +80,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         <Field label="Review folder">
           <input className={FIELD_CONTROL} value={data.reviewPath} onChange={(e) => setData({ ...data, reviewPath: e.target.value })} />
         </Field>
+        {data.storage?.note && <p className="help m-0">{data.storage.note}</p>}
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={data.localAuthBypass} onChange={(e) => setData({ ...data, localAuthBypass: e.target.checked })} />
           Allow local addresses without a password

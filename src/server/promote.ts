@@ -1,6 +1,7 @@
-import { access, copyFile, rename, unlink } from "node:fs/promises";
+import { access, rename, unlink } from "node:fs/promises";
 import { extname } from "node:path";
 import { notifyPlayers } from "./notify.ts";
+import { placeFile, type PlaceMethod } from "./fs-copy.ts";
 import type { ArrKind, ExecutablePlan, LibraryItem, PlayerKind } from "./types.ts";
 
 export type PromoteInput = {
@@ -21,6 +22,7 @@ export type PromoteResult = {
   savedBytes: number;
   warning: string | null;
   error: string | null;
+  placeMethod?: PlaceMethod | null;
 };
 
 export function stagedNewPath(destPath: string): string {
@@ -61,8 +63,8 @@ function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
 
-export async function replaceLibraryFile(outputPath: string, destPath: string, originalPath = destPath): Promise<void> {
-  // Move the original aside, then copy the sidecar onto dest. Do not write dest.opt-new
+export async function replaceLibraryFile(outputPath: string, destPath: string, originalPath = destPath): Promise<PlaceMethod> {
+  // Move the original aside, then place the sidecar onto dest. Do not write dest.opt-new
   // in the Arr library folder: a series refresh can pick that sibling up and the rename fails with ENOENT.
   const backup = stagedBackupPath(destPath);
   if (await pathExists(backup)) {
@@ -75,8 +77,9 @@ export async function replaceLibraryFile(outputPath: string, destPath: string, o
   } catch (error) {
     if (!isMissing(error)) throw error;
   }
+  let method: PlaceMethod = "copy";
   try {
-    await copyFile(outputPath, destPath);
+    method = (await placeFile(outputPath, destPath)).method;
   } catch (error) {
     if (destMoved) {
       await rename(backup, destPath).catch(() => undefined);
@@ -87,6 +90,7 @@ export async function replaceLibraryFile(outputPath: string, destPath: string, o
   await unlink(stagedNewPath(destPath)).catch(() => undefined);
   if (outputPath !== destPath) await unlink(outputPath).catch(() => undefined);
   if (originalPath !== destPath) await unlink(originalPath).catch(() => undefined);
+  return method;
 }
 
 export function promotedPath(sourcePath: string, plan?: ExecutablePlan): string {
@@ -97,8 +101,9 @@ export function promotedPath(sourcePath: string, plan?: ExecutablePlan): string 
 
 export async function promote(input: PromoteInput): Promise<PromoteResult> {
   const destPath = promotedPath(input.item.path, input.plan);
+  let placeMethod: PlaceMethod | null = null;
   try {
-    await replaceLibraryFile(input.outputPath, destPath, input.item.path);
+    placeMethod = await replaceLibraryFile(input.outputPath, destPath, input.item.path);
   } catch (error) {
     return {
       replaced: false,
@@ -106,6 +111,7 @@ export async function promote(input: PromoteInput): Promise<PromoteResult> {
       savedBytes: 0,
       warning: null,
       error: error instanceof Error ? error.message : "Keep could not replace the library file.",
+      placeMethod: null,
     };
   }
   const playerErrors = await notifyPlayers(input.players, input.fetch);
@@ -116,5 +122,6 @@ export async function promote(input: PromoteInput): Promise<PromoteResult> {
     savedBytes: Math.max(0, input.sourceSize - input.outputSize),
     warning,
     error: null,
+    placeMethod,
   };
 }

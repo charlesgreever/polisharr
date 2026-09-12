@@ -252,6 +252,7 @@ export type SettingsPayload = {
   instances: Array<{ id: string; kind: "radarr" | "sonarr" | "plex" | "jellyfin"; name: string; url: string; enabled: boolean; hasApiKey?: boolean; hasToken?: boolean }>;
   firstRun: FirstRun;
   profilePreviews?: Array<{ category: string; name: string; gbPerHour: number; mbPerMin: number }>;
+  storage?: { sameVolume: boolean; note: string };
 };
 export type LibraryRow = {
   id: string;

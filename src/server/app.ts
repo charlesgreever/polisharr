@@ -43,6 +43,7 @@ import { createInspectionRunner } from "./inspection-runner.ts";
 import { createLibraryReadModel } from "./library-read-model.ts";
 import { shouldQueueNewImport } from "./auto-queue.ts";
 import { updateSettings } from "./settings.ts";
+import { describePlacement } from "./fs-copy.ts";
 import { LibrarySync, pathsOverlap } from "./library-sync.ts";
 import { parseArrWebhook, presentedWebhookToken, webhookTokenMatches } from "./arr-webhook.ts";
 import { parseSuggestionFilters } from "./suggestion-filters.ts";
@@ -477,9 +478,10 @@ export function createApp(opts: AppOptions) {
     return c.json({ ok: true });
   });
 
-  app.get("/api/settings", (c) => {
+  app.get("/api/settings", async (c) => {
     const settings = store.getSettings();
     const thisNodeId = store.localNodeId();
+    const storage = await describePlacement(settings.reviewPath, store.listLibraryRoots());
     return c.json({
       ...settings,
       defaultEncodeNodeId: resolvedDefaultEncodeNodeId(thisNodeId),
@@ -491,6 +493,7 @@ export function createApp(opts: AppOptions) {
       firstRun: firstRunState(),
       profilePreviews: profilePreviews(settings.sizeCaps),
       thisNodeId,
+      storage,
     });
   });
 

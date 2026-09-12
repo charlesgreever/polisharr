@@ -5,7 +5,7 @@ Polisharr is a companion container for Radarr and Sonarr. It inspects the same l
 This tree is a greenfield rewrite. Do not import the previous application code.
 
 **PRD:** [docs/v2 prd.md](docs/v2%20prd.md) (v2). The rewrite PRD is [docs/prd.md](docs/prd.md).
-**Plan:** remaining work is [plans/review-follow-up.md](plans/review-follow-up.md). Multi-node (one master, extra GPU boxes): [plans/multi-node.md](plans/multi-node.md). Shipped v2 work: [plans/v2-implementation-plan.md](plans/v2-implementation-plan.md). Earlier review-gap work: [plans/review-gap-remediation.md](plans/review-gap-remediation.md).
+**Plan:** remaining work is [plans/review-follow-up.md](plans/review-follow-up.md). Multi-node (one master, extra GPU boxes): [plans/multi-node.md](plans/multi-node.md). Same-volume Keep and clone: [plans/native-fs-copy.md](plans/native-fs-copy.md). Shipped v2 work: [plans/v2-implementation-plan.md](plans/v2-implementation-plan.md). Earlier review-gap work: [plans/review-gap-remediation.md](plans/review-gap-remediation.md).
 **Engineering standard:** [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md)
 **Prose standard:** [CODING_STANDARDS.md](CODING_STANDARDS.md)
 
@@ -73,7 +73,7 @@ Recreate the container after you change GPU settings. To compile this tree inste
 
 ### 4. First run
 
-Open `http://localhost:7373` (or the host address you published). Create the admin account. Polisharr then collects preferred language, a review folder (where finished copies wait for Keep, outside movie and show libraries), and at least one enabled Radarr or Sonarr. Plex and Jellyfin can wait; add them later in Settings. Optional: add a webhook so new imports show up immediately ([Webhooks from Radarr and Sonarr](#webhooks-from-radarr-and-sonarr)). The sidebar shows the running version from `package.json`.
+Open `http://localhost:7373` (or the host address you published). Create the admin account. Polisharr then collects preferred language, a review folder (where finished copies wait for Keep, outside movie and show libraries), and at least one enabled Radarr or Sonarr. Put that review folder on the **same share** as Movies and TV so Keep can rename instead of copying the whole file back over the network. Plex and Jellyfin can wait; add them later in Settings. Optional: add a webhook so new imports show up immediately ([Webhooks from Radarr and Sonarr](#webhooks-from-radarr-and-sonarr)). The sidebar shows the running version from `package.json`.
 
 Under **Default suggestion operations**, **Convert MP4 to MKV** is off by default. When enabled, Polisharr uses `mkvmerge` to create an MKV before any hardware encode. An MP4 that needs no other work gets a remux-only suggestion.
 
@@ -117,6 +117,22 @@ On the master, Settings → Nodes generates a cluster token. Copy it once into `
 A worker writes a sidecar on the shared review path. Direct write still replaces the library file on the master after the integrity check, then refreshes Arr. Queue new Arr imports still writes a sidecar and uses the house encode node.
 
 The worker's published port is only a stub page (hardware, master URL, join status). Open the master to manage the library.
+
+## Review folder and Keep speed
+
+Keep is fast when the review folder and the library live on the **same volume**. Polisharr then renames the sidecar onto the movie path. If they sit on different disks or shares, Keep copies the whole file.
+
+Settings shows **Keep can rename on this volume** or **Keep will copy**. Put `review-path` next to `Movies` on the same SMB share, ZFS dataset, or Windows drive. Do not put it inside a movie or show folder.
+
+| Setup | Notes |
+| --- | --- |
+| Synology, QNAP, TerraMaster, ZimaOS | One share for media and review. Btrfs/ZFS can clone when rename is not possible. |
+| TrueNAS | Same dataset. Cross-dataset clone can fail; Keep then copies. |
+| Unraid `/mnt/user` | FUSE often blocks rename across shares. Use the same user share, or bind `/mnt/cache` for a cache-only library. |
+| Windows | Same drive letter / volume. ReFS clones; NTFS usually copies after rename fails. |
+| Two NAS boxes | Keep copies. That is expected. |
+
+Workers still write the sidecar onto that shared review folder. Keep always runs on the master. Details: [plans/native-fs-copy.md](plans/native-fs-copy.md).
 
 ## Apple Silicon (M-series)
 

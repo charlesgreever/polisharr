@@ -14,6 +14,7 @@ import { isoInspectionLooksStale, normalizeInspection } from "./inspect.ts";
 import { refreshAndRenameArr } from "./arr.ts";
 import { encodeNeedFromPlan, LEASE_MS, nodeCanEncode, type RemoteJobDocument } from "./cluster.ts";
 import { encodeApiLabel } from "./hardware.ts";
+import { placeMethodSentence } from "./fs-copy.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
 
 export type EnqueueOptions = {
@@ -493,6 +494,7 @@ export class JobService {
           this.opts.store.addHistory(item.id, "failed", 0, this.now());
           return;
         }
+        if (outcome.placeMethod) this.opts.store.appendJobLog(id, placeMethodSentence(outcome.placeMethod));
         const synced = await this.syncLibraryFile(item, outcome.destPath, result.output.sizeBytes);
         const warning = appendWarning(outcome.warning, synced.warning);
         this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, promoteError: warning });
@@ -636,6 +638,7 @@ export class JobService {
       this.opts.store.updateReview(reviewId, { status: "pending", error: outcome.error });
       return;
     }
+    if (job && outcome.placeMethod) this.opts.store.appendJobLog(job.id, placeMethodSentence(outcome.placeMethod));
     this.opts.store.addHistory(item.id, "kept", outcome.savedBytes, this.now());
     const synced = await this.syncLibraryFile(item, outcome.destPath, review.sidecar.sizeBytes ?? item.sizeBytes);
     this.deleteReviewsForSidecar(review.sidecarPath);

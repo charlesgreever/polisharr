@@ -105,7 +105,7 @@ export function SetupPage({ firstRun, onReady }: { firstRun: FirstRun; onReady: 
               <span className="font-medium">Review folder</span>
               <input className={FIELD_CONTROL} value={reviewPath} onChange={(e) => setReviewPath(e.target.value)} placeholder="/mnt/nas/polisharr-review" />
             </label>
-            <p className="help m-0">Finished copies land here until you Keep. It must sit outside your movie and show libraries.</p>
+            <p className="help m-0">Finished copies land here until you Keep. Put it on the same share as the library, outside movie and show folders.</p>
             <button className="btn" type="button" disabled={!reviewPath.trim()} onClick={() => void saveReview()}>Save review folder</button>
           </div>
         )}

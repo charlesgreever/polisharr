@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdir, rmdir, stat, statfs, unlink } from "node:fs/promises";
+import { mkdir, rmdir, stat, statfs, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
@@ -12,6 +12,7 @@ import {
   raisedTargetBytes,
   videoBitrateForTarget,
 } from "./size-budget.ts";
+import { placeFile, placeMethodSentence } from "./fs-copy.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -247,7 +248,10 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
         }
       }
       emit("finishing", 0.95);
-      if (current !== sidecarPath) await copyFile(current, sidecarPath);
+      if (current !== sidecarPath) {
+        const placed = await placeFile(current, sidecarPath);
+        req.onLog?.(placeMethodSentence(placed.method));
+      }
       const output = await probeOutput(req.ffprobe, sidecarPath);
       if (output.durationSec <= 0 || (req.report.durationSec > 0 && output.durationSec < req.report.durationSec * 0.9)) {
         const srcMin = Math.round(req.report.durationSec / 60);

@@ -41,6 +41,7 @@ import type { ArrKind, CustomPlanDraft, HardwareInfo, PlayerKind, Settings, Sugg
 import { parseAudioMix, parseVideoTarget } from "./types.ts";
 import { createInspectionRunner } from "./inspection-runner.ts";
 import { createLibraryReadModel } from "./library-read-model.ts";
+import { collectTitleLinks } from "./external-links.ts";
 import { shouldQueueNewImport } from "./auto-queue.ts";
 import { updateSettings } from "./settings.ts";
 import { describePlacement } from "./fs-copy.ts";
@@ -818,8 +819,20 @@ export function createApp(opts: AppOptions) {
   app.get("/api/library/items/:id", async (c) => {
     const item = store.getItem(c.req.param("id"));
     if (!item) return c.json({ error: "That title is not in the library." }, 404);
+    const presented = library.item(item.id, true);
+    const links = await collectTitleLinks({
+      item,
+      instance: store.getInstance(item.instanceId),
+      players: store.listInstances().filter((row) => row.kind === "plex" || row.kind === "jellyfin"),
+      decrypt: (packed) => decryptSecret(secret, packed),
+      fetch: httpFetch,
+      saveArrIds: (ids) => {
+        if (!ids.tmdbId && !ids.tvdbId && !ids.titleSlug) return;
+        store.upsertItem({ ...item, ...ids });
+      },
+    });
     return c.json({
-      item: library.item(item.id, true),
+      item: { ...presented, links },
       hardware: lastHardware,
       av1Available: clusterAv1(),
       settings: {

@@ -46,6 +46,9 @@ export type SeriesSummaryRecord = {
   suggestionCount: number;
   videoTarget: VideoTarget | null;
   audioMix: AudioMix | null;
+  instanceUrl: string;
+  tvdbId: number | null;
+  titleSlug: string | null;
 };
 
 export type StoredInstance = {
@@ -222,6 +225,9 @@ export class Store {
     this.ensureColumn("library_items", "file_changed_at", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("library_items", "kept_size_bytes", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("library_items", "video_target", "TEXT");
+    this.ensureColumn("library_items", "tmdb_id", "INTEGER");
+    this.ensureColumn("library_items", "tvdb_id", "INTEGER");
+    this.ensureColumn("library_items", "title_slug", "TEXT");
     this.ensureColumn("series_preferences", "audio_mix", "TEXT");
     this.migrateSeriesVideoTargets();
     this.db.prepare("DELETE FROM settings WHERE key = 'github_token'").run();
@@ -373,14 +379,17 @@ export class Store {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO library_items (id, instance_id, arr_id, arr_series_id, arr_episode_file_id, type, title, show_title, season, episode, episode_title, path, size_bytes, quality, resolution, profile, tags, poster_remote, poster_bytes, size_exempt, first_seen_at, file_changed_at)
-         VALUES (@id, @instanceId, @arrId, @arrSeriesId, @arrEpisodeFileId, @type, @title, @showTitle, @season, @episode, @episodeTitle, @path, @sizeBytes, @quality, @resolution, @profile, @tags, @posterRemoteUrl, @posterBytes, @sizeExempt, @now, @now)
+        `INSERT INTO library_items (id, instance_id, arr_id, arr_series_id, arr_episode_file_id, type, title, show_title, season, episode, episode_title, path, size_bytes, quality, resolution, profile, tags, poster_remote, poster_bytes, size_exempt, first_seen_at, file_changed_at, tmdb_id, tvdb_id, title_slug)
+         VALUES (@id, @instanceId, @arrId, @arrSeriesId, @arrEpisodeFileId, @type, @title, @showTitle, @season, @episode, @episodeTitle, @path, @sizeBytes, @quality, @resolution, @profile, @tags, @posterRemoteUrl, @posterBytes, @sizeExempt, @now, @now, @tmdbId, @tvdbId, @titleSlug)
          ON CONFLICT(instance_id, type, arr_id) DO UPDATE SET
            title=excluded.title, show_title=excluded.show_title, season=excluded.season, episode=excluded.episode,
            episode_title=excluded.episode_title, path=excluded.path, size_bytes=excluded.size_bytes, quality=excluded.quality,
            resolution=excluded.resolution, profile=excluded.profile, tags=excluded.tags, poster_remote=excluded.poster_remote,
            poster_bytes=COALESCE(excluded.poster_bytes, poster_bytes),
            arr_series_id=excluded.arr_series_id, arr_episode_file_id=excluded.arr_episode_file_id,
+           tmdb_id=COALESCE(excluded.tmdb_id, library_items.tmdb_id),
+           tvdb_id=COALESCE(excluded.tvdb_id, library_items.tvdb_id),
+           title_slug=COALESCE(excluded.title_slug, library_items.title_slug),
            file_changed_at=CASE WHEN library_items.path != excluded.path OR library_items.size_bytes != excluded.size_bytes THEN excluded.file_changed_at ELSE library_items.file_changed_at END`,
       )
       .run({
@@ -388,6 +397,9 @@ export class Store {
         tags: JSON.stringify(item.tags),
         sizeExempt: item.sizeExempt ? 1 : 0,
         posterBytes: item.posterBytes ?? null,
+        tmdbId: item.tmdbId ?? null,
+        tvdbId: item.tvdbId ?? null,
+        titleSlug: item.titleSlug ?? null,
         now,
       });
     if (previous && previous.path !== item.path) {
@@ -545,7 +557,8 @@ export class Store {
 
   seriesPage(offset: number, limit: number): { rows: SeriesSummaryRecord[]; total: number } {
     const rows = this.db.prepare(
-      `SELECT i.instance_id, inst.name AS instance_name, i.arr_series_id, i.show_title,
+      `SELECT i.instance_id, inst.name AS instance_name, inst.url AS instance_url, i.arr_series_id, i.show_title,
+              MAX(i.tvdb_id) AS tvdb_id, MAX(i.title_slug) AS title_slug,
               COUNT(*) AS episode_count,
               SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM suggestions s WHERE s.item_id = i.id AND s.dismissed = 0
@@ -560,7 +573,7 @@ export class Store {
        JOIN instances inst ON inst.id = i.instance_id
        LEFT JOIN series_preferences svt ON svt.instance_id = i.instance_id AND svt.arr_series_id = i.arr_series_id
        WHERE i.type = 'episode' AND i.arr_series_id IS NOT NULL
-       GROUP BY i.instance_id, inst.name, i.arr_series_id, i.show_title, svt.video_target, svt.audio_mix
+       GROUP BY i.instance_id, inst.name, inst.url, i.arr_series_id, i.show_title, svt.video_target, svt.audio_mix
        ORDER BY LOWER(i.show_title), i.instance_id, i.arr_series_id
        LIMIT ? OFFSET ?`,
     ).all(limit, offset) as Record<string, unknown>[];
@@ -582,6 +595,9 @@ export class Store {
         suggestionCount: Number(row.suggestion_count),
         videoTarget: parseVideoTarget(row.video_target),
         audioMix: parseAudioMix(row.audio_mix),
+        instanceUrl: String(row.instance_url ?? ""),
+        tvdbId: row.tvdb_id == null ? null : Number(row.tvdb_id),
+        titleSlug: row.title_slug == null ? null : String(row.title_slug),
       })),
       total,
     };
@@ -1104,6 +1120,14 @@ export class Store {
     ).get(nodeId) as { n: number }).n);
   }
 
+  busyCountOnNode(nodeId: string): number {
+    return Number((this.db.prepare(
+      `SELECT COUNT(*) AS n FROM jobs WHERE
+         (status = 'running' AND node_id = ?)
+         OR (status IN ('queued', 'held', 'paused') AND assigned_node_id = ?)`,
+    ).get(nodeId, nodeId) as { n: number }).n);
+  }
+
   poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[]): number {
     return poolSpreadLimit(freeSlots, needs.length, this.peerCapableFreeSlots(nodeId, needs, now));
   }
@@ -1470,6 +1494,9 @@ function mapItem(row: Record<string, unknown>): LibraryItem {
     hasPoster: Boolean(row.poster_bytes || row.poster_remote),
     sizeExempt: Number(row.size_exempt) === 1,
     videoTarget: parseVideoTarget(row.video_target),
+    tmdbId: row.tmdb_id == null ? null : Number(row.tmdb_id),
+    tvdbId: row.tvdb_id == null ? null : Number(row.tvdb_id),
+    titleSlug: row.title_slug == null ? null : String(row.title_slug),
     firstSeenAt: Number(row.first_seen_at ?? 0),
     fileChangedAt: Number(row.file_changed_at ?? 0),
     keptSizeBytes: Number(row.kept_size_bytes ?? 0),

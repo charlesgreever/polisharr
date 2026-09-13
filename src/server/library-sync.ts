@@ -131,7 +131,9 @@ export class LibrarySync {
           show.profile,
           show.tags,
         );
-        for (const episode of episodes) this.storeEpisode(instance, episode);
+        for (const episode of episodes) {
+          this.storeEpisode(instance, { ...episode, tvdbId: show.tvdbId, titleSlug: show.titleSlug, tmdbId: show.tmdbId });
+        }
         found = true;
       } catch {
         /* try the next Sonarr */
@@ -161,7 +163,9 @@ export class LibrarySync {
         await fetchJson({ url: instance.url, apiKey: key }, `/api/v3/episode?seriesId=${show.id}&includeEpisodeFile=true`, this.options.fetch),
         show.title, show.posterUrl, show.profile, show.tags,
       );
-      for (const episode of episodes) episodeIds.push(this.storeEpisode(instance, episode));
+      for (const episode of episodes) {
+        episodeIds.push(this.storeEpisode(instance, { ...episode, tvdbId: show.tvdbId, titleSlug: show.titleSlug, tmdbId: show.tmdbId }));
+      }
     }
     this.options.store.removeItemsNotIn(instance.id, "episode", episodeIds);
   }
@@ -174,6 +178,7 @@ export class LibrarySync {
       sizeBytes: movie.size, quality: movie.quality, resolution: movie.resolution, profile: movie.profile,
       tags: movie.tags, posterRemoteUrl: movie.posterUrl,
       sizeExempt: this.options.store.getItem(id)?.sizeExempt ?? false,
+      tmdbId: movie.tmdbId, tvdbId: movie.tvdbId, titleSlug: movie.titleSlug,
     });
     return id;
   }
@@ -187,6 +192,7 @@ export class LibrarySync {
       episodeTitle: episode.episodeTitle, path: episode.path, sizeBytes: episode.size, quality: episode.quality,
       resolution: episode.resolution, profile: episode.profile, tags: episode.tags,
       posterRemoteUrl: episode.posterUrl, sizeExempt: this.options.store.getItem(id)?.sizeExempt ?? false,
+      tmdbId: episode.tmdbId, tvdbId: episode.tvdbId, titleSlug: episode.titleSlug,
     });
     return id;
   }

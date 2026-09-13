@@ -232,6 +232,9 @@ The UI follows Arr information architecture with a Vision UI-inspired dark glass
 170. As a library owner, I want activity history (finished, flagged, discarded, kept, failed, cancelled), so that I can see what Polisharr already did.
 171. As a library owner, I want to exclude a path, quality profile, tag, or individual title from suggestions, so that a reference archive or kids profile is left alone.
 172. As an operator, I want to connect Plex and Jellyfin with their own URLs and tokens, so that notify is explicit and testable.
+172b. As a library owner, I want a title page link that opens that movie in Radarr or that series in Sonarr, so that I can jump to the Arr without searching.
+172c. As a library owner, I want the series header to open that show in Sonarr, so that I do not have to pick an episode first.
+172d. As a library owner, I want the title page to open that file in Plex or Jellyfin when those apps can find it, so that I can play or inspect the same title there.
 173. As a Plex user in the living room, I want optimized files to direct-play more often on a TV without surround, so that I am not waiting on a live transcode.
 174. As a Plex user, I want smaller HEVC files, so that the NAS lasts longer and remote streams are less painful.
 175. As a library owner, I want the shell to follow Arr information architecture (Home, Movies, Series, Suggestions, Queue, Review, Errors, History, Settings) with a Vision UI-inspired dark glass look, so that I can find things in a modern Arr companion.

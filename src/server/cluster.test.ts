@@ -120,6 +120,11 @@ describe("cluster node identity", () => {
       1_000,
       "intel",
     )?.id).toBe("intel");
+    expect(pickOpenEncodeNode(
+      [{ ...hevc, runningCount: 1 }, { ...mac, runningCount: 0 }],
+      "hevc",
+      1_000,
+    )?.id).toBe("mac");
   });
 
   it("spreads leftover pool jobs when they would fit in parallel, and fills a GPU when the queue is still deep", () => {

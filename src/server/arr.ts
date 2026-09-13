@@ -15,6 +15,9 @@ export type ArrTitle = {
   profile: string;
   tags: string[];
   posterUrl: string | null;
+  tmdbId: number | null;
+  tvdbId: number | null;
+  titleSlug: string | null;
 };
 
 export type ArrMovie = ArrTitle;
@@ -65,11 +68,21 @@ export function parseRadarrMovies(payload: unknown): ArrMovie[] {
       profile: str(asRecord(row.qualityProfile).name, ""),
       tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
       posterUrl: posterFrom(row.images),
+      ...arrWebIds(row),
     }];
   });
 }
 
-export function parseSonarrSeries(payload: unknown): Array<{ id: number; title: string; posterUrl: string | null; profile: string; tags: string[] }> {
+export function parseSonarrSeries(payload: unknown): Array<{
+  id: number;
+  title: string;
+  posterUrl: string | null;
+  profile: string;
+  tags: string[];
+  tmdbId: number | null;
+  tvdbId: number | null;
+  titleSlug: string | null;
+}> {
   if (!Array.isArray(payload)) throw shape("Sonarr series list");
   return payload.map((raw) => {
     const row = asRecord(raw);
@@ -79,8 +92,24 @@ export function parseSonarrSeries(payload: unknown): Array<{ id: number; title: 
       posterUrl: posterFrom(row.images),
       profile: str(asRecord(row.qualityProfile).name, ""),
       tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
+      ...arrWebIds(row),
     };
   });
+}
+
+export function parseArrWebIds(payload: unknown): { tmdbId: number | null; tvdbId: number | null; titleSlug: string | null } {
+  return arrWebIds(asRecord(payload));
+}
+
+export function arrWebIds(raw: Record<string, unknown>): { tmdbId: number | null; tvdbId: number | null; titleSlug: string | null } {
+  const slug = str(raw.titleSlug, "").trim();
+  const tmdb = num(raw.tmdbId);
+  const tvdb = num(raw.tvdbId);
+  return {
+    tmdbId: tmdb > 0 ? tmdb : null,
+    tvdbId: tvdb > 0 ? tvdb : null,
+    titleSlug: slug || null,
+  };
 }
 
 export function parseSonarrEpisodes(payload: unknown, seriesTitle: string, posterUrl: string | null, profile: string, tags: string[]): ArrEpisode[] {
@@ -107,9 +136,12 @@ export function parseSonarrEpisodes(payload: unknown, seriesTitle: string, poste
         profile,
         tags,
         posterUrl,
+        tmdbId: null,
+        tvdbId: null,
+        titleSlug: null,
       };
     })
-    .filter((row): row is ArrEpisode => Boolean(row));
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
 }
 
 export function parseRootFolders(payload: unknown): string[] {

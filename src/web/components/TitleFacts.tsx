@@ -1,4 +1,4 @@
-import { formatSize, type LibraryRow } from "../api";
+import { formatSize, type ExternalLink, type LibraryRow } from "../api";
 import { fileNameFromPath, formatDuration, hdrLabel } from "../title-display";
 import { Pill } from "./ui";
 
@@ -47,6 +47,18 @@ export function TitleFacts({ item }: { item: LibraryRow }) {
               {item.path || "No file path from Radarr or Sonarr yet."}
             </dd>
           </div>
+          {item.links && item.links.length > 0 && (
+            <div>
+              <dt className="text-xs font-medium uppercase tracking-wide text-muted">Open</dt>
+              <dd className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm">
+                {item.links.map((link: ExternalLink) => (
+                  <a key={link.href} className="text-brand-500 underline-offset-2 hover:underline" href={link.href} target="_blank" rel="noreferrer">
+                    {link.label}
+                  </a>
+                ))}
+              </dd>
+            </div>
+          )}
         </dl>
       </div>
     </div>

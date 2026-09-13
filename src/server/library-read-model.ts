@@ -2,6 +2,7 @@ import type { Store, LibrarySnapshot } from "./store.ts";
 import type { LibraryItem } from "./types.ts";
 import { displayTitle, sharedFileLabel } from "./titles.ts";
 import { audioTrackLabel, subtitleTrackLabel } from "./tracks.ts";
+import { arrLinkForLibraryItem } from "./external-links.ts";
 
 export type Page<T> = {
   items: T[];
@@ -21,11 +22,29 @@ export function createLibraryReadModel(store: Store) {
     series(offset: number, limit: number) {
       const page = store.seriesPage(offset, limit);
       return {
-        items: page.rows.map((row) => ({
-          ...row,
-          id: `${row.instanceId}:${row.arrSeriesId}`,
-          key: `${row.instanceId}:${row.arrSeriesId}`,
-        })),
+        items: page.rows.map((row) => {
+          const sonarr = arrLinkForLibraryItem({
+            type: "episode",
+            instanceKind: "sonarr",
+            instanceUrl: row.instanceUrl,
+            tvdbId: row.tvdbId,
+            titleSlug: row.titleSlug,
+          });
+          return {
+            id: `${row.instanceId}:${row.arrSeriesId}`,
+            key: `${row.instanceId}:${row.arrSeriesId}`,
+            instanceId: row.instanceId,
+            instanceName: row.instanceName,
+            arrSeriesId: row.arrSeriesId,
+            showTitle: row.showTitle,
+            episodeCount: row.episodeCount,
+            healthyCount: row.healthyCount,
+            suggestionCount: row.suggestionCount,
+            videoTarget: row.videoTarget,
+            audioMix: row.audioMix,
+            links: sonarr ? [sonarr] : [],
+          };
+        }),
         nextOffset: nextOffset(offset, limit, page.total),
         total: page.total,
       };

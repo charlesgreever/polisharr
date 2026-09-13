@@ -55,6 +55,15 @@ describe("title facts", () => {
     expect(html).toContain("1h 59m");
   });
 
+  it("links out to Radarr in a new tab", () => {
+    const html = renderToStaticMarkup(createElement(TitleFacts, {
+      item: item({ links: [{ label: "Open in Radarr", href: "http://radarr:7878/movie/11" }] }),
+    }));
+    expect(html).toContain("Open in Radarr");
+    expect(html).toContain("http://radarr:7878/movie/11");
+    expect(html).toContain("target=\"_blank\"");
+  });
+
   it("shows when another episode uses the same file", () => {
     const html = renderToStaticMarkup(createElement(TitleFacts, { item: item({ sharedFileLabel: "Same file as E36" }) }));
     expect(html).toContain("Same file as E36");

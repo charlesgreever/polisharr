@@ -444,6 +444,26 @@ describe("store schema migration", () => {
     expect(store.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["pin-a", "pin-b", "pool-a"]);
   });
 
+  it("counts assigned waiting jobs toward a node's load", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-busy-count-")), "polisharr.db"));
+    stores.push(store);
+    const plan = {
+      origin: "bulk" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    store.insertJob({
+      id: "run", itemId: "a", suggestionId: null, status: "running", phase: "transcoding", progress: 0.2,
+      error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: "5090",
+    });
+    store.updateJob("run", { nodeId: "5090" });
+    store.insertJob({
+      id: "wait", itemId: "b", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 2, writeMode: "sidecar", plan, assignedNodeId: "5090",
+    });
+    expect(store.runningCountOnNode("5090")).toBe(1);
+    expect(store.busyCountOnNode("5090")).toBe(2);
+  });
+
   it("returns interrupted running jobs to the queue after restart", () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-recovery-"));
     const store = new Store(join(dir, "polisharr.db"));

@@ -93,6 +93,7 @@ export function pickOpenEncodeNode(
   if (capable.length === 0) return null;
   const preferred = preferredId && !isAnyOpenNode(preferredId) ? preferredId : "";
   capable.sort((left, right) => {
+    if (left.runningCount !== right.runningCount) return left.runningCount - right.runningCount;
     const freeLeft = left.concurrency - left.runningCount;
     const freeRight = right.concurrency - right.runningCount;
     if (freeRight !== freeLeft) return freeRight - freeLeft;

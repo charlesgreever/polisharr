@@ -105,7 +105,7 @@ export class JobService {
     const locked = options.writeMode !== undefined;
     const writeMode = options.writeMode ?? this.opts.store.getSettings().writeMode;
     const plan = { ...planFromSuggestion(suggestion, writeMode), writeModeLocked: locked };
-    const assignedNodeId = this.assignedNodeId(options.assignedNodeId);
+    const assignedNodeId = this.pinLeastLoadedNode(plan, this.assignedNodeId(options.assignedNodeId));
     if (assignedNodeId) {
       const incapable = this.rejectIncapableNode(assignedNodeId, plan);
       if (incapable) return incapable;
@@ -140,7 +140,7 @@ export class JobService {
     if (busy) return busy;
     this.dismissOpenSuggestionsForItem(item);
     const options = typeof runNowOrOpts === "boolean" ? { runNow: runNowOrOpts } : runNowOrOpts;
-    const assignedNodeId = this.assignedNodeId(options.assignedNodeId);
+    const assignedNodeId = this.pinLeastLoadedNode(plan, this.assignedNodeId(options.assignedNodeId));
     if (assignedNodeId) {
       const incapable = this.rejectIncapableNode(assignedNodeId, plan);
       if (incapable) return incapable;
@@ -210,11 +210,16 @@ export class JobService {
     return { moved, skipped };
   }
 
+  private pinLeastLoadedNode(plan: { video?: { kind?: string; codec?: string } }, assigned: string | null): string | null {
+    if (assigned) return assigned;
+    return this.pickOpenNode(encodeNeedFromPlan(plan))?.id ?? null;
+  }
+
   private pickOpenNode(need: import("./cluster.ts").EncodeNeed): { id: string; name: string } | null {
     const preferred = this.opts.store.getSettings().defaultEncodeNodeId;
     const nodes = this.opts.store.listNodes().map((node) => ({
       ...node,
-      runningCount: this.opts.store.runningCountOnNode(node.id),
+      runningCount: this.opts.store.busyCountOnNode(node.id),
     }));
     return pickOpenEncodeNode(nodes, need, this.now(), preferred);
   }

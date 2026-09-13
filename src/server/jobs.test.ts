@@ -857,5 +857,67 @@ describe("remote worker complete", () => {
     expect(store.getJob("waiting")?.assignedNodeId).toBe("mac");
     store.close();
   });
+
+  it("pins Any open node jobs to the least-loaded capable GPU at enqueue", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-least-loaded-"));
+    const store = new Store(join(dir, "polisharr.db"));
+    const now = 80_000;
+    const hardware = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    store.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: now, hardware, concurrency: 10, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: "4070", name: "4070", role: "worker", lastSeen: now, hardware, concurrency: 6, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: store.localNodeId(), name: "master", role: "master", lastSeen: now,
+      hardware: { backend: "none", cuda: false, vaapi: false, av1: false, reason: null },
+      concurrency: 1, enabled: false, version: "1", currentJobId: null,
+    });
+    store.saveSettings({ ...store.getSettings(), reviewPath: dir, defaultEncodeNodeId: "any" });
+    const instanceId = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
+    const item = (arrId: number) => {
+      const id = `${instanceId}:movie:${arrId}`;
+      store.upsertItem({
+        id, instanceId, arrId, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+        title: `Film ${arrId}`, showTitle: null, season: null, episode: null, episodeTitle: null, path: join(dir, `movie-${arrId}.mkv`),
+        sizeBytes: 8, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+      });
+      return id;
+    };
+    const jobs = new JobService({
+      store,
+      optimizer: async () => {
+        throw new Error("must not encode");
+      },
+      clock: () => now,
+      hardware: async () => hardware,
+      tools: { ffmpeg: "ffmpeg", ffprobe: "ffprobe", mkvmerge: "mkvmerge" },
+      decrypt: () => "",
+      fetch: (async () => new Response("{}")) as typeof fetch,
+      reinspectChangedItem: async () => ({ ok: true }),
+    });
+    const plan = {
+      origin: "custom" as const,
+      video: { kind: "copy" as const },
+      audio: [],
+      subtitles: [],
+      container: "mkv" as const,
+      writeMode: "sidecar" as const,
+      warning: null,
+      reasons: ["Drop extra languages."],
+      estimatedOutputBytes: 1,
+      category: "movie1080p" as const,
+    };
+    const first = jobs.enqueueCustom(item(1), plan, { assignedNodeId: "any" });
+    const second = jobs.enqueueCustom(item(2), plan, { assignedNodeId: "any" });
+    const pinned = jobs.enqueueCustom(item(3), plan, { assignedNodeId: "4070" });
+    expect("id" in first && "id" in second && "id" in pinned).toBe(true);
+    if (!("id" in first) || !("id" in second) || !("id" in pinned)) return;
+    expect(store.getJob(first.id)?.assignedNodeId).toBe("5090");
+    expect(store.getJob(second.id)?.assignedNodeId).toBe("4070");
+    expect(store.getJob(pinned.id)?.assignedNodeId).toBe("4070");
+    store.close();
+  });
 });
 

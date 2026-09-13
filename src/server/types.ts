@@ -237,6 +237,9 @@ export type LibraryItem = {
   hasPoster: boolean;
   sizeExempt: boolean;
   videoTarget?: VideoTarget | null;
+  tmdbId?: number | null;
+  tvdbId?: number | null;
+  titleSlug?: string | null;
   firstSeenAt?: number;
   fileChangedAt?: number;
   keptSizeBytes?: number;

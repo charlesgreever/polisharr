@@ -47,6 +47,13 @@ describe("Arr identity", () => {
     ]);
     expect(movies.map((row) => row.title)).toEqual(["Cars 3"]);
     expect(movies[0]?.path).toBe("/mnt/nas/Kids Movies/Cars 3.mkv");
+    expect(parseRadarrMovies([{
+      id: 2,
+      title: "Cars 3",
+      tmdbId: 260514,
+      titleSlug: "cars-3-260514",
+      movieFile: { path: "/mnt/nas/Kids Movies/Cars 3.mkv", size: 2, quality: { quality: { name: "Bluray-1080p" } } },
+    }])[0]).toMatchObject({ tmdbId: 260514, titleSlug: "cars-3-260514" });
   });
 
   it("skips a Radarr movieFile path that is a folder instead of a media file", () => {

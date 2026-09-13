@@ -285,6 +285,17 @@ function SeriesGroup({
             </span>
           </span>
         </button>
+        {summary.links?.map((link) => (
+          <a
+            key={link.href}
+            className="btn-secondary"
+            href={link.href}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {link.label}
+          </a>
+        ))}
         <button className="btn-secondary" type="button" onClick={toggle}>
           {open ? "Collapse" : "Expand"}
         </button>

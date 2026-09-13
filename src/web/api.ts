@@ -175,6 +175,7 @@ export type SeriesSummary = {
   suggestionCount: number;
   videoTarget?: "hevc" | "av1" | null;
   audioMix?: "stereo" | "surround" | null;
+  links?: ExternalLink[];
 };
 
 export type FirstRun = { hasAdmin: boolean; languageConfirmed: boolean; hasReviewPath: boolean; hasArr: boolean; complete: boolean };
@@ -289,6 +290,7 @@ export type SettingsPayload = {
   profilePreviews?: Array<{ category: string; name: string; gbPerHour: number; mbPerMin: number }>;
   storage?: { sameVolume: boolean; note: string };
 };
+export type ExternalLink = { label: string; href: string };
 export type LibraryRow = {
   id: string;
   instanceId: string;
@@ -321,6 +323,7 @@ export type LibraryRow = {
   width?: number;
   height?: number;
   resolution?: string;
+  links?: ExternalLink[];
 };
 export type SuggestionRow = {
   id: string;

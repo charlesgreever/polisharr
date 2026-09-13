@@ -24,6 +24,7 @@ import {
   cleanReviewLeftovers,
   removeEmptyDir,
   removeReviewArtifact,
+  WORK_DIR_GUARD,
   parseFfmpegProgress,
   parseMkvmergeProgress,
   planFromSuggestion,
@@ -113,6 +114,21 @@ describe("macOS AppleDouble leftovers", () => {
     expect(existsSync(tempFork)).toBe(false);
     expect(existsSync(workJob)).toBe(false);
     expect(existsSync(jobDirFork)).toBe(false);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not delete a live encode work folder while sweeping leftovers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-live-work-"));
+    const live = join(dir, ".work", "5090", "job-live");
+    const leftover = join(dir, ".work", "5090", "job-done");
+    await mkdir(live, { recursive: true });
+    await mkdir(leftover, { recursive: true });
+    await writeFile(join(live, WORK_DIR_GUARD), "");
+    await writeFile(join(leftover, "._gone.mkv"), "fork");
+    await cleanReviewLeftovers(dir);
+    expect(existsSync(live)).toBe(true);
+    expect(existsSync(join(live, WORK_DIR_GUARD))).toBe(true);
+    expect(existsSync(leftover)).toBe(false);
     await rm(dir, { recursive: true, force: true });
   });
 });

@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readdir, rmdir, stat, statfs, unlink } from "node:fs/promises";
+import { mkdir, readdir, rmdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
@@ -33,8 +33,23 @@ export async function removeReviewArtifact(path: string): Promise<void> {
   if (fork) await tryUnlink(fork);
 }
 
+export const WORK_DIR_GUARD = ".in-progress";
+
+export async function claimOptimizerWorkDir(workDir: string): Promise<void> {
+  // Write the guard before any encode output so a sibling leftover sweep cannot rmdir this empty folder.
+  await mkdir(workDir, { recursive: true });
+  await writeFile(join(workDir, WORK_DIR_GUARD), "");
+}
+
 export async function removeEmptyDir(path: string): Promise<void> {
   await sweepOrphanAppleDoubles(path);
+  let names: string[] = [];
+  try {
+    names = await readdir(path);
+  } catch {
+    return;
+  }
+  if (names.includes(WORK_DIR_GUARD)) return;
   try {
     await rmdir(path);
   } catch {
@@ -216,7 +231,7 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
     const plannedBytes = plan.estimatedOutputBytes ?? req.report.sizeBytes;
     await assertReviewCapacity(req.reviewDir, Math.max(req.report.sizeBytes, plannedBytes) + 256 * 1024 ** 2, options.capacity);
     const workDir = optimizerWorkDir(req.reviewDir, req.nodeId, req.jobId);
-    await mkdir(workDir, { recursive: true });
+    await claimOptimizerWorkDir(workDir);
     const suffix = req.jobId ? `-${req.jobId}` : "";
     const sidecarPath = join(req.reviewDir, `${basename(req.sourcePath).replace(/\.[^.]+$/, "")}${suffix}.mkv`);
     const temps: string[] = [];
@@ -313,6 +328,7 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
       throw error;
     } finally {
       await Promise.all(temps.map(removeReviewArtifact));
+      await tryUnlink(join(workDir, WORK_DIR_GUARD));
       await removeEmptyDir(workDir);
       await cleanReviewLeftovers(req.reviewDir);
     }

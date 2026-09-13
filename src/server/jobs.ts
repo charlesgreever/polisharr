@@ -449,16 +449,21 @@ export class JobService {
       const slots = Math.max(1, localNode?.concurrency ?? settings.concurrency);
       const capacity = slots - this.running.size;
       if (capacity <= 0) return;
-      const next = this.opts.store
-        .listJobs()
-        .filter((j) => {
-          if (j.status !== "queued" || !assignedToNode(j.assignedNodeId, localId)) return false;
-          if (j.assignedNodeId || !localNode) return true;
-          const plan = isExecutablePlan(j.plan) ? j.plan : planFromSuggestion(j.plan, j.writeMode);
-          return nodeCanEncode(localNode, encodeNeedFromPlan(plan));
-        })
-        .slice(0, capacity);
-      for (const job of next) void this.run(job.id, settings);
+      const queued = this.opts.store.listJobs().filter((job) => job.status === "queued");
+      if (!localNode) {
+        for (const job of queued.filter((row) => assignedToNode(row.assignedNodeId, localId)).slice(0, capacity)) {
+          void this.run(job.id, settings);
+        }
+        return;
+      }
+      const planNeed = (job: (typeof queued)[number]) =>
+        encodeNeedFromPlan(isExecutablePlan(job.plan) ? job.plan : planFromSuggestion(job.plan, job.writeMode));
+      const pinned = queued.filter((job) => job.assignedNodeId === localId);
+      const pool = queued.filter((job) => !job.assignedNodeId && nodeCanEncode(localNode, planNeed(job)));
+      const takePinned = pinned.slice(0, capacity);
+      const leftoverSlots = capacity - takePinned.length;
+      const poolBudget = this.opts.store.poolSpreadBudget(localId, leftoverSlots, this.now(), pool.map(planNeed));
+      for (const job of [...takePinned, ...pool.slice(0, poolBudget)]) void this.run(job.id, settings);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
       console.error(`The job runner skipped a tick because ${message}`);

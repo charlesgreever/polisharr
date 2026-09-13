@@ -157,6 +157,7 @@ The UI follows Arr information architecture with a Vision UI-inspired dark glass
 108. As a library owner, I want to reorder, pause, or remove queued items, so that tonight’s movie is not stuck behind a 4K encode.
 108b. As a library owner, I want a Queue action that moves a waiting job onto an open encode node, so that work does not sit behind a busy or sleeping GPU when another machine is free.
 108c. As a library owner, I want an Any open node choice (house default or per job) so a waiting job can fill the next free capable slot, and I want a job I pinned to one machine to stay there.
+108d. As a library owner, I want leftover Any open node jobs spread across encode nodes when the remaining work would fit in parallel, so the last titles do not all pile onto one GPU while other machines sit idle.
 109. As a library owner, I want the default concurrency to be one job, so that the GPU and NAS are not slammed out of the box.
 110. As a library owner, I want a toggle to allow more than one transcode at a time, so that I can use more of the GPU when I choose.
 111. As a library owner, I want the Encode section to give concurrency and scheduling changes an explicit Save action and honor whatever concurrency I save, so that the setting is not stranded in the browser or silently second-guessed.

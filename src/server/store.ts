@@ -23,7 +23,7 @@ import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
 import { parseStoredSettings } from "./settings.ts";
 import type { SuggestionFilters } from "./suggestion-filters.ts";
 import { suggestionTrackComparison } from "./tracks.ts";
-import { encodeNeedFromPlan, nodeCanEncode, parseHardwareInfo, parseNodeRole, type ClusterNode } from "./cluster.ts";
+import { encodeNeedFromPlan, nodeCanEncode, nodeIsOnline, parseHardwareInfo, parseNodeRole, poolSpreadLimit, type ClusterNode, type EncodeNeed } from "./cluster.ts";
 
 export type Page<T> = { items: T[]; nextOffset: number | null; total: number; pendingCount?: number; finishedCount?: number };
 
@@ -1049,11 +1049,18 @@ export class Store {
       const pool = this.db.prepare(
         "SELECT id FROM jobs WHERE status = 'queued' AND (assigned_node_id IS NULL OR assigned_node_id = '') ORDER BY position ASC",
       ).all() as Array<{ id: string }>;
+      const capable: Array<{ id: string; need: EncodeNeed }> = [];
       for (const row of pool) {
-        if (claimed.length >= limit) break;
         const job = this.getJob(row.id);
         if (!job) continue;
-        if (!nodeCanEncode(node, encodeNeedFromPlan("video" in job.plan ? job.plan : null))) continue;
+        const need = encodeNeedFromPlan("video" in job.plan ? job.plan : null);
+        if (!nodeCanEncode(node, need)) continue;
+        capable.push({ id: row.id, need });
+      }
+      const budget = this.poolSpreadBudget(nodeId, remaining, now, capable.map((row) => row.need));
+      const beforePool = claimed.length;
+      for (const row of capable) {
+        if (claimed.length - beforePool >= budget) break;
         takeOne(row.id, takePool);
       }
       return claimed;
@@ -1095,6 +1102,23 @@ export class Store {
     return Number((this.db.prepare(
       "SELECT COUNT(*) AS n FROM jobs WHERE node_id = ? AND status = 'running'",
     ).get(nodeId) as { n: number }).n);
+  }
+
+  poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[]): number {
+    return poolSpreadLimit(freeSlots, needs.length, this.peerCapableFreeSlots(nodeId, needs, now));
+  }
+
+  peerCapableFreeSlots(claimantId: string, needs: EncodeNeed[], now: number): number {
+    if (needs.length === 0) return 0;
+    let total = 0;
+    for (const peer of this.listNodes()) {
+      if (peer.id === claimantId || !peer.enabled || !nodeIsOnline(peer.lastSeen, now)) continue;
+      const free = Math.max(0, peer.concurrency - this.runningCountOnNode(peer.id));
+      if (free <= 0) continue;
+      if (!needs.some((need) => nodeCanEncode(peer, need))) continue;
+      total += free;
+    }
+    return total;
   }
 
   setJobAssignedNode(id: string, nodeId: string | null): void {

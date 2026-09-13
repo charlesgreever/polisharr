@@ -364,6 +364,86 @@ describe("store schema migration", () => {
     expect(gpu.map((job) => job.id).sort()).toEqual(["pinned", "pool-av1"]);
   });
 
+  it("spreads leftover Any open node jobs across nodes instead of filling one GPU", () => {
+    const hevc = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    const av1 = { backend: "cuda" as const, cuda: true, vaapi: false, av1: true, reason: null };
+    const hevcPlan = {
+      origin: "bulk" as const, video: { kind: "size" as const, codec: "hevc" as const, targetBytes: 1, downscale1080p: false, bitDepth: 8 },
+      audio: [], subtitles: [], container: "mkv" as const, writeMode: "sidecar" as const, warning: null, reasons: [],
+      estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    const av1Plan = { ...hevcPlan, video: { ...hevcPlan.video, codec: "av1" as const } };
+    const cluster = (path: string) => {
+      const store = new Store(join(mkdtempSync(join(tmpdir(), path)), "polisharr.db"));
+      stores.push(store);
+      const add = (id: string, name: string, concurrency: number, hardware = hevc) =>
+        store.upsertNode({
+          id, name, role: "worker", lastSeen: 1_000, hardware, concurrency, enabled: true, version: "1", currentJobId: null,
+        });
+      add("5090", "5090", 4, av1);
+      add("mac", "MacBook Pro", 4);
+      add("deskmini", "deskmini", 2);
+      add("homeserver", "homeserver", 1);
+      return store;
+    };
+    const poolJob = (store: Store, id: string, plan: typeof hevcPlan | typeof av1Plan = hevcPlan) =>
+      store.insertJob({
+        id, itemId: id, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+        error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: null,
+      });
+    const low = cluster("opt-spread-low-");
+    for (let index = 1; index <= 5; index += 1) poolJob(low, `low-${index}`);
+    expect(low.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["low-1"]);
+    const deep = cluster("opt-spread-deep-");
+    for (let index = 1; index <= 12; index += 1) poolJob(deep, `deep-${index}`);
+    expect(deep.claimQueuedJobs("5090", 4, 1_000, 30_000)).toHaveLength(4);
+    const av1Only = new Store(join(mkdtempSync(join(tmpdir(), "opt-spread-av1-")), "polisharr.db"));
+    stores.push(av1Only);
+    av1Only.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1_000, hardware: av1, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    av1Only.upsertNode({
+      id: "intel", name: "deskmini", role: "worker", lastSeen: 1_000,
+      hardware: { backend: "vaapi", cuda: false, vaapi: true, av1: false, reason: null },
+      concurrency: 2, enabled: true, version: "1", currentJobId: null,
+    });
+    poolJob(av1Only, "av1-a", av1Plan);
+    poolJob(av1Only, "av1-b", av1Plan);
+    expect(av1Only.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id).sort()).toEqual(["av1-a", "av1-b"]);
+    expect(av1Only.claimQueuedJobs("intel", 2, 1_000, 30_000)).toEqual([]);
+  });
+
+  it("still fills pinned jobs on one node while spreading the leftover pool", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-spread-pin-")), "polisharr.db"));
+    stores.push(store);
+    const hardware = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    store.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: "mac", name: "MacBook Pro", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    const plan = {
+      origin: "bulk" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    store.insertJob({
+      id: "pin-a", itemId: "pin-a", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: "5090",
+    });
+    store.insertJob({
+      id: "pin-b", itemId: "pin-b", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 2, writeMode: "sidecar", plan, assignedNodeId: "5090",
+    });
+    for (const id of ["pool-a", "pool-b", "pool-c"]) {
+      store.insertJob({
+        id, itemId: id, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+        error: null, warning: null, runNow: false, createdAt: 3, writeMode: "sidecar", plan, assignedNodeId: null,
+      });
+    }
+    expect(store.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["pin-a", "pin-b", "pool-a"]);
+  });
+
   it("returns interrupted running jobs to the queue after restart", () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-recovery-"));
     const store = new Store(join(dir, "polisharr.db"));

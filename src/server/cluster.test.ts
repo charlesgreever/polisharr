@@ -7,6 +7,7 @@ import {
   nodeIsOnline,
   nodeRoleLabel,
   pickOpenEncodeNode,
+  poolSpreadLimit,
   NODE_STALE_MS,
   parseClusterClaim,
   parseClusterHeartbeat,
@@ -119,6 +120,16 @@ describe("cluster node identity", () => {
       1_000,
       "intel",
     )?.id).toBe("intel");
+  });
+
+  it("spreads leftover pool jobs when they would fit in parallel, and fills a GPU when the queue is still deep", () => {
+    expect(poolSpreadLimit(4, 5, 7)).toBe(1);
+    expect(poolSpreadLimit(4, 200, 7)).toBe(4);
+    expect(poolSpreadLimit(4, 2, 0)).toBe(2);
+    expect(poolSpreadLimit(1, 3, 4)).toBe(1);
+    expect(poolSpreadLimit(2, 3, 7)).toBe(1);
+    expect(poolSpreadLimit(0, 5, 7)).toBe(0);
+    expect(poolSpreadLimit(4, 0, 7)).toBe(0);
   });
 
   it("treats a node as offline after the stale window", () => {

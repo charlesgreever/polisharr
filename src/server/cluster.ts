@@ -115,6 +115,13 @@ export function nodeCanEncode(node: { enabled?: boolean; hardware: HardwareInfo 
   return true;
 }
 
+export function poolSpreadLimit(freeSlots: number, pool: number, peerFreeSlots: number): number {
+  if (freeSlots <= 0 || pool <= 0) return 0;
+  if (peerFreeSlots <= 0) return Math.min(freeSlots, pool);
+  if (pool <= freeSlots + peerFreeSlots) return 1;
+  return Math.min(freeSlots, pool);
+}
+
 export function clusterHasAv1(nodes: Array<{ enabled: boolean; lastSeen: number; hardware: HardwareInfo }>, now: number): boolean {
   return nodes.some((node) => node.enabled && nodeIsOnline(node.lastSeen, now) && node.hardware.av1);
 }

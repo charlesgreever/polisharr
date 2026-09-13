@@ -794,5 +794,68 @@ describe("remote worker complete", () => {
     });
     store.close();
   });
+
+  it("leaves Any open node jobs unassigned and Move to an open node pins the idle GPU", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-open-node-"));
+    const store = new Store(join(dir, "polisharr.db"));
+    const now = 50_000;
+    store.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: now,
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+      concurrency: 2, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: "mac", name: "MacBook Pro", role: "worker", lastSeen: now,
+      hardware: { backend: "videotoolbox", cuda: false, vaapi: false, videotoolbox: true, av1: false, reason: null },
+      concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    store.saveSettings({ ...store.getSettings(), reviewPath: dir, defaultEncodeNodeId: "any" });
+    const instanceId = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
+    const itemId = `${instanceId}:movie:1`;
+    store.upsertItem({
+      id: itemId, instanceId, arrId: 1, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+      title: "Film", showTitle: null, season: null, episode: null, episodeTitle: null, path: join(dir, "movie.mkv"),
+      sizeBytes: 8, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+    });
+    const jobs = new JobService({
+      store,
+      optimizer: async () => {
+        throw new Error("must not encode");
+      },
+      clock: () => now,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null }),
+      tools: { ffmpeg: "ffmpeg", ffprobe: "ffprobe", mkvmerge: "mkvmerge" },
+      decrypt: () => "",
+      fetch: (async () => new Response("{}")) as typeof fetch,
+      reinspectChangedItem: async () => ({ ok: true }),
+    });
+    const plan = {
+      origin: "custom" as const,
+      video: { kind: "size" as const, codec: "hevc" as const, targetBytes: 1, downscale1080p: false, bitDepth: 8 },
+      audio: [],
+      subtitles: [],
+      container: "mkv" as const,
+      writeMode: "sidecar" as const,
+      warning: null,
+      reasons: ["Smaller encode."],
+      estimatedOutputBytes: 1,
+      category: "movie1080p" as const,
+    };
+    expect(jobs.assignedNodeId("any")).toBeNull();
+    store.insertJob({
+      id: "waiting", itemId, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 2, writeMode: "sidecar", assignedNodeId: null, plan,
+    });
+    store.insertJob({
+      id: "busy", itemId: "other", suggestionId: null, status: "running", phase: "transcoding", progress: 0.4,
+      error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", assignedNodeId: "5090",
+      plan: { origin: "bulk", video: { kind: "copy" }, audio: [], subtitles: [], container: "mkv", writeMode: "sidecar", warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" },
+    });
+    store.updateJob("busy", { nodeId: "5090" });
+    const moved = jobs.moveToOpenNode("waiting");
+    expect(moved).toMatchObject({ ok: true, nodeId: "mac", nodeName: "MacBook Pro" });
+    expect(store.getJob("waiting")?.assignedNodeId).toBe("mac");
+    store.close();
+  });
 });
 

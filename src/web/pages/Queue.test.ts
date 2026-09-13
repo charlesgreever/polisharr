@@ -4,6 +4,7 @@ import {
   partitionQueueJobs,
   queueNodeLine,
   queueToolbar,
+  queueWaitingStatus,
   queueVisibleHeadings,
   WAITING_HEADING,
   WORKING_NOW_HEADING,
@@ -54,6 +55,20 @@ describe("Queue sections", () => {
   it("names the encode node without calling it Encode target", () => {
     expect(queueNodeLine({ status: "running", assignedNodeName: "5090" })).toBe("On 5090");
     expect(queueNodeLine({ status: "queued", assignedNodeName: "5090", waitingForNode: true })).toBe("Waiting for 5090");
-    expect(queueNodeLine({ status: "queued" })).toBeNull();
+    expect(queueNodeLine({
+      status: "queued",
+      assignedNodeName: "5090",
+      waitingForNode: true,
+      waitingReason: "busy",
+    })).toBe("Waiting for 5090 (busy)");
+    expect(queueNodeLine({ status: "queued" })).toBe("Any open node");
+    expect(queueNodeLine({ status: "queued", assignedNodeId: "5090" })).toBeNull();
+    expect(queueWaitingStatus({ status: "queued", assignedNodeId: "5090" })).toBe("queued");
+    expect(queueWaitingStatus({
+      status: "queued",
+      assignedNodeName: "5090",
+      waitingForNode: true,
+      waitingReason: "busy",
+    })).toBe("Waiting for 5090 (busy)");
   });
 });

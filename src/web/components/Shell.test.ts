@@ -9,7 +9,16 @@ vi.mock("../api", () => ({
     search: async () => ({ items: [] }),
     refresh: async () => undefined,
     inspect: async () => ({ walking: false, pending: 0, inspected: 0, failed: 0 }),
-    work: async () => ({ queueActive: 0, review: 0, runningTitle: null }),
+    work: async () => ({
+      queueActive: 0,
+      review: 0,
+      suggestions: 0,
+      movieSuggestions: 0,
+      seriesSuggestions: 0,
+      errors: 0,
+      runningTitle: null,
+      nodes: [],
+    }),
     jobs: async () => ({ items: [] }),
   },
 }));

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "./store.ts";
+import type { Suggestion } from "./types.ts";
 
 describe("store schema migration", () => {
   const stores: Store[] = [];
@@ -250,6 +251,117 @@ describe("store schema migration", () => {
       progress: 0.4, error: null, warning: null, runNow: false, createdAt: 2, writeMode: "sidecar", plan,
     });
     expect(store.workSummary()).toMatchObject({ queued: 1, queueActive: 2 });
+  });
+
+  it("splits open suggestions into movie and series counts that add up", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-work-sugs-")), "polisharr.db"));
+    stores.push(store);
+    const radarr = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
+    const sonarr = store.upsertInstance({ kind: "sonarr", name: "Sonarr", url: "http://sonarr", secret: null, enabled: true });
+    store.upsertItem({
+      id: `${radarr}:movie:1`, instanceId: radarr, arrId: 1, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+      title: "Film", showTitle: null, season: null, episode: null, episodeTitle: null, path: "/movies/film.mkv",
+      sizeBytes: 1, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+    });
+    store.upsertItem({
+      id: `${sonarr}:episode:1`, instanceId: sonarr, arrId: 1, arrSeriesId: 9, arrEpisodeFileId: 1, type: "episode",
+      title: "Pilot", showTitle: "Show", season: 1, episode: 1, episodeTitle: "Pilot", path: "/tv/show.mkv",
+      sizeBytes: 1, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+    });
+    const suggestion = {
+      actions: ["tracks"] as Suggestion["actions"],
+      reasons: ["Drop extra languages."],
+      warning: null,
+      category: "movie1080p" as const,
+      estimatedSavingsBytes: null,
+      now: { codec: "hevc", quality: "HD", sizeBytes: 1, sizePerHourGb: 1 },
+      after: { codec: "hevc", quality: null, sizeBytes: null, sizePerHourGb: null },
+      dismissed: false,
+      keepAudio: [1],
+      stripAudio: [2],
+      keepSubs: [],
+      stripSubs: [],
+    };
+    store.saveSuggestion(`${radarr}:movie:1`, { ...suggestion, id: "s-movie", itemId: `${radarr}:movie:1` });
+    store.saveSuggestion(`${sonarr}:episode:1`, { ...suggestion, id: "s-ep", itemId: `${sonarr}:episode:1`, category: "tv1080p" });
+    const work = store.workSummary();
+    expect(work.movieSuggestions).toBe(1);
+    expect(work.seriesSuggestions).toBe(1);
+    expect(work.suggestions).toBe(2);
+    expect(work.movieSuggestions + work.seriesSuggestions).toBe(work.suggestions);
+  });
+
+  it("lists running titles and waiting counts per encode node", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-node-act-")), "polisharr.db"));
+    stores.push(store);
+    const plan = {
+      origin: "bulk" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    const node = (id: string, name: string) => store.upsertNode({
+      id, name, role: "worker", lastSeen: 1, hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+      concurrency: 2, enabled: true, version: "1", currentJobId: null,
+    });
+    node("gpu-a", "5090");
+    node("gpu-b", "MacBook Pro");
+    store.insertJob({
+      id: "run-a", itemId: "item-a", suggestionId: null, status: "running", phase: "transcoding", progress: 0.4,
+      error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: "gpu-a",
+    });
+    store.updateJob("run-a", { nodeId: "gpu-a" });
+    store.insertJob({
+      id: "wait-a", itemId: "item-b", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 2, writeMode: "sidecar", plan, assignedNodeId: "gpu-a",
+    });
+    store.insertJob({
+      id: "run-b", itemId: "item-c", suggestionId: null, status: "running", phase: "muxing", progress: 0.2,
+      error: null, warning: null, runNow: false, createdAt: 3, writeMode: "sidecar", plan, assignedNodeId: "gpu-b",
+    });
+    store.updateJob("run-b", { nodeId: "gpu-b" });
+    const activity = store.nodeActivity();
+    expect(activity.find((row) => row.id === "gpu-a")).toMatchObject({ running: 1, waiting: 1, name: "5090" });
+    expect(activity.find((row) => row.id === "gpu-b")).toMatchObject({ running: 1, waiting: 0, name: "MacBook Pro" });
+  });
+
+  it("lets a free node claim an Any open node job and skips AV1 pool jobs it cannot encode", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-pool-claim-")), "polisharr.db"));
+    stores.push(store);
+    store.upsertNode({
+      id: "intel", name: "deskmini", role: "worker", lastSeen: 1,
+      hardware: { backend: "vaapi", cuda: false, vaapi: true, av1: false, reason: null },
+      concurrency: 2, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1,
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null },
+      concurrency: 2, enabled: true, version: "1", currentJobId: null,
+    });
+    const copyPlan = {
+      origin: "bulk" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    const av1Plan = {
+      ...copyPlan,
+      video: { kind: "size" as const, codec: "av1" as const, targetBytes: 1, downscale1080p: false, bitDepth: 8 },
+    };
+    store.insertJob({
+      id: "pool-copy", itemId: "item-1", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan: copyPlan, assignedNodeId: null,
+    });
+    store.insertJob({
+      id: "pinned", itemId: "item-2", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 2, writeMode: "sidecar", plan: copyPlan, assignedNodeId: "5090",
+    });
+    store.insertJob({
+      id: "pool-av1", itemId: "item-3", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: false, createdAt: 3, writeMode: "sidecar", plan: av1Plan, assignedNodeId: null,
+    });
+    const intel = store.claimQueuedJobs("intel", 2, 1_000, 30_000);
+    expect(intel.map((job) => job.id)).toEqual(["pool-copy"]);
+    expect(store.getJob("pinned")?.status).toBe("queued");
+    expect(store.getJob("pool-av1")?.status).toBe("queued");
+    const gpu = store.claimQueuedJobs("5090", 2, 1_000, 30_000);
+    expect(gpu.map((job) => job.id).sort()).toEqual(["pinned", "pool-av1"]);
   });
 
   it("returns interrupted running jobs to the queue after restart", () => {

@@ -6,6 +6,7 @@ import {
   nodeHardwareLabel,
   nodeIsOnline,
   nodeRoleLabel,
+  pickOpenEncodeNode,
   NODE_STALE_MS,
   parseClusterClaim,
   parseClusterHeartbeat,
@@ -78,6 +79,46 @@ describe("cluster node identity", () => {
     expect(nodeCanEncode(none, "copy")).toBe(true);
     expect(clusterHasAv1([{ ...av1Node, lastSeen: 1, enabled: true }], 1)).toBe(true);
     expect(clusterHasAv1([{ ...av1Node, lastSeen: 1, enabled: true }], 1 + NODE_STALE_MS + 1)).toBe(false);
+  });
+
+  it("picks the capable online node with the most free slots", () => {
+    const hevc = {
+      id: "intel",
+      name: "deskmini",
+      enabled: true,
+      lastSeen: 1_000,
+      concurrency: 4,
+      runningCount: 0,
+      hardware: { backend: "vaapi" as const, cuda: false, vaapi: true, av1: false, reason: null },
+    };
+    const gpu = {
+      id: "5090",
+      name: "5090",
+      enabled: true,
+      lastSeen: 1_000,
+      concurrency: 2,
+      runningCount: 2,
+      hardware: { backend: "cuda" as const, cuda: true, vaapi: false, av1: true, reason: null },
+    };
+    const mac = {
+      id: "mac",
+      name: "MacBook Pro",
+      enabled: true,
+      lastSeen: 1_000,
+      concurrency: 4,
+      runningCount: 1,
+      hardware: { backend: "videotoolbox" as const, cuda: false, vaapi: false, videotoolbox: true, av1: false, reason: null },
+    };
+    expect(pickOpenEncodeNode([gpu, mac, hevc], "hevc", 1_000)?.id).toBe("intel");
+    expect(pickOpenEncodeNode([gpu, mac, hevc], "av1", 1_000)?.id).toBe("5090");
+    expect(pickOpenEncodeNode([{ ...gpu, lastSeen: 1, enabled: true, runningCount: 1 }, { ...mac, lastSeen: 1 + 120_000 }], "av1", 1_000)?.id).toBe("5090");
+    expect(pickOpenEncodeNode([{ ...gpu, lastSeen: 1, enabled: false }], "av1", 1_000)).toBeNull();
+    expect(pickOpenEncodeNode(
+      [{ ...mac, runningCount: 0 }, { ...hevc, runningCount: 0 }],
+      "hevc",
+      1_000,
+      "intel",
+    )?.id).toBe("intel");
   });
 
   it("treats a node as offline after the stale window", () => {

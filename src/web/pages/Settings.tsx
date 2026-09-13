@@ -5,6 +5,7 @@ import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
 import { FIELD_CONTROL, hardwareBackendLabel, SIZE_CAP_GRID } from "../settings-copy";
+import { ANY_OPEN_NODE_ID } from "../encode-node";
 
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
   const [data, setData] = useState<SettingsPayload | null>(null);
@@ -201,7 +202,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <Field label="Default encode node">
             <select
               className={FIELD_CONTROL}
-              value={data.defaultEncodeNodeId ?? data.thisNodeId ?? ""}
+              value={data.defaultEncodeNodeId === ANY_OPEN_NODE_ID ? ANY_OPEN_NODE_ID : (data.defaultEncodeNodeId || data.thisNodeId || "")}
               onChange={(event) => {
                 const next = { ...data, defaultEncodeNodeId: event.target.value };
                 setData(next);
@@ -211,6 +212,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                 }).catch((error: Error) => setMsg(error.message));
               }}
             >
+              <option value={ANY_OPEN_NODE_ID}>Any open node</option>
               {nodes.map((node) => (
                 <option key={node.id} value={node.id}>
                   {node.name}{node.online ? "" : " (offline)"}
@@ -221,7 +223,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         )}
         {nodes.length > 1 && (
           <p className="help m-0">
-            New jobs run on the default encode node. If that node is offline, the job waits; it does not move to another GPU.
+            New jobs run on the default encode node. A named default waits for that machine. Any open node uses the next free capable slot. Jobs already in Queue keep the node they were given.
           </p>
         )}
         <ul className="space-y-3 text-sm">
@@ -229,6 +231,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             <li key={node.id} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
               <div className="font-medium text-ink">{node.name}</div>
               <div className="text-muted">{node.roleLabel} · {node.hardwareLabel} · {node.online ? "Online" : "Offline"}{node.enabled ? "" : " · Drained"}</div>
+              <div className="text-muted">{node.runningCount ?? 0} / {node.concurrency}{node.runningTitles?.length ? ` · ${node.runningTitles.join(", ")}` : ""}</div>
               <div className="flex flex-wrap items-end gap-3">
                 <label className="block text-sm">
                   <span className="mb-1 block font-medium text-muted">Concurrent jobs</span>

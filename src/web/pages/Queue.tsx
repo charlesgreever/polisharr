@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type ClusterNode, type JobRow } from "../api";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
-import { encodeNeedFromPlan } from "../encode-node";
+import { ANY_OPEN_NODE_ID, encodeNeedFromPlan } from "../encode-node";
 import { Card } from "../components/Card";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
@@ -12,11 +12,34 @@ export const WORKING_NOW_HEADING = "Working now";
 export const WAITING_HEADING = "Waiting";
 export const FINISHED_HEADING = "Finished";
 
-export function queueNodeLine(job: { assignedNodeName?: string | null; waitingForNode?: boolean; status: string }): string | null {
+export function queueNodeLine(job: {
+  assignedNodeName?: string | null;
+  assignedNodeId?: string | null;
+  waitingForNode?: boolean;
+  waitingReason?: "offline" | "busy" | null;
+  status: string;
+}): string | null {
+  if (job.waitingReason === "busy" && job.assignedNodeName) return `Waiting for ${job.assignedNodeName} (busy)`;
+  if (job.waitingForNode && job.assignedNodeName) return `Waiting for ${job.assignedNodeName}`;
+  if ((job.status === "queued" || job.status === "held") && job.assignedNodeId == null && !job.assignedNodeName) {
+    return "Any open node";
+  }
   if (!job.assignedNodeName) return null;
-  if (job.waitingForNode) return `Waiting for ${job.assignedNodeName}`;
   if (job.status === "running") return `On ${job.assignedNodeName}`;
   return `On ${job.assignedNodeName}`;
+}
+
+export function queueWaitingStatus(job: {
+  assignedNodeName?: string | null;
+  assignedNodeId?: string | null;
+  waitingForNode?: boolean;
+  waitingReason?: "offline" | "busy" | null;
+  status: string;
+}): string {
+  if (job.waitingReason === "busy" && job.assignedNodeName) return `Waiting for ${job.assignedNodeName} (busy)`;
+  if (job.waitingForNode && job.assignedNodeName) return `Waiting for ${job.assignedNodeName}`;
+  if (job.assignedNodeId == null && !job.assignedNodeName) return "Any open node";
+  return job.status;
 }
 
 export function partitionQueueJobs<T extends { status: string }>(items: T[]): {
@@ -136,7 +159,22 @@ export function QueuePage() {
         </div>
       )}
       {waiting.length > 0 && (
-        <QueueTable heading={WAITING_HEADING} jobs={waiting} actions={actions} kind="waiting" />
+        <div className="mt-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-semibold text-ink">{WAITING_HEADING}</h2>
+            {nodes.length > 1 && (
+              <button
+                className="btn-secondary"
+                type="button"
+                disabled={busy}
+                onClick={() => void mutate(api.moveWaitingToOpenNodes)}
+              >
+                Move waiting to an open node
+              </button>
+            )}
+          </div>
+          <QueueTable heading={null} jobs={waiting} actions={actions} kind="waiting" />
+        </div>
       )}
       {finished.length > 0 && (
         <QueueTable heading={FINISHED_HEADING} jobs={finished} actions={actions} kind="finished" />
@@ -183,15 +221,15 @@ function QueueTable({
   actions,
   kind,
 }: {
-  heading: string;
+  heading: string | null;
   jobs: JobRow[];
   actions: JobActions;
   kind: "waiting" | "finished";
 }) {
   return (
-    <div className="mt-5">
-      <h2 className="text-base font-semibold text-ink">{heading}</h2>
-      <div className="table-card mt-3">
+    <div className={heading ? "mt-5" : "mt-3"}>
+      {heading && <h2 className="text-base font-semibold text-ink">{heading}</h2>}
+      <div className={`table-card ${heading ? "mt-3" : ""}`}>
         <table>
           <thead>
             <tr>
@@ -208,7 +246,7 @@ function QueueTable({
                 <td className="min-w-44">
                   <JobTitle job={job} />
                 </td>
-                <td>{job.waitingForNode && job.assignedNodeName ? `Waiting for ${job.assignedNodeName}` : job.status}</td>
+                <td>{queueWaitingStatus(job)}</td>
                 <td>{planLabel(job)}</td>
                 {kind === "waiting" && <td>{phaseLabel(job.phase, job.status)}</td>}
                 <td>
@@ -267,12 +305,22 @@ function JobButtons({ job, actions, kind }: { job: JobRow; actions: JobActions; 
         <span className="ml-1 inline-block min-w-[10rem] align-middle">
           <EncodeNodeSelect
             nodes={actions.nodes}
-            value={job.assignedNodeId ?? actions.defaultNodeId}
+            value={job.assignedNodeId === null ? ANY_OPEN_NODE_ID : (job.assignedNodeId ?? actions.defaultNodeId)}
             defaultNodeId={actions.defaultNodeId}
             need={encodeNeedFromPlan(job.plan)}
             disabled={actions.busy}
             onChange={(nodeId) => void actions.onMutate(() => api.assignJob(job.id, nodeId))}
           />
+          {actions.nodes.length > 1 && (
+            <button
+              className="btn-secondary ml-1"
+              type="button"
+              disabled={actions.busy}
+              onClick={() => void actions.onMutate(() => api.moveJobToOpenNode(job.id))}
+            >
+              Move to an open node
+            </button>
+          )}
         </span>
       )}
       {kind === "waiting" && job.status === "held" && (

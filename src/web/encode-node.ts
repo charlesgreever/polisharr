@@ -2,6 +2,8 @@ import type { ClusterNode } from "./api";
 
 export type EncodeNeed = "copy" | "hevc" | "av1";
 
+export const ANY_OPEN_NODE_ID = "any";
+
 export function encodeNeedFromPlan(plan: { video?: { kind?: string; codec?: string } } | null | undefined): EncodeNeed {
   if (!plan?.video || plan.video.kind === "copy") return "copy";
   return plan.video.codec === "av1" ? "av1" : "hevc";
@@ -38,5 +40,10 @@ export function encodeNodeOptionLabel(node: ClusterNode): string {
     node.enabled ? null : "drained",
     node.hardware.backend === "none" ? "no encoder" : null,
   ].filter((flag): flag is string => Boolean(flag));
+  if (node.online && node.enabled && node.hardware.backend !== "none") {
+    const running = node.runningCount ?? 0;
+    const slots = node.concurrency;
+    flags.push(running <= 0 ? "idle" : `${running} of ${slots} busy`);
+  }
   return flags.length > 0 ? `${node.name} (${flags.join(", ")})` : node.name;
 }

@@ -23,7 +23,7 @@ import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
 import { parseStoredSettings } from "./settings.ts";
 import type { SuggestionFilters } from "./suggestion-filters.ts";
 import { suggestionTrackComparison } from "./tracks.ts";
-import { parseHardwareInfo, parseNodeRole, type ClusterNode } from "./cluster.ts";
+import { encodeNeedFromPlan, nodeCanEncode, parseHardwareInfo, parseNodeRole, type ClusterNode } from "./cluster.ts";
 
 export type Page<T> = { items: T[]; nextOffset: number | null; total: number; pendingCount?: number; finishedCount?: number };
 
@@ -1020,21 +1020,41 @@ export class Store {
     limit = Math.min(limit, slots);
     if (limit <= 0) return [];
     const claim = this.db.transaction(() => {
-      const rows = this.db.prepare(
-        "SELECT id FROM jobs WHERE status = 'queued' AND assigned_node_id = ? ORDER BY position ASC LIMIT ?",
-      ).all(nodeId, limit) as Array<{ id: string }>;
       const claimed: Array<(Job & { plan: JobPlan; leaseToken: string })> = [];
-      const take = this.db.prepare(
+      const takePinned = this.db.prepare(
         `UPDATE jobs SET status = 'running', phase = 'muxing', progress = 0.05, error = NULL,
            node_id = ?, lease_until = ?, lease_token = ?, started_at = COALESCE(started_at, ?)
          WHERE id = ? AND status = 'queued' AND assigned_node_id = ?`,
       );
-      for (const row of rows) {
+      const takePool = this.db.prepare(
+        `UPDATE jobs SET status = 'running', phase = 'muxing', progress = 0.05, error = NULL,
+           node_id = ?, lease_until = ?, lease_token = ?, started_at = COALESCE(started_at, ?)
+         WHERE id = ? AND status = 'queued' AND (assigned_node_id IS NULL OR assigned_node_id = '')`,
+      );
+      const takeOne = (id: string, stmt: typeof takePinned, assignedMatch?: string) => {
         const token = randomUUID();
-        const result = take.run(nodeId, now + leaseMs, token, now, row.id, nodeId);
-        if (result.changes !== 1) continue;
-        const job = this.getJob(row.id);
+        const result = assignedMatch == null
+          ? takePool.run(nodeId, now + leaseMs, token, now, id)
+          : stmt.run(nodeId, now + leaseMs, token, now, id, assignedMatch);
+        if (result.changes !== 1) return;
+        const job = this.getJob(id);
         if (job) claimed.push({ ...job, leaseToken: token });
+      };
+      const pinned = this.db.prepare(
+        "SELECT id FROM jobs WHERE status = 'queued' AND assigned_node_id = ? ORDER BY position ASC LIMIT ?",
+      ).all(nodeId, limit) as Array<{ id: string }>;
+      for (const row of pinned) takeOne(row.id, takePinned, nodeId);
+      const remaining = limit - claimed.length;
+      if (remaining <= 0) return claimed;
+      const pool = this.db.prepare(
+        "SELECT id FROM jobs WHERE status = 'queued' AND (assigned_node_id IS NULL OR assigned_node_id = '') ORDER BY position ASC",
+      ).all() as Array<{ id: string }>;
+      for (const row of pool) {
+        if (claimed.length >= limit) break;
+        const job = this.getJob(row.id);
+        if (!job) continue;
+        if (!nodeCanEncode(node, encodeNeedFromPlan("video" in job.plan ? job.plan : null))) continue;
+        takeOne(row.id, takePool);
       }
       return claimed;
     });
@@ -1077,7 +1097,7 @@ export class Store {
     ).get(nodeId) as { n: number }).n);
   }
 
-  setJobAssignedNode(id: string, nodeId: string): void {
+  setJobAssignedNode(id: string, nodeId: string | null): void {
     this.db.prepare("UPDATE jobs SET assigned_node_id = ? WHERE id = ?").run(nodeId, id);
   }
 
@@ -1223,6 +1243,8 @@ export class Store {
 
   workSummary(): {
     suggestions: number;
+    movieSuggestions: number;
+    seriesSuggestions: number;
     queued: number;
     queueActive: number;
     review: number;
@@ -1233,6 +1255,8 @@ export class Store {
     const counts = this.db.prepare(
       `SELECT
          (SELECT COUNT(*) FROM suggestions WHERE dismissed = 0) AS suggestions,
+         (SELECT COUNT(*) FROM suggestions s JOIN library_items i ON i.id = s.item_id WHERE s.dismissed = 0 AND i.type = 'movie') AS movie_suggestions,
+         (SELECT COUNT(*) FROM suggestions s JOIN library_items i ON i.id = s.item_id WHERE s.dismissed = 0 AND i.type = 'episode') AS series_suggestions,
          (SELECT COUNT(*) FROM jobs WHERE queue_visible = 1 AND status IN ('queued', 'held')) AS queued,
          (SELECT COUNT(*) FROM jobs WHERE queue_visible = 1 AND status IN ('queued', 'held', 'paused', 'running')) AS queue_active,
          (SELECT COUNT(*) FROM reviews) AS review,
@@ -1247,6 +1271,8 @@ export class Store {
     ).get() as Record<string, unknown> | undefined;
     return {
       suggestions: Number(counts.suggestions),
+      movieSuggestions: Number(counts.movie_suggestions),
+      seriesSuggestions: Number(counts.series_suggestions),
       queued: Number(counts.queued),
       queueActive: Number(counts.queue_active),
       review: Number(counts.review),
@@ -1254,6 +1280,46 @@ export class Store {
       failed: Number(counts.failed),
       running: row ? { ...mapJob(row), displayTitle: this.fileDisplayTitle(String(row.item_id)) ?? joinedDisplayTitle(row, String(row.item_id)) } : null,
     };
+  }
+
+  nodeActivity(): Array<{
+    id: string;
+    name: string;
+    lastSeen: number;
+    enabled: boolean;
+    concurrency: number;
+    running: number;
+    waiting: number;
+    jobs: Array<{ id: string; title: string; phase: JobPhase; progress: number; href?: string }>;
+  }> {
+    const nodes = this.listNodes();
+    const jobs = this.listJobs();
+    return nodes.map((node) => {
+      const runningJobs = jobs.filter((job) => job.status === "running" && job.nodeId === node.id);
+      const waiting = jobs.filter(
+        (job) =>
+          (job.status === "queued" || job.status === "held" || job.status === "paused") && job.assignedNodeId === node.id,
+      ).length;
+      return {
+        id: node.id,
+        name: node.name,
+        lastSeen: node.lastSeen,
+        enabled: node.enabled,
+        concurrency: node.concurrency,
+        running: runningJobs.length,
+        waiting,
+        jobs: runningJobs.map((job) => {
+          const item = this.getItem(job.itemId);
+          return {
+            id: job.id,
+            title: this.fileDisplayTitle(job.itemId) ?? job.displayTitle,
+            phase: job.phase,
+            progress: job.progress,
+            href: item ? itemHref(item.type, item.id) : undefined,
+          };
+        }),
+      };
+    });
   }
 
   savings(): { filesOptimized: number; spaceSavedBytes: number } {

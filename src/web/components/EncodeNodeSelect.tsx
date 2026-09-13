@@ -1,6 +1,6 @@
 import { FIELD_CONTROL } from "../settings-copy";
 import type { ClusterNode } from "../api";
-import { capableEncodeNodes, encodeNodeOptionLabel, nodeCanEncode, type EncodeNeed } from "../encode-node";
+import { ANY_OPEN_NODE_ID, capableEncodeNodes, encodeNodeOptionLabel, nodeCanEncode, type EncodeNeed } from "../encode-node";
 
 export function EncodeNodeSelect({
   nodes,
@@ -19,16 +19,18 @@ export function EncodeNodeSelect({
 }) {
   if (nodes.length <= 1) return null;
   const capable = capableEncodeNodes(nodes, need);
+  const selected = value === ANY_OPEN_NODE_ID || capable.some((node) => node.id === value) ? value : capable[0]?.id ?? ANY_OPEN_NODE_ID;
   return (
     <label className="block min-w-[12rem] text-sm">
       <span className="mb-1 block font-medium text-muted">Encode node</span>
       <select
         className={FIELD_CONTROL}
-        value={capable.some((node) => node.id === value) ? value : capable[0]?.id ?? ""}
+        value={selected}
         disabled={disabled || capable.length === 0}
         aria-label="Encode node"
         onChange={(event) => onChange(event.target.value)}
       >
+        <option value={ANY_OPEN_NODE_ID}>Any open node</option>
         {nodes.map((node) => (
           <option key={node.id} value={node.id} disabled={!nodeCanEncode(node, need)}>
             {encodeNodeOptionLabel(node)}{node.id === defaultNodeId ? " (house default)" : ""}

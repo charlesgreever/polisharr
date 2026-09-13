@@ -67,6 +67,42 @@ export function nodeIsOnline(lastSeen: number, now: number): boolean {
 
 export type EncodeNeed = "copy" | "hevc" | "av1";
 
+export const ANY_OPEN_NODE_ID = "any";
+
+export function isAnyOpenNode(id: string | null | undefined): boolean {
+  return id === ANY_OPEN_NODE_ID;
+}
+
+export function pickOpenEncodeNode(
+  nodes: Array<{
+    id: string;
+    name: string;
+    enabled: boolean;
+    lastSeen: number;
+    concurrency: number;
+    runningCount: number;
+    hardware: HardwareInfo;
+  }>,
+  need: EncodeNeed,
+  now: number,
+  preferredId?: string,
+): { id: string; name: string } | null {
+  const capable = nodes.filter(
+    (node) => node.enabled && nodeIsOnline(node.lastSeen, now) && nodeCanEncode(node, need),
+  );
+  if (capable.length === 0) return null;
+  const preferred = preferredId && !isAnyOpenNode(preferredId) ? preferredId : "";
+  capable.sort((left, right) => {
+    const freeLeft = left.concurrency - left.runningCount;
+    const freeRight = right.concurrency - right.runningCount;
+    if (freeRight !== freeLeft) return freeRight - freeLeft;
+    if (preferred && left.id === preferred && right.id !== preferred) return -1;
+    if (preferred && right.id === preferred && left.id !== preferred) return 1;
+    return left.name.localeCompare(right.name);
+  });
+  return capable[0] ? { id: capable[0].id, name: capable[0].name } : null;
+}
+
 export function encodeNeedFromPlan(plan: { video?: { kind?: string; codec?: string } } | null | undefined): EncodeNeed {
   if (!plan?.video || plan.video.kind === "copy") return "copy";
   return plan.video.codec === "av1" ? "av1" : "hevc";

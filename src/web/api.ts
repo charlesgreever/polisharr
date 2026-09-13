@@ -10,7 +10,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => req<{ ok: boolean; service?: string; version?: string }>("/api/health"),
-  work: () => req<{ queued: number; queueActive: number; review: number; runningTitle: string | null }>("/api/work"),
+  work: () => req<WorkSnapshot>("/api/work"),
   status: () => req<{ authenticated: boolean; firstRun: FirstRun; version?: string; role?: "standalone" | "master" | "worker" }>("/api/auth/status"),
   worker: () => req<WorkerStatus>("/api/worker"),
   setup: (username: string, password: string) => req("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -144,6 +144,10 @@ export const api = {
   deleteNode: (id: string) => req<NodesPayload>(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" }),
   assignJob: (id: string, nodeId: string) =>
     req(`/api/jobs/${encodeURIComponent(id)}/assign`, { method: "POST", body: JSON.stringify({ nodeId }) }),
+  moveJobToOpenNode: (id: string) =>
+    req<{ ok: true; nodeId: string; nodeName: string }>(`/api/jobs/${encodeURIComponent(id)}/move-open`, { method: "POST" }),
+  moveWaitingToOpenNodes: () =>
+    req<{ ok: true; moved: number; skipped: number }>("/api/jobs/move-open", { method: "POST" }),
   exclusions: () => req<{ exclusions: Exclusion[] }>("/api/exclusions"),
   addExclusion: (kind: Exclusion["kind"], value: string) =>
     req<{ exclusions: Exclusion[] }>("/api/exclusions", { method: "POST", body: JSON.stringify({ kind, value }) }),
@@ -199,6 +203,37 @@ export type ClusterNode = {
   version: string;
   currentJobId: string | null;
   online: boolean;
+  runningCount?: number;
+  waitingCount?: number;
+  runningTitles?: string[];
+};
+export type WorkNodeJob = {
+  id: string;
+  title: string;
+  phase: string;
+  progress: number;
+  href?: string;
+};
+export type WorkNode = {
+  id: string;
+  name: string;
+  online: boolean;
+  enabled: boolean;
+  running: number;
+  concurrency: number;
+  waiting: number;
+  jobs: WorkNodeJob[];
+};
+export type WorkSnapshot = {
+  queued?: number;
+  queueActive: number;
+  review: number;
+  suggestions: number;
+  movieSuggestions: number;
+  seriesSuggestions: number;
+  errors: number;
+  runningTitle: string | null;
+  nodes: WorkNode[];
 };
 export type WorkerStatus = {
   role: "worker";
@@ -326,6 +361,7 @@ export type JobRow = {
   assignedNodeId?: string | null;
   assignedNodeName?: string | null;
   waitingForNode?: boolean;
+  waitingReason?: "offline" | "busy" | null;
 };
 export type ReviewRow = {
   id: string;
@@ -352,6 +388,7 @@ export type HomePayload = {
   errors: number;
   recent: HistoryRow[];
   status: string;
+  nodes?: WorkNode[];
 };
 
 export type ListingState = "complete" | "iso_unlisted";

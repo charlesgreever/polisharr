@@ -51,5 +51,6 @@ describe("Encode node select", () => {
     expect(html).toContain("5090");
     expect(html).toContain("homeserver");
     expect(html).toMatch(/<option[^>]*disabled[^>]*>homeserver/);
+    expect(html).toContain("Any open node");
   });
 });

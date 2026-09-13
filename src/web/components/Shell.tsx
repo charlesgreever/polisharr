@@ -2,7 +2,7 @@ import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { api, type InspectState, type SearchHit } from "../api";
 import { inspectBannerView } from "../inspect-banner";
-import { headerWorkLine, navCount } from "../nav-work";
+import { emptyWorkSnapshot, headerWorkLine, navBadgeCount } from "../nav-work";
 import { buildReportIssueUrl, type ReportKind } from "../reportIssue";
 import { Icons } from "./icons";
 import { ThemeToggle } from "./ThemeToggle";
@@ -23,7 +23,7 @@ export function Shell({ children, version }: { children: React.ReactNode; versio
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [inspect, setInspect] = useState<InspectState | null>(null);
-  const [work, setWork] = useState({ queueActive: 0, review: 0, runningTitle: null as string | null });
+  const [work, setWork] = useState(emptyWorkSnapshot());
   const [dismissedFailed, setDismissedFailed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
@@ -55,7 +55,12 @@ export function Shell({ children, version }: { children: React.ReactNode; versio
           setWork({
             queueActive: workState.queueActive,
             review: workState.review,
+            suggestions: workState.suggestions,
+            movieSuggestions: workState.movieSuggestions,
+            seriesSuggestions: workState.seriesSuggestions,
+            errors: workState.errors,
             runningTitle: workState.runningTitle,
+            nodes: workState.nodes ?? [],
           });
         }
       } catch {
@@ -128,11 +133,8 @@ export function Shell({ children, version }: { children: React.ReactNode; versio
             >
               {item.icon()}
               <span>{item.label}</span>
-              {item.to === "/queue" && navCount(work.queueActive) != null && (
-                <span className="ml-auto rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium tabular-nums text-brand-500 dark:bg-brand-500/15 dark:text-brand-400">{navCount(work.queueActive)}</span>
-              )}
-              {item.to === "/review" && navCount(work.review) != null && (
-                <span className="ml-auto rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium tabular-nums text-brand-500 dark:bg-brand-500/15 dark:text-brand-400">{navCount(work.review)}</span>
+              {navBadgeCount(item.to, work) != null && (
+                <span className="ml-auto rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium tabular-nums text-brand-500 dark:bg-brand-500/15 dark:text-brand-400">{navBadgeCount(item.to, work)}</span>
               )}
             </NavLink>
           ))}
@@ -181,7 +183,7 @@ export function Shell({ children, version }: { children: React.ReactNode; versio
             )}
           </div>
           <div className="hidden shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400 sm:block">
-            {headerWorkLine(inspecting, inspect?.pending ?? 0, work.runningTitle)}
+            {headerWorkLine(inspecting, inspect?.pending ?? 0, work.runningTitle, work.nodes)}
           </div>
           <ThemeToggle />
           <ReportBug inspect={inspect} version={version} />

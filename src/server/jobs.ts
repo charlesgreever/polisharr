@@ -12,7 +12,7 @@ import { assignProfile, PROFILE_NAMES } from "./arr-profiles.ts";
 import { effectiveWriteMode, profileAssignmentEligible } from "./types.ts";
 import { isoInspectionLooksStale, normalizeInspection } from "./inspect.ts";
 import { refreshAndRenameArr } from "./arr.ts";
-import { encodeNeedFromPlan, LEASE_MS, nodeCanEncode, type RemoteJobDocument } from "./cluster.ts";
+import { encodeNeedFromPlan, isAnyOpenNode, LEASE_MS, nodeCanEncode, pickOpenEncodeNode, type RemoteJobDocument } from "./cluster.ts";
 import { encodeApiLabel } from "./hardware.ts";
 import { placeMethodSentence } from "./fs-copy.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
@@ -71,10 +71,12 @@ export class JobService {
     };
   }
 
-  assignedNodeId(override?: string): string {
-    const local = this.localNodeId();
+  assignedNodeId(override?: string): string | null {
+    if (isAnyOpenNode(override)) return null;
     if (override) return override;
     const stored = this.opts.store.getSettings().defaultEncodeNodeId;
+    if (isAnyOpenNode(stored)) return null;
+    const local = this.localNodeId();
     if (stored && (this.opts.store.getNode(stored) || stored === local)) return stored;
     return local;
   }
@@ -104,8 +106,10 @@ export class JobService {
     const writeMode = options.writeMode ?? this.opts.store.getSettings().writeMode;
     const plan = { ...planFromSuggestion(suggestion, writeMode), writeModeLocked: locked };
     const assignedNodeId = this.assignedNodeId(options.assignedNodeId);
-    const incapable = this.rejectIncapableNode(assignedNodeId, plan);
-    if (incapable) return incapable;
+    if (assignedNodeId) {
+      const incapable = this.rejectIncapableNode(assignedNodeId, plan);
+      if (incapable) return incapable;
+    }
     this.opts.store.insertJob({
       id,
       itemId,
@@ -137,8 +141,10 @@ export class JobService {
     this.dismissOpenSuggestionsForItem(item);
     const options = typeof runNowOrOpts === "boolean" ? { runNow: runNowOrOpts } : runNowOrOpts;
     const assignedNodeId = this.assignedNodeId(options.assignedNodeId);
-    const incapable = this.rejectIncapableNode(assignedNodeId, plan);
-    if (incapable) return incapable;
+    if (assignedNodeId) {
+      const incapable = this.rejectIncapableNode(assignedNodeId, plan);
+      if (incapable) return incapable;
+    }
     const id = randomUUID();
     this.opts.store.insertJob({
       id,
@@ -166,6 +172,10 @@ export class JobService {
     if (job.status === "running" || job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
       return { error: "Move a waiting job, not one that is already encoding.", status: 409 };
     }
+    if (isAnyOpenNode(nodeId)) {
+      this.opts.store.setJobAssignedNode(id, null);
+      return { ok: true };
+    }
     const node = this.opts.store.getNode(nodeId);
     if (!node) return { error: "That encode node is not registered.", status: 400 };
     const plan = isExecutablePlan(job.plan) ? resolvePlan(job.plan, job.writeMode) : planFromSuggestion(job.plan, job.writeMode);
@@ -173,6 +183,40 @@ export class JobService {
     if (incapable) return incapable;
     this.opts.store.setJobAssignedNode(id, nodeId);
     return { ok: true };
+  }
+
+  moveToOpenNode(id: string): { ok: true; nodeId: string; nodeName: string } | { error: string; status: number } {
+    const job = this.opts.store.getJob(id);
+    if (!job) return { error: "That job does not exist.", status: 404 };
+    if (job.status === "running" || job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+      return { error: "Move a waiting job, not one that is already encoding.", status: 409 };
+    }
+    const plan = isExecutablePlan(job.plan) ? resolvePlan(job.plan, job.writeMode) : planFromSuggestion(job.plan, job.writeMode);
+    const pick = this.pickOpenNode(encodeNeedFromPlan(plan));
+    if (!pick) return { error: "No encode node is free for this plan.", status: 409 };
+    this.opts.store.setJobAssignedNode(id, pick.id);
+    return { ok: true, nodeId: pick.id, nodeName: pick.name };
+  }
+
+  moveWaitingToOpenNodes(): { moved: number; skipped: number } {
+    let moved = 0;
+    let skipped = 0;
+    for (const job of this.opts.store.listJobs()) {
+      if (job.status !== "queued" && job.status !== "held" && job.status !== "paused") continue;
+      const result = this.moveToOpenNode(job.id);
+      if ("ok" in result) moved += 1;
+      else skipped += 1;
+    }
+    return { moved, skipped };
+  }
+
+  private pickOpenNode(need: import("./cluster.ts").EncodeNeed): { id: string; name: string } | null {
+    const preferred = this.opts.store.getSettings().defaultEncodeNodeId;
+    const nodes = this.opts.store.listNodes().map((node) => ({
+      ...node,
+      runningCount: this.opts.store.runningCountOnNode(node.id),
+    }));
+    return pickOpenEncodeNode(nodes, need, this.now(), preferred);
   }
 
   private rejectIncapableNode(nodeId: string, plan: { video?: { kind?: string; codec?: string } }): { error: string; status: number } | undefined {
@@ -407,7 +451,12 @@ export class JobService {
       if (capacity <= 0) return;
       const next = this.opts.store
         .listJobs()
-        .filter((j) => j.status === "queued" && assignedToNode(j.assignedNodeId, localId))
+        .filter((j) => {
+          if (j.status !== "queued" || !assignedToNode(j.assignedNodeId, localId)) return false;
+          if (j.assignedNodeId || !localNode) return true;
+          const plan = isExecutablePlan(j.plan) ? j.plan : planFromSuggestion(j.plan, j.writeMode);
+          return nodeCanEncode(localNode, encodeNeedFromPlan(plan));
+        })
         .slice(0, capacity);
       for (const job of next) void this.run(job.id, settings);
     } catch (error) {

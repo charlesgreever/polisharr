@@ -155,6 +155,8 @@ The UI follows Arr information architecture with a Vision UI-inspired dark glass
 107b. As a library owner, I want running Queue jobs in a Working now block that is not pushed down by finished rows, so that I can watch the current encode after other jobs have completed.
 107c. As a library owner, I want waiting jobs listed before finished jobs, so that a large finished pile does not hide what will run next.
 108. As a library owner, I want to reorder, pause, or remove queued items, so that tonight’s movie is not stuck behind a 4K encode.
+108b. As a library owner, I want a Queue action that moves a waiting job onto an open encode node, so that work does not sit behind a busy or sleeping GPU when another machine is free.
+108c. As a library owner, I want an Any open node choice (house default or per job) so a waiting job can fill the next free capable slot, and I want a job I pinned to one machine to stay there.
 109. As a library owner, I want the default concurrency to be one job, so that the GPU and NAS are not slammed out of the box.
 110. As a library owner, I want a toggle to allow more than one transcode at a time, so that I can use more of the GPU when I choose.
 111. As a library owner, I want the Encode section to give concurrency and scheduling changes an explicit Save action and honor whatever concurrency I save, so that the setting is not stranded in the browser or silently second-guessed.
@@ -220,6 +222,8 @@ The UI follows Arr information architecture with a Vision UI-inspired dark glass
 164. As a library owner, I want a series suggestion, queue row, review card, history row, and error row to show show title, then season, then episode title, so that I can tell Ted Lasso S03E02 from another episode also named Chelsea.
 165. As a library owner, I want a Home dashboard after login that shows files optimized, space saved, a one-line Status (the running title, how many jobs are waiting, or Idle), open suggestions, queued jobs, pending review, and error count, so that I can see whether the app is earning its keep.
 165b. As a library owner, I want Queue and Review in the sidebar to show counts when jobs are running or waiting and when sidecars are in Review, so that I can see processing and Keep work from any page.
+165c. As a library owner, I want Suggestions, Movies, Series, and Errors in the sidebar to show how many titles still have work when that count is above zero, so that I can see remaining suggestions without opening those pages.
+165d. As a library owner, I want Home, the header, Queue, and Settings to show what each encode node is running and whether it is idle, busy, drained, or offline, so that I can see cluster work instead of a single title.
 166. As a library owner, I want Home to show recent kept, flagged, failed, and discarded work, so that I do not have to open History for a glance.
 167. As a library owner, I want space saved to be the sum of (original size minus new size) for successful Keeps and successful direct writes, so that the tally is a real number I can trust.
 168. As a library owner, I want files optimized to count successful Keeps and successful direct writes, so that skipping Review does not hide savings.

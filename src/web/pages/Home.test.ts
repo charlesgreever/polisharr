@@ -32,6 +32,22 @@ describe("Home dashboard", () => {
     expect(html).not.toContain("metrics");
   });
 
+  it("lists each encode node when more than one is registered", () => {
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(HomeDashboard, {
+      data: {
+        ...data,
+        nodes: [
+          { id: "a", name: "5090", online: true, enabled: true, running: 2, concurrency: 2, waiting: 1, jobs: [{ id: "1", title: "Film", phase: "transcoding", progress: 0.4 }] },
+          { id: "b", name: "MacBook Pro", online: true, enabled: true, running: 0, concurrency: 4, waiting: 0, jobs: [] },
+        ],
+      },
+    })));
+    expect(html).toContain("5090");
+    expect(html).toContain("2 of 2 · next job waiting");
+    expect(html).toContain("MacBook Pro");
+    expect(html).toContain("Idle");
+  });
+
   it("names activity outcomes in everyday words", () => {
     expect(activityOutcomeLabel("kept")).toBe("Kept");
     expect(activityOutcomeLabel("flagged")).toBe("Flagged");

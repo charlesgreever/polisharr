@@ -48,6 +48,7 @@ import { LibrarySync, pathsOverlap } from "./library-sync.ts";
 import { parseArrWebhook, presentedWebhookToken, webhookTokenMatches } from "./arr-webhook.ts";
 import { parseSuggestionFilters } from "./suggestion-filters.ts";
 import {
+  ANY_OPEN_NODE_ID,
   CLUSTER_NOT_MASTER,
   CLUSTER_UNKNOWN_NODE,
   CLUSTER_WRONG_TOKEN,
@@ -55,6 +56,7 @@ import {
   WORKER_MANAGE_ERROR,
   clusterHasAv1,
   clusterHasHardware,
+  isAnyOpenNode,
   nodeHardwareLabel,
   nodeIsOnline,
   nodeRoleLabel,
@@ -527,7 +529,12 @@ export function createApp(opts: AppOptions) {
     if (next.reviewPath && unsafeReviewPath(next.reviewPath, guardedPaths)) {
       return c.json({ error: "The review folder cannot sit inside an Arr library folder." }, 400);
     }
-    if (next.defaultEncodeNodeId && !store.getNode(next.defaultEncodeNodeId) && next.defaultEncodeNodeId !== store.localNodeId()) {
+    if (
+      next.defaultEncodeNodeId
+      && !isAnyOpenNode(next.defaultEncodeNodeId)
+      && !store.getNode(next.defaultEncodeNodeId)
+      && next.defaultEncodeNodeId !== store.localNodeId()
+    ) {
       return c.json({ error: "That encode node is not registered." }, 400);
     }
     const suggestionsChanged = suggestionSettingsChanged(current, next);
@@ -1161,7 +1168,8 @@ export function createApp(opts: AppOptions) {
   app.get("/api/jobs", (c) => {
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
     const page = store.jobPage(offset, limit);
-    return c.json({ ...page, items: page.items.map((job) => publicJob(job)) });
+    const activity = store.nodeActivity();
+    return c.json({ ...page, items: page.items.map((job) => publicJob(job, activity)) });
   });
 
   app.post("/api/jobs/:id/assign", async (c) => {
@@ -1173,6 +1181,16 @@ export function createApp(opts: AppOptions) {
     const result = jobs.reassign(c.req.param("id"), nodeId);
     if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
     return c.json({ ok: true });
+  });
+
+  app.post("/api/jobs/:id/move-open", (c) => {
+    const result = jobs.moveToOpenNode(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
+    return c.json({ ok: true, nodeId: result.nodeId, nodeName: result.nodeName });
+  });
+
+  app.post("/api/jobs/move-open", (c) => {
+    return c.json({ ok: true, ...jobs.moveWaitingToOpenNodes() });
   });
 
   app.post("/api/jobs/cancel-all", (c) => {
@@ -1292,7 +1310,12 @@ export function createApp(opts: AppOptions) {
       queued: work.queued,
       queueActive: work.queueActive,
       review: work.review,
+      suggestions: work.suggestions,
+      movieSuggestions: work.movieSuggestions,
+      seriesSuggestions: work.seriesSuggestions,
+      errors: work.errors,
       runningTitle: work.running?.displayTitle ?? null,
+      nodes: publicWorkNodes(),
     });
   });
 
@@ -1309,6 +1332,7 @@ export function createApp(opts: AppOptions) {
       errors: work.errors,
       recent: store.historyPage(0, 8).items,
       status: homeStatus(work),
+      nodes: publicWorkNodes(),
     });
   });
 
@@ -1440,23 +1464,44 @@ export function createApp(opts: AppOptions) {
   }
   function resolvedDefaultEncodeNodeId(thisNodeId: string): string {
     const stored = store.getSettings().defaultEncodeNodeId;
+    if (isAnyOpenNode(stored)) return ANY_OPEN_NODE_ID;
     if (stored && (store.getNode(stored) || stored === thisNodeId)) return stored;
     return thisNodeId;
   }
 
-  function publicNode(node: ClusterNode, thisNodeId: string) {
+  function publicNode(node: ClusterNode, thisNodeId: string, activity?: ReturnType<Store["nodeActivity"]>[number]) {
     const now = opts.clock?.() ?? Date.now();
+    const load = activity ?? store.nodeActivity().find((row) => row.id === node.id);
     return {
       ...node,
       thisNode: node.id === thisNodeId,
       hardwareLabel: nodeHardwareLabel(node.hardware),
       roleLabel: nodeRoleLabel(node.role, node.id === thisNodeId),
       online: nodeIsOnline(node.lastSeen, now),
+      runningCount: load?.running ?? 0,
+      waitingCount: load?.waiting ?? 0,
+      runningTitles: load?.jobs.map((job) => job.title) ?? [],
     };
   }
 
+  function publicWorkNodes() {
+    const now = clusterNow();
+    return store.nodeActivity().map((node) => ({
+      id: node.id,
+      name: node.name,
+      online: nodeIsOnline(node.lastSeen, now),
+      enabled: node.enabled,
+      running: node.running,
+      concurrency: node.concurrency,
+      waiting: node.waiting,
+      jobs: node.jobs,
+    }));
+  }
+
   function nodesPayload(thisNodeId: string) {
-    const nodes = store.listNodes().map((node) => publicNode(node, thisNodeId));
+    const activity = store.nodeActivity();
+    const byId = new Map(activity.map((row) => [row.id, row]));
+    const nodes = store.listNodes().map((node) => publicNode(node, thisNodeId, byId.get(node.id)));
     return {
       thisNodeId,
       defaultEncodeNodeId: resolvedDefaultEncodeNodeId(thisNodeId),
@@ -1487,14 +1532,23 @@ export function createApp(opts: AppOptions) {
   if (isWorker) workerLoop.start();
   else void refreshLocalNode();
 
-  function publicJob<T extends { assignedNodeId?: string | null; status: string }>(job: T) {
-    const node = job.assignedNodeId ? store.getNode(job.assignedNodeId) : undefined;
+  function publicJob<T extends { assignedNodeId?: string | null; nodeId?: string | null; status: string }>(
+    job: T,
+    activity: ReturnType<Store["nodeActivity"]> = store.nodeActivity(),
+  ) {
+    const assigned = job.assignedNodeId ? store.getNode(job.assignedNodeId) : undefined;
+    const runningOn = job.nodeId ? store.getNode(job.nodeId) : undefined;
+    const node = runningOn ?? assigned;
     const now = opts.clock?.() ?? Date.now();
-    const waiting = (job.status === "queued" || job.status === "held") && node && !nodeIsOnline(node.lastSeen, now);
+    const load = assigned ? activity.find((row) => row.id === assigned.id) : undefined;
+    const online = assigned ? nodeIsOnline(assigned.lastSeen, now) : true;
+    const busy = Boolean(load && load.running >= load.concurrency);
+    const waiting = (job.status === "queued" || job.status === "held") && Boolean(assigned) && (!online || busy);
     return {
       ...job,
       assignedNodeName: node?.name ?? null,
-      waitingForNode: Boolean(waiting),
+      waitingForNode: waiting,
+      waitingReason: waiting ? (online ? "busy" as const : "offline" as const) : null,
     };
   }
 

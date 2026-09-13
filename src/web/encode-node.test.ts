@@ -35,6 +35,8 @@ describe("encode node picker", () => {
     expect(nodeCanEncode(hevcOnly, "av1")).toBe(false);
     expect(capableEncodeNodes([hevcOnly, gpu], "av1").map((row) => row.id)).toEqual(["5090"]);
     expect(encodeNodeOptionLabel({ ...hevcOnly, online: false, enabled: false })).toBe("intel (offline, drained)");
+    expect(encodeNodeOptionLabel({ ...gpu, runningCount: 0 })).toBe("5090 (idle)");
+    expect(encodeNodeOptionLabel({ ...gpu, runningCount: 2, concurrency: 4 })).toBe("5090 (2 of 4 busy)");
     expect(encodeNodeOptionLabel({
       ...hevcOnly,
       name: "MacBook Pro",

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, formatSize, type HistoryRow, type HomePayload } from "../api";
 import { Card } from "../components/Card";
 import { Help, PageHead } from "../components/Shell";
+import { nodeActivityLine } from "../nav-work";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { Pill } from "../components/ui";
 
@@ -27,7 +28,17 @@ export function HomeDashboard({ data, onRefresh }: { data: HomePayload; onRefres
       </Help>
       <Card>
         <div className="text-xs font-medium uppercase tracking-wide text-muted">Status</div>
-        <p className="mt-1 font-mono text-sm font-medium leading-6 text-ink">{data.status}</p>
+        {data.nodes && data.nodes.length > 1 ? (
+          <ul className="mt-2 space-y-1">
+            {data.nodes.map((node) => (
+              <li key={node.id} className="font-mono text-sm font-medium leading-6 text-ink">
+                {node.name} · {nodeActivityLine(node)}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-1 font-mono text-sm font-medium leading-6 text-ink">{data.status}</p>
+        )}
       </Card>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Card>

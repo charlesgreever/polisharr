@@ -23,6 +23,24 @@ describe("promotion", () => {
     expect(existsSync(`${original}.opt-old`)).toBe(false);
   });
 
+  it("deletes the macOS AppleDouble fork next to a sidecar after Keep rename", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opt-promote-fork-"));
+    const library = join(root, "Movies");
+    const review = join(root, "review-path");
+    mkdirSync(library);
+    mkdirSync(review);
+    const original = join(library, "movie.mkv");
+    const output = join(review, "movie-job.mkv");
+    const fork = join(review, "._movie-job.mkv");
+    writeFileSync(original, "ORIGINAL-BYTES");
+    writeFileSync(output, "NEW-SIDECAR-BYTES");
+    writeFileSync(fork, "APPLEDOUBLE");
+    await replaceLibraryFile(output, original);
+    expect(existsSync(output)).toBe(false);
+    expect(existsSync(fork)).toBe(false);
+    expect(readFileSync(original, "utf8")).toBe("NEW-SIDECAR-BYTES");
+  });
+
   it("does not overwrite the original until the new file is ready", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-promote-"));
     const original = join(dir, "movie.mkv");

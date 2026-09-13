@@ -44,6 +44,8 @@ export CONFIG_DIR="${CONFIG_DIR:-${root}/config}"
 export FFMPEG="${FFMPEG:-$(command -v ffmpeg)}"
 export FFPROBE="${FFPROBE:-$(command -v ffprobe)}"
 export MKVMERGE="${MKVMERGE:-$(command -v mkvmerge)}"
+# Stops copyfile(3) from writing AppleDouble `._*` forks next to encode output on SMB.
+export COPYFILE_DISABLE=1
 
 chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
 echo "Polisharr using ${FFMPEG} on ${chip}."

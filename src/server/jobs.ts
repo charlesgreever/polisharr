@@ -4,7 +4,7 @@ import type { Store } from "./store.ts";
 import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewItem, Settings, Suggestion } from "./types.ts";
 import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
-import { CancelledError, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
+import { CancelledError, cleanReviewLeftovers, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
 import { aggressiveTargetBytes, missedOutputTarget } from "./size-budget.ts";
 import { classifyInterruptedKeep, KEEP_INTERRUPTED, SIDECAR_GONE } from "./review-recovery.ts";
 import { clearStagedBackup, promote, promotedPath, recoverStagedReplace, type PromoteInput, type PromoteResult } from "./promote.ts";
@@ -300,12 +300,14 @@ export class JobService {
         if (!outcome.replaced) {
           this.opts.store.updateJob(id, { status: "failed", error: outcome.error ?? "Direct write failed.", nodeId: null });
           this.opts.store.addHistory(item.id, "failed", 0, this.now());
+          await this.sweepReviewLeftovers();
           return { ok: true };
         }
         const synced = await this.syncLibraryFile(item, outcome.destPath, output.sizeBytes);
         const warning = appendWarning(outcome.warning, synced.warning);
         this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, promoteError: warning, nodeId: job.nodeId });
         this.opts.store.addHistory(item.id, "kept", outcome.savedBytes, this.now());
+        await this.sweepReviewLeftovers();
         return { ok: true };
       }
       const targetBytes = plan.video.kind === "size" ? plan.video.targetBytes : null;
@@ -347,11 +349,13 @@ export class JobService {
       });
       this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
       if (flagged) this.opts.store.addHistory(item.id, "flagged", 0, this.now());
+      await this.sweepReviewLeftovers();
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : "The job failed.";
       this.opts.store.updateJob(id, { status: "failed", error: message, nodeId: job.nodeId });
       this.opts.store.addHistory(item.id, "failed", 0, this.now());
+      await this.sweepReviewLeftovers();
       return { ok: true };
     }
   }
@@ -363,6 +367,7 @@ export class JobService {
     if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
     this.opts.store.updateJob(id, { status: "failed", error, nodeId: job.nodeId });
     this.opts.store.addHistory(job.itemId, "failed", 0, this.now());
+    void this.sweepReviewLeftovers();
     return { ok: true };
   }
 
@@ -644,6 +649,7 @@ export class JobService {
     this.deleteReviewsForSidecar(review.sidecarPath);
     const warning = appendWarning(outcome.warning, synced.warning);
     if (warning && job) this.opts.store.updateJob(job.id, { promoteError: warning });
+    await this.sweepReviewLeftovers();
   }
 
   private async finalizeCompletedKeep(review: ReviewItem, destPath: string): Promise<void> {
@@ -658,6 +664,15 @@ export class JobService {
     if (item) await this.syncLibraryFile(item, destPath, review.sidecar.sizeBytes ?? item.sizeBytes);
     else this.opts.store.updateItemFile(review.itemId, destPath, review.sidecar.sizeBytes ?? 0);
     this.deleteReviewsForSidecar(review.sidecarPath);
+    await this.sweepReviewLeftovers();
+  }
+
+  private async sweepReviewLeftovers(): Promise<void> {
+    try {
+      await cleanReviewLeftovers(this.opts.store.getSettings().reviewPath);
+    } catch {
+      // AppleDouble leftovers are best-effort. A sweep miss must not fail Keep or a finished job.
+    }
   }
 
   private async withKeepSlot<T>(work: () => Promise<T>): Promise<T> {
@@ -774,6 +789,7 @@ export class JobService {
     await this.unlinkSidecarIfLast(review);
     this.opts.store.deleteReview(reviewId);
     this.opts.store.addHistory(review.itemId, "discarded", 0, this.now());
+    await this.sweepReviewLeftovers();
     return { accepted: true };
   }
 

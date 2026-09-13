@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -21,6 +21,8 @@ import {
   optimizeSteps,
   toolLocaleEnv,
   appleDoublePath,
+  cleanReviewLeftovers,
+  removeEmptyDir,
   removeReviewArtifact,
   parseFfmpegProgress,
   parseMkvmergeProgress,
@@ -73,6 +75,44 @@ describe("macOS AppleDouble leftovers", () => {
     await removeReviewArtifact(sidecar);
     expect(existsSync(sidecar)).toBe(false);
     expect(existsSync(fork)).toBe(false);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("removes an empty work directory and the AppleDouble fork next to it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-empty-dir-"));
+    const jobDir = join(dir, "job-1");
+    const dirFork = join(dir, "._job-1");
+    await writeFile(join(dir, "keep.txt"), "keep");
+    await mkdir(jobDir);
+    await writeFile(dirFork, "dir-fork");
+    await removeEmptyDir(jobDir);
+    expect(existsSync(jobDir)).toBe(false);
+    expect(existsSync(dirFork)).toBe(false);
+    expect(existsSync(join(dir, "keep.txt"))).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("sweeps orphan AppleDouble forks after Keep and leaves the fork next to a pending sidecar", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-sweep-"));
+    const workJob = join(dir, ".work", "mac-node", "job-1");
+    await mkdir(workJob, { recursive: true });
+    const pending = join(dir, "pending-job.mkv");
+    const pendingFork = join(dir, "._pending-job.mkv");
+    const keptFork = join(dir, "._kept-job.mkv");
+    const tempFork = join(workJob, "._123-enc.mkv");
+    const jobDirFork = join(dir, ".work", "mac-node", "._job-1");
+    await writeFile(pending, "sidecar");
+    await writeFile(pendingFork, "live-fork");
+    await writeFile(keptFork, "orphan-fork");
+    await writeFile(tempFork, "temp-fork");
+    await writeFile(jobDirFork, "job-dir-fork");
+    await cleanReviewLeftovers(dir);
+    expect(existsSync(pending)).toBe(true);
+    expect(existsSync(pendingFork)).toBe(true);
+    expect(existsSync(keptFork)).toBe(false);
+    expect(existsSync(tempFork)).toBe(false);
+    expect(existsSync(workJob)).toBe(false);
+    expect(existsSync(jobDirFork)).toBe(false);
     await rm(dir, { recursive: true, force: true });
   });
 });

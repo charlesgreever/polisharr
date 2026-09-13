@@ -2,6 +2,7 @@ import { access, rename, unlink } from "node:fs/promises";
 import { extname } from "node:path";
 import { notifyPlayers } from "./notify.ts";
 import { placeFile, type PlaceMethod } from "./fs-copy.ts";
+import { removeReviewArtifact } from "./optimize.ts";
 import type { ArrKind, ExecutablePlan, LibraryItem, PlayerKind } from "./types.ts";
 
 export type PromoteInput = {
@@ -88,8 +89,8 @@ export async function replaceLibraryFile(outputPath: string, destPath: string, o
   }
   await unlink(backup).catch(() => undefined);
   await unlink(stagedNewPath(destPath)).catch(() => undefined);
-  if (outputPath !== destPath) await unlink(outputPath).catch(() => undefined);
-  if (originalPath !== destPath) await unlink(originalPath).catch(() => undefined);
+  if (outputPath !== destPath) await removeReviewArtifact(outputPath);
+  if (originalPath !== destPath) await removeReviewArtifact(originalPath);
   return method;
 }
 

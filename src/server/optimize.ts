@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, rmdir, stat, statfs, unlink } from "node:fs/promises";
+import { mkdir, readdir, rmdir, stat, statfs, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
@@ -34,11 +34,55 @@ export async function removeReviewArtifact(path: string): Promise<void> {
 }
 
 export async function removeEmptyDir(path: string): Promise<void> {
+  await sweepOrphanAppleDoubles(path);
   try {
     await rmdir(path);
   } catch {
     // Still in use, not empty, or already gone.
   }
+  const fork = appleDoublePath(path);
+  if (fork) await tryUnlink(fork);
+}
+
+export async function cleanReviewLeftovers(reviewDir: string): Promise<void> {
+  // macOS SMB hides AppleDouble `._*` from the worker. The Linux master can see and delete them.
+  if (!reviewDir) return;
+  await sweepOrphanAppleDoubles(reviewDir);
+  await cleanWorkTree(join(reviewDir, ".work"));
+}
+
+async function sweepOrphanAppleDoubles(dir: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    names
+      .filter((name) => name.startsWith("._"))
+      .map(async (name) => {
+        const companion = join(dir, name.slice(2));
+        try {
+          await stat(companion);
+        } catch {
+          await tryUnlink(join(dir, name));
+        }
+      }),
+  );
+}
+
+async function cleanWorkTree(dir: string): Promise<void> {
+  let entries: Array<{ name: string; isDirectory: () => boolean }>;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) await cleanWorkTree(join(dir, entry.name));
+  }
+  await removeEmptyDir(dir);
 }
 
 async function tryUnlink(path: string): Promise<void> {
@@ -270,6 +314,7 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
     } finally {
       await Promise.all(temps.map(removeReviewArtifact));
       await removeEmptyDir(workDir);
+      await cleanReviewLeftovers(req.reviewDir);
     }
   };
 }

@@ -44,6 +44,7 @@ import {
   parsePreviewCapability,
   parsePreviewRequest,
   poolSpreadLimit,
+  PREVIEW_LEASE_SAFETY_MARGIN_MS,
   type ClusterNode,
   type EncodeNeed,
 } from "./cluster.ts";
@@ -1915,17 +1916,22 @@ export class Store {
     const expired = this.db.prepare(
       "SELECT id FROM preview_tasks WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?",
     ).all(now) as Array<{ id: string }>;
+    // Free the slot and drop the token, but keep lease_until and reservations until the master margin.
     const fail = this.db.prepare(
       `UPDATE preview_tasks SET status = 'failed', error = 'The preview node stopped.',
-         lease_token = NULL, lease_until = NULL, wait_reason = NULL, updated_at = ?
+         lease_token = NULL, wait_reason = NULL, updated_at = ?
        WHERE id = ? AND status = 'running'`,
     );
+    const stale = this.db.prepare(
+      `SELECT DISTINCT r.task_id AS id
+       FROM preview_reservations r
+       JOIN preview_tasks t ON t.id = r.task_id
+       WHERE t.lease_until IS NOT NULL AND t.lease_until < ?`,
+    ).all(now - PREVIEW_LEASE_SAFETY_MARGIN_MS) as Array<{ id: string }>;
     const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
     const tx = this.db.transaction(() => {
-      for (const row of expired) {
-        fail.run(now, row.id);
-        release.run(row.id);
-      }
+      for (const row of expired) fail.run(now, row.id);
+      for (const row of stale) release.run(row.id);
     });
     tx();
     return expired.length;
@@ -2026,7 +2032,10 @@ export class Store {
 
   readerWaitDeadline(reviewId: string, now: number, safetyMarginMs: number): number {
     const rows = this.db.prepare(
-      "SELECT lease_until FROM preview_tasks WHERE review_id = ? AND status IN ('running', 'cancelled') AND lease_until IS NOT NULL",
+      `SELECT t.lease_until AS lease_until
+       FROM preview_tasks t
+       WHERE t.review_id = ? AND t.lease_until IS NOT NULL
+         AND EXISTS (SELECT 1 FROM preview_reservations r WHERE r.task_id = t.id)`,
     ).all(reviewId) as Array<{ lease_until: number }>;
     if (rows.length === 0) return now;
     return Math.max(...rows.map((row) => row.lease_until + safetyMarginMs));

@@ -13,7 +13,7 @@ import argon2 from "argon2";
 import { readAppVersion, type Env } from "./env.ts";
 import { Store } from "./store.ts";
 import { decryptSecret, encryptSecret, loadOrCreateSecret } from "./secrets.ts";
-import { detectHardware, probePreviewCapability, type HardwareProbe, type PreviewSmokeCheck } from "./hardware.ts";
+import { createPreviewCapabilityProbe, detectHardware, type HardwareProbe, type PreviewSmokeCheck } from "./hardware.ts";
 import { isLocalAddress, requestAddress } from "./net.ts";
 import {
   testRadarr,
@@ -189,10 +189,17 @@ export function createApp(opts: AppOptions) {
       refreshReplacementPreflight: () => playbackRefresh.run(),
     },
   });
+  const previewCapabilityFn = opts.previewCapability
+    ?? (opts.hardware && !opts.previewSmoke
+      ? async () => null
+      : createPreviewCapabilityProbe({
+          ffmpeg: opts.env.ffmpeg,
+          ffprobe: opts.env.ffprobe,
+          hardware,
+          smoke: opts.previewSmoke,
+        }));
   async function resolvePreviewCapability() {
-    if (opts.previewCapability) return opts.previewCapability();
-    if (opts.hardware && !opts.previewSmoke) return null;
-    return probePreviewCapability(opts.env.ffmpeg, await hardware(), undefined, opts.previewSmoke);
+    return previewCapabilityFn();
   }
   const previews = new PreviewService({
     store,

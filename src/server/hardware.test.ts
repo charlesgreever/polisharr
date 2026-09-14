@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseBackend, choosePreviewEncoder, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, parseH264PreviewEncoders, probeEncodeDevices, probePreviewCapability } from "./hardware.ts";
+import { chooseBackend, choosePreviewEncoder, createPreviewCapabilityProbe, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, parseH264PreviewEncoders, probeEncodeDevices, probePreviewCapability } from "./hardware.ts";
 
 const jellyfinBoth = `
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
@@ -165,5 +165,49 @@ describe("H.264 preview capability", () => {
       },
     );
     expect(threw.h264Encoder).toBeNull();
+  });
+
+  it("smokes H.264 once per encoder and keeps the profile if a later smoke would fail", async () => {
+    const listing = `
+ V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+`;
+    let smokes = 0;
+    const get = createPreviewCapabilityProbe({
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
+      listEncoders: async () => listing,
+      smoke: async () => {
+        smokes += 1;
+        return smokes === 1;
+      },
+    });
+    expect((await get()).h264Encoder).toBe("h264_nvenc");
+    expect((await get()).h264Encoder).toBe("h264_nvenc");
+    expect((await get()).profiles).toEqual(["sdr-1080p-h264"]);
+    expect(smokes).toBe(1);
+  });
+
+  it("stops advertising preview when the hardware backend disappears", async () => {
+    const listing = `
+ V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+`;
+    let backend: "cuda" | "none" = "cuda";
+    const get = createPreviewCapabilityProbe({
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      hardware: async () => ({
+        backend,
+        cuda: backend === "cuda",
+        vaapi: false,
+        av1: false,
+        reason: backend === "none" ? "No GPU." : null,
+      }),
+      listEncoders: async () => listing,
+      smoke: async () => true,
+    });
+    expect((await get()).h264Encoder).toBe("h264_nvenc");
+    backend = "none";
+    expect((await get()).h264Encoder).toBeNull();
   });
 });

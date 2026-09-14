@@ -352,6 +352,32 @@ describe("preview task lifecycle", () => {
     expect(ctx.store.historyPage(0, 10).total).toBe(0);
   });
 
+  it("keeps original bytes after lease expiry until the master safety margin passes", async () => {
+    let now = 1_000;
+    const waiters: Array<() => void> = [];
+    const ctx = harness({
+      clock: () => now,
+      sleep: () => new Promise<void>((resolve) => {
+        waiters.push(resolve);
+      }),
+    });
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    ctx.previews.claimForNode("worker-1", 1);
+    now = 1_000 + PREVIEW_LEASE_MS + 1;
+    ctx.previews.expire();
+    expect(ctx.store.getPreviewTask(requested.task.id)?.status).toBe("failed");
+    expect(ctx.store.reservationsForReview("rev-1").length).toBeGreaterThan(0);
+    const keep = ctx.jobs.keep("rev-1");
+    await vi.waitFor(() => expect(waiters.length).toBeGreaterThan(0));
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    now = 1_000 + PREVIEW_LEASE_MS + PREVIEW_LEASE_SAFETY_MARGIN_MS + 1;
+    for (const wake of waiters.splice(0)) wake();
+    await vi.waitFor(() => expect(readFileSync(ctx.sourcePath, "utf8")).toBe("SIDECAR!!!"));
+    await keep;
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+  });
+
   it("waits through the preview lease and safety margin before Keep mutates source bytes", async () => {
     let now = 1_000;
     const ctx = harness({

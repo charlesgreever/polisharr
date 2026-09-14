@@ -281,7 +281,6 @@ export class PreviewService {
     const task = this.opts.store.getPreviewTask(id);
     if (!task) return { error: "That preview task does not exist.", status: 404 };
     if (task.status === "cancelled" || !task.publicationAllowed) {
-      this.opts.store.releasePreviewReservations(id);
       return { error: PREVIEW_PUBLICATION_REVOKED, status: 409 };
     }
     if (task.status === "ready") {

@@ -48,13 +48,14 @@ function playing(sourceId = "src-1080") {
   };
 }
 
-async function playbackApp(fetchImpl: typeof fetch) {
+async function playbackApp(fetchImpl: typeof fetch, extras: { clock?: () => number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "opt-play-http-"));
   const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
   const created = createApp({
     env,
     hardware: async () => hw,
     fetch: fetchImpl,
+    clock: extras.clock,
     playbackPollMs: 0,
     playbackTimeoutMs: 50,
   });
@@ -359,6 +360,64 @@ describe("playback HTTP", () => {
     expect(job?.playbackHold?.sentence).toBe(PLAYBACK_WAIT_FINISH);
     expect(job?.playbackHold?.detail).toBe("Jellyfin");
     expect(ctx.store.getJob("job-1")?.status).toBe("queued");
+  });
+
+  it("holds mapped nodes when the Jellyfin login cannot see the household", async () => {
+    let now = 1_000;
+    let sessions = 0;
+    const ctx = await playbackApp(((url, init) => {
+      if (String(url).endsWith("/Sessions")) sessions += 1;
+      return jellyfinFetch({ token: "user-token", sessions: () => [] })(url, init);
+    }) as typeof fetch, { clock: () => now });
+    await ctx.app.request("/api/integrations", {
+      method: "POST",
+      headers: ctx.headers,
+      body: JSON.stringify({
+        id: ctx.jfId,
+        kind: "jellyfin",
+        name: "Jellyfin",
+        url: "http://jellyfin:8096",
+        token: "user-token",
+        enabled: true,
+      }),
+    });
+    const nodeId = ctx.store.localNodeId();
+    const saved = await ctx.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({
+        connections: [{ connectionId: ctx.jfId, protectNodes: true, protectedNodeIds: [nodeId] }],
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const settings = await saved.json() as {
+      connections: Array<{ health: { status: string; lastError: string | null } }>;
+    };
+    expect(settings.connections[0]?.health.status).toBe("unavailable");
+    expect(settings.connections[0]?.health.lastError).toMatch(/server API key/);
+    const plan = {
+      origin: "custom" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: ["Copy"], estimatedOutputBytes: 1, category: "movie1080p" as const,
+    };
+    ctx.store.insertJob({
+      id: "job-user", itemId: "film-1080", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: true, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: nodeId,
+    });
+    const before = sessions;
+    now = 40_000;
+    const listed = await ctx.app.request("/api/jobs", { headers: ctx.headers });
+    const reread = await ctx.app.request("/api/playback/settings", { headers: ctx.headers });
+    expect(listed.status).toBe(200);
+    expect(reread.status).toBe(200);
+    expect(sessions).toBe(before);
+    const body = await listed.json() as {
+      items: Array<{ id: string; status: string; playbackHold?: { sentence: string | null }; waitingReason?: string | null }>;
+    };
+    const job = body.items.find((row) => row.id === "job-user");
+    expect(job?.status).toBe("queued");
+    expect(job?.waitingReason).toBe("playback-status");
+    expect(job?.playbackHold?.sentence).toBe(PLAYBACK_WAIT_STATUS);
+    expect(ctx.store.getJob("job-user")?.status).toBe("queued");
   });
 
   it("holds mapped work when the monitor is stale and shows the last check time", async () => {

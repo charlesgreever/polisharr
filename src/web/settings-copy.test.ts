@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  PLAYBACK_HOUSEHOLD_UNAVAILABLE,
   PLAYBACK_PRIORITY_HELP,
   PLAYBACK_PRIORITY_LABEL,
   SIZE_CAP_GRID,
@@ -37,5 +38,6 @@ describe("settings copy", () => {
     expect(PLAYBACK_PRIORITY_LABEL).toBe("Let Jellyfin playback take priority");
     expect(PLAYBACK_PRIORITY_HELP).toContain("Run now still waits for playback");
     expect(PLAYBACK_PRIORITY_HELP).toContain("Running jobs finish");
+    expect(PLAYBACK_HOUSEHOLD_UNAVAILABLE).toContain("server API key");
   });
 });

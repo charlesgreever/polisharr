@@ -46,3 +46,4 @@ export const PLAYBACK_NODE_HELP = "Pick the encode nodes that share hardware wit
 export const PLAYBACK_COVERAGE_LABEL = "Covered libraries";
 export const PLAYBACK_COVERAGE_HELP = "Replacement protection uses these Radarr and Sonarr libraries.";
 export const PLAYBACK_REPLACEMENT_LABEL = "Protect file replacement";
+export const PLAYBACK_HOUSEHOLD_UNAVAILABLE = "This Jellyfin login cannot see household playback. Use a server API key.";

@@ -483,6 +483,48 @@ describe("playback monitor", () => {
     });
   });
 
+  it("holds mapped nodes when a user token cannot see household playback", async () => {
+    const db = store();
+    seedLibrary(db);
+    let now = 5_000;
+    const policy = createPlaybackPolicy({ clock: () => now, connectionName: () => "Jellyfin" });
+    const monitor = createPlaybackMonitor({
+      store: db,
+      decrypt: (value) => value,
+      clock: () => now,
+      pollMs: 0,
+      staleMs: 30_000,
+      policy,
+      fetch: (async (url) => {
+        if (String(url).endsWith("/Auth/Keys")) return json({}, 403);
+        if (String(url).endsWith("/Sessions")) return json([]);
+        return json({ MediaSources: [] });
+      }) as typeof fetch,
+    });
+    monitors.push(monitor);
+    db.savePlaybackSettings([{
+      ...db.defaultPlaybackConnectionSettings("jf"),
+      observePlayback: false,
+      protectNodes: true,
+      protectedNodeIds: ["gpu"],
+    }]);
+    monitor.start();
+    await monitor.refresh();
+    now = 15_000;
+    await monitor.refresh();
+    now = 45_000;
+    expect(monitor.coverage().connections[0]).toMatchObject({
+      status: "unavailable",
+      householdVisible: false,
+      credentialKind: "userToken",
+    });
+    expect(monitor.coverage().connections[0]?.lastError).toMatch(/server API key/);
+    expect(policy.nodeAdmission("gpu", db.getPlaybackSettings())).toMatchObject({
+      allowed: false,
+      reason: "unknown",
+    });
+  });
+
   it("drops live coverage when a Jellyfin connection is forgotten", async () => {
     const db = store();
     seedLibrary(db);

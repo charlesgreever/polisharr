@@ -292,15 +292,18 @@ async function pollAll(input: {
       input.store.closeOpenPlaybackOccurrences(row.connectionId, input.now, true);
       const state = input.live.get(row.connectionId);
       if (state) state.missCounts.clear();
+      const message = !access.householdVisible
+        ? (access.message ?? snapshot.error ?? "This Jellyfin login cannot see household playback.")
+        : (snapshot.error ?? "Jellyfin did not return a complete session list.");
       writeHealth(input.live, row, {
-        status: snapshot.truncated ? "incomplete" : "error",
-        lastError: snapshot.error,
+        status: !access.householdVisible ? "unavailable" : snapshot.truncated ? "incomplete" : "error",
+        lastError: message,
         complete: false,
         stale: true,
         credentialKind: access.credentialKind,
         householdVisible: access.householdVisible,
       }, input.now, input.staleMs);
-      observePolicy(input.policy, row.connectionId, snapshot.fetchedAt, snapshot.error ?? "Jellyfin did not return a complete session list.");
+      observePolicy(input.policy, row.connectionId, snapshot.fetchedAt, message);
       continue;
     }
     await applySnapshot({
@@ -333,7 +336,7 @@ async function ensureCredential(
   playback: JellyfinPlaybackClient,
   url: string,
   token: string,
-): Promise<{ credentialKind: PlaybackCredentialKind; householdVisible: boolean }> {
+): Promise<{ credentialKind: PlaybackCredentialKind; householdVisible: boolean; message: string | null }> {
   const fingerprint = tokenFingerprint(token);
   const existing = live.get(settings.connectionId);
   if (
@@ -341,7 +344,11 @@ async function ensureCredential(
     && existing.tokenFingerprint === fingerprint
     && existing.health.credentialKind !== "unknown"
   ) {
-    return { credentialKind: existing.health.credentialKind, householdVisible: existing.health.householdVisible };
+    return {
+      credentialKind: existing.health.credentialKind,
+      householdVisible: existing.health.householdVisible,
+      message: existing.health.lastError,
+    };
   }
   const access = await playback.testPlaybackAccess({ url, token, checkSessions: false });
   const state = existing ?? {
@@ -351,7 +358,11 @@ async function ensureCredential(
   };
   state.tokenFingerprint = fingerprint;
   live.set(settings.connectionId, state);
-  return { credentialKind: access.credentialKind, householdVisible: access.householdVisible };
+  return {
+    credentialKind: access.credentialKind,
+    householdVisible: access.householdVisible,
+    message: access.message,
+  };
 }
 
 async function applySnapshot(input: {
@@ -365,7 +376,7 @@ async function applySnapshot(input: {
   live: Map<string, ConnectionLive>;
   staleMs: number;
   statFile: (path: string) => Promise<PlaybackFileRevision | null>;
-  access: { credentialKind: PlaybackCredentialKind; householdVisible: boolean };
+  access: { credentialKind: PlaybackCredentialKind; householdVisible: boolean; message: string | null };
   policy?: PlaybackPolicy;
 }): Promise<void> {
   const state = input.live.get(input.settings.connectionId) ?? {
@@ -415,9 +426,30 @@ async function applySnapshot(input: {
       }
     }
   }
-  const unavailable = input.access.credentialKind === "userToken";
-  const status: PlaybackHealthStatus = unavailable ? "unavailable" : playing.length > 0 ? "playing" : "idle";
+  const unavailable = !input.access.householdVisible;
   input.live.set(input.settings.connectionId, state);
+  if (unavailable) {
+    // A user token or unverified key can only see some sessions. An empty list is not household-idle.
+    const message = input.access.message ?? "This Jellyfin login cannot see household playback. Use a server API key.";
+    writeHealth(input.live, input.settings, {
+      status: "unavailable",
+      lastError: message,
+      complete: false,
+      stale: true,
+      credentialKind: input.access.credentialKind,
+      householdVisible: false,
+    }, input.now, input.staleMs);
+    input.policy?.observe({
+      connectionId: input.settings.connectionId,
+      fetchedAt: input.snapshot.fetchedAt,
+      complete: false,
+      error: message,
+      sessions: [],
+    });
+    input.store.prunePlaybackHistory(input.now);
+    return;
+  }
+  const status: PlaybackHealthStatus = playing.length > 0 ? "playing" : "idle";
   writeHealth(input.live, input.settings, {
     status,
     lastError: null,

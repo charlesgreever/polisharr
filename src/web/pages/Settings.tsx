@@ -9,6 +9,7 @@ import {
   hardwareBackendLabel,
   PLAYBACK_COVERAGE_HELP,
   PLAYBACK_COVERAGE_LABEL,
+  PLAYBACK_HOUSEHOLD_UNAVAILABLE,
   PLAYBACK_NODE_HELP,
   PLAYBACK_PRIORITY_HELP,
   PLAYBACK_PRIORITY_LABEL,
@@ -524,7 +525,10 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                     ))}
                   </div>
                 </div>
-                {row.health.stale && (
+                {row.health.status === "unavailable" && (
+                  <p className="help m-0">{row.health.lastError || PLAYBACK_HOUSEHOLD_UNAVAILABLE}</p>
+                )}
+                {row.health.stale && row.health.status !== "unavailable" && (
                   <p className="help m-0">
                     Playback status is stale
                     {row.health.lastSuccessAt != null ? ` (last check ${new Date(row.health.lastSuccessAt).toLocaleString()})` : "."}

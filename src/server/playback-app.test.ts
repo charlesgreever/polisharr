@@ -373,6 +373,29 @@ describe("playback HTTP", () => {
       items: Array<{ deviceId: string; reasonFamily: string }>;
     };
     expect(mixedUnderAudio.items.some((row) => row.deviceId === "den" && row.reasonFamily === "mixed")).toBe(true);
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "direct",
+      sessionId: "direct",
+      playMethod: "DirectPlay",
+      reasonFamily: null,
+      rawReasons: [],
+      lastSeenAt: Date.now(),
+      revision,
+    }));
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "unknown",
+      sessionId: "unknown",
+      playMethod: "Transcode",
+      reasonFamily: "unknown",
+      rawReasons: ["FutureReasonX"],
+      lastSeenAt: Date.now(),
+      revision,
+    }));
+    const unknownObs = await (await ctx.app.request("/api/playback/observations?reasonFamily=unknown", { headers: ctx.headers })).json() as {
+      items: Array<{ id: string; playMethod: string | null }>;
+    };
+    expect(unknownObs.items.some((row) => row.id === "unknown")).toBe(true);
+    expect(unknownObs.items.some((row) => row.playMethod === "DirectPlay" || row.id === "direct")).toBe(false);
     const bad = await ctx.app.request("/api/playback/diagnostics?days=14", { headers: ctx.headers });
     expect(bad.status).toBe(400);
     const page = await ctx.app.request("/api/playback/observations?limit=100", { headers: ctx.headers });

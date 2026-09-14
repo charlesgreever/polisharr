@@ -6,6 +6,7 @@ import {
   createPlaybackDiagnostics,
   describeAfterKeep,
   isPlaybackProblem,
+  occurrenceMatchesFamily,
   parsePlaybackListQuery,
   playbackDiagnosticId,
   recommendPlaybackRepair,
@@ -382,6 +383,46 @@ describe("playback diagnostic decisions", () => {
         lastSeenAt: NOW,
       })],
     }).sentence).toContain("was local");
+  });
+
+  it("does not treat Direct Play as an unknown conversion", async () => {
+    const db = store();
+    db.upsertInstance({ id: "radarr", kind: "radarr", name: "Radarr", url: "http://radarr", enabled: true });
+    db.upsertInstance({ id: "jf", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin", enabled: true });
+    db.upsertItem(movie());
+    const revision = occurrence().revision;
+    db.savePlaybackOccurrence(occurrence({
+      id: "direct",
+      sessionId: "direct",
+      playMethod: "DirectPlay",
+      reasonFamily: null,
+      rawReasons: [],
+      revision,
+    }));
+    db.savePlaybackOccurrence(occurrence({
+      id: "unknown",
+      sessionId: "unknown",
+      playMethod: "Transcode",
+      reasonFamily: "unknown",
+      rawReasons: ["FutureReasonX"],
+      deviceId: "bedroom",
+      deviceLabel: "Bedroom TV",
+      revision,
+    }));
+    expect(occurrenceMatchesFamily(occurrence({
+      playMethod: "DirectPlay",
+      reasonFamily: null,
+      rawReasons: [],
+    }), "unknown")).toBe(false);
+    const diagnostics = createPlaybackDiagnostics({
+      store: db,
+      clock: () => NOW,
+      statFile: async () => revision,
+    });
+    const unknown = diagnostics.listObservations({ offset: 0, limit: 50, days: 7, reasonFamily: "unknown" });
+    expect(unknown.items.map((row) => row.id)).toEqual(["unknown"]);
+    const all = diagnostics.listObservations({ offset: 0, limit: 50, days: 7 });
+    expect(all.items.map((row) => row.id).sort()).toEqual(["direct", "unknown"]);
   });
 
   it("includes mixed audio-plus-bitrate problems in the audio filter", async () => {

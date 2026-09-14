@@ -724,6 +724,7 @@ function contextChangeSentence(before: PlaybackOccurrence, after: PlaybackOccurr
 
 export function occurrenceMatchesFamily(row: PlaybackOccurrence, family: PlaybackReasonFamily | undefined): boolean {
   if (!family) return true;
+  if (!isPlaybackProblem(row)) return false;
   const stored = problemReasonFamily(row);
   if (stored === family) return true;
   const fromReasons = familiesFromEvidence(stored ?? "unknown", row.rawReasons);

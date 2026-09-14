@@ -449,6 +449,31 @@ export class Store {
     this.db.prepare("DELETE FROM library_items WHERE id = ?").run(id);
   }
 
+  deleteItemsForPath(path: string, instanceId: string): LibraryItem[] {
+    const rows = this.itemsForPath(path, instanceId);
+    for (const row of rows) this.deleteLibraryItem(row.id);
+    return rows;
+  }
+
+  listSeriesEpisodes(instanceId: string, arrSeriesId: number): LibraryItem[] {
+    return this.listItems("episode").filter(
+      (episode) => episode.instanceId === instanceId && episode.arrSeriesId === arrSeriesId,
+    );
+  }
+
+  deleteSeries(instanceId: string, arrSeriesId: number): LibraryItem[] {
+    const rows = this.listSeriesEpisodes(instanceId, arrSeriesId);
+    for (const row of rows) this.deleteLibraryItem(row.id);
+    this.db.prepare("DELETE FROM series_preferences WHERE instance_id = ? AND arr_series_id = ?").run(instanceId, arrSeriesId);
+    return rows;
+  }
+
+  seriesHasOpenWork(instanceId: string, arrSeriesId: number): boolean {
+    return this.listSeriesEpisodes(instanceId, arrSeriesId).some((episode) => (
+      Boolean(this.activeJobForItem(episode.id)) || Boolean(this.pendingReviewForItem(episode.id))
+    ));
+  }
+
   listItems(type?: "movie" | "episode"): LibraryItem[] {
     const sql = type
       ? `SELECT i.*, inst.name AS instance_name FROM library_items i JOIN instances inst ON inst.id = i.instance_id WHERE i.type = ?`
@@ -464,10 +489,12 @@ export class Store {
     sort?: "title" | "size" | "quality";
     instanceId?: string;
     arrSeriesId?: number;
+    work?: boolean;
   }): { rows: LibrarySnapshot[]; total: number } {
     const where = ["i.type = @type"];
     if (opts.instanceId !== undefined) where.push("i.instance_id = @instanceId");
     if (opts.arrSeriesId !== undefined) where.push("i.arr_series_id = @arrSeriesId");
+    if (opts.work) where.push(NEEDS_WORK_SQL);
     const params = {
       type: opts.type,
       offset: opts.offset,
@@ -732,10 +759,22 @@ export class Store {
     );
   }
 
-  suggestionPage(offset: number, limit: number, query = "", filters: SuggestionFilters = {}): Page<Suggestion & { displayTitle: string; instanceName?: string; type?: LibraryItem["type"]; quality?: string; hasPoster: boolean }> {
+  suggestionPage(
+    offset: number,
+    limit: number,
+    query = "",
+    filters: SuggestionFilters = {},
+    sort: "title" | "savings" = "title",
+  ): Page<Suggestion & { displayTitle: string; instanceName?: string; type?: LibraryItem["type"]; quality?: string; hasPoster: boolean }> {
     const filtered = suggestionWhere(query, filters, this.getSettings());
     const joins = "FROM suggestions s LEFT JOIN library_items i ON i.id = s.item_id LEFT JOIN instances n ON n.id = i.instance_id LEFT JOIN inspections ins ON ins.item_id = i.id";
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${joins} WHERE ${filtered.where}`).get(...filtered.params) as { n: number }).n);
+    const order = sort === "savings"
+      ? `CASE WHEN json_extract(s.payload, '$.estimatedSavingsBytes') IS NULL
+              OR json_extract(s.payload, '$.estimatedSavingsBytes') <= 0 THEN 1 ELSE 0 END,
+         json_extract(s.payload, '$.estimatedSavingsBytes') DESC,
+         LOWER(COALESCE(i.show_title, i.title, s.item_id)), i.season, i.episode, s.id`
+      : "LOWER(COALESCE(i.show_title, i.title, s.item_id)), i.season, i.episode, s.id";
     const rows = this.db.prepare(
       `SELECT s.payload, i.type AS item_type, i.title AS item_title, i.show_title AS item_show_title,
               i.season AS item_season, i.episode AS item_episode, i.episode_title AS item_episode_title,
@@ -743,7 +782,7 @@ export class Store {
               n.name AS item_instance_name, ins.report AS inspection_report
        ${joins}
        WHERE ${filtered.where}
-       ORDER BY LOWER(COALESCE(i.show_title, i.title, s.item_id)), i.season, i.episode, s.id
+       ORDER BY ${order}
        LIMIT ? OFFSET ?`,
     ).all(...filtered.params, limit, offset) as Record<string, unknown>[];
     return page(rows.map((row) => {
@@ -1623,13 +1662,19 @@ function reviewStatus(value: unknown): ReviewStatus {
 }
 
 function activityOutcome(value: unknown): ActivityOutcome {
-  if (value === "kept" || value === "discarded" || value === "flagged" || value === "failed" || value === "cancelled" || value === "searched") return value;
+  if (value === "kept" || value === "discarded" || value === "flagged" || value === "failed" || value === "cancelled" || value === "searched" || value === "removed") return value;
   throw new Error(`The saved activity outcome ${String(value)} is invalid.`);
 }
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
+
+const NEEDS_WORK_SQL = `(
+  NOT EXISTS (SELECT 1 FROM inspections insw WHERE insw.item_id = i.id)
+  OR EXISTS (SELECT 1 FROM suggestions sw WHERE sw.item_id = i.id AND sw.dismissed = 0)
+  OR EXISTS (SELECT 1 FROM file_errors errw WHERE errw.path = i.path)
+)`;
 
 function page<T>(items: T[], total: number, offset: number, limit: number): Page<T> {
   const consumed = offset + items.length;

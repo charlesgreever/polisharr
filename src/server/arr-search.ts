@@ -62,6 +62,42 @@ export async function deleteArrFileAndSearch(
   }
 }
 
+export type ArrUntrack = {
+  kind: "radarr" | "sonarr";
+  url: string;
+  apiKey: string;
+  movieId?: number;
+  seriesId?: number;
+};
+
+export async function deleteArrTrackedTitle(
+  input: ArrUntrack,
+  httpFetch: typeof fetch,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const app = input.kind === "radarr" ? "Radarr" : "Sonarr";
+  const path = input.kind === "radarr"
+    ? `/api/v3/movie/${input.movieId}?deleteFiles=true&addImportExclusion=true`
+    : `/api/v3/series/${input.seriesId}?deleteFiles=true&addImportListExclusion=true`;
+  if (input.kind === "radarr" && (input.movieId == null || !Number.isSafeInteger(input.movieId) || input.movieId <= 0)) {
+    return { ok: false, error: `${app} has no movie to stop tracking.` };
+  }
+  if (input.kind === "sonarr" && (input.seriesId == null || !Number.isSafeInteger(input.seriesId) || input.seriesId <= 0)) {
+    return { ok: false, error: `${app} has no series to stop tracking.` };
+  }
+  try {
+    const deleted = await httpFetch(`${trimUrl(input.url)}${path}`, {
+      method: "DELETE",
+      headers: { "X-Api-Key": input.apiKey },
+    });
+    if (!deleted.ok) {
+      return { ok: false, error: `${app} could not remove this title. The library file is unchanged.` };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: `${app} could not be reached. The library file is unchanged.` };
+  }
+}
+
 async function radarrMovieFileId(input: PreferredLanguageSearch, httpFetch: typeof fetch): Promise<number | null> {
   const payload = await fetchJson({ url: input.url, apiKey: input.apiKey }, `/api/v3/movie/${input.arrId}`, httpFetch);
   const row = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};

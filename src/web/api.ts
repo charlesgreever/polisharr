@@ -29,11 +29,11 @@ export const api = {
   testInstance: (id: string) => req<{ ok: boolean; message?: string }>(`/api/integrations/${id}/test`, { method: "POST" }),
   deleteInstance: (id: string) => req(`/api/integrations/${id}`, { method: "DELETE" }),
   refresh: () => req<{ errors: string[] }>("/api/library/refresh", { method: "POST" }),
-  movies: (offset = 0, limit = 50, sort: "title" | "size" | "quality" = "title") =>
-    req<LibraryPage<LibraryRow>>(`/api/library/movies?offset=${offset}&limit=${limit}&sort=${sort}`),
+  movies: (offset = 0, limit = 50, sort: "title" | "size" | "quality" = "title", work = false) =>
+    req<LibraryPage<LibraryRow>>(`/api/library/movies?offset=${offset}&limit=${limit}&sort=${sort}${work ? "&work=1" : ""}`),
   series: (offset = 0, limit = 50) => req<LibraryPage<SeriesSummary>>(`/api/library/series?offset=${offset}&limit=${limit}`),
-  seriesEpisodes: (instanceId: string, seriesId: number, offset = 0, limit = 50) =>
-    req<LibraryPage<LibraryRow>>(`/api/library/series/${encodeURIComponent(instanceId)}/${seriesId}/episodes?offset=${offset}&limit=${limit}`),
+  seriesEpisodes: (instanceId: string, seriesId: number, offset = 0, limit = 50, work = false) =>
+    req<LibraryPage<LibraryRow>>(`/api/library/series/${encodeURIComponent(instanceId)}/${seriesId}/episodes?offset=${offset}&limit=${limit}${work ? "&work=1" : ""}`),
   title: (id: string) => req<{
     item: LibraryRow;
     hardware: Hardware;
@@ -54,6 +54,21 @@ export const api = {
     req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow, assignedNodeId }) }),
   searchPreferred: (id: string) =>
     req(`/api/library/items/${id}/search-preferred`, { method: "POST", body: JSON.stringify({ confirm: true }) }),
+  replaceSearch: (id: string) =>
+    req<{ ok: true; healthyCount?: number; suggestionCount?: number }>(`/api/library/items/${id}/replace-search`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }),
+  untrackItem: (id: string) =>
+    req<{ ok: true; healthyCount?: number; suggestionCount?: number }>(`/api/library/items/${id}/untrack`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }),
+  untrackSeries: (instanceId: string, seriesId: number) =>
+    req(`/api/library/series/${encodeURIComponent(instanceId)}/${seriesId}/untrack`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }),
   detectLanguage: (id: string, trackIndex: number, startSec?: number) =>
     req<{
       ok?: boolean;
@@ -89,8 +104,8 @@ export const api = {
   syncProfiles: () => req<{ results: Array<{ created: string[]; updated: string[]; failed: string[] }> }>("/api/settings/profiles/sync", { method: "POST" }),
   inspect: () => req<InspectState>("/api/inspect/status"),
   errors: (offset = 0, limit = 50) => req<LibraryPage<FileError>>(`/api/errors?offset=${offset}&limit=${limit}`),
-  suggestions: (q = "", filters: SuggestionFilters = {}, offset = 0, limit = 50) => {
-    const params = new URLSearchParams({ q, offset: String(offset), limit: String(limit) });
+  suggestions: (q = "", filters: SuggestionFilters = {}, offset = 0, limit = 50, sort: "title" | "savings" = "title") => {
+    const params = new URLSearchParams({ q, offset: String(offset), limit: String(limit), sort });
     for (const [key, value] of Object.entries(filters)) if (value !== undefined) params.set(key, String(value));
     return req<LibraryPage<SuggestionRow>>(`/api/suggestions?${params}`);
   },
@@ -162,6 +177,7 @@ export type LibraryPage<T> = {
   finishedCount?: number;
   healthyCount?: number;
   suggestionCount?: number;
+  libraryTotal?: number;
 };
 export type SeriesSummary = {
   id: string;

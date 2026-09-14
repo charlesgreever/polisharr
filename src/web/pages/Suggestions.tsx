@@ -15,18 +15,22 @@ export function SuggestionsPage() {
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState("");
   const [filters, setFilters] = useState<SuggestionFilters>({});
+  const [sort, setSort] = useState<"title" | "savings">(params.get("sort") === "savings" ? "savings" : "title");
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [defaultNodeId, setDefaultNodeId] = useState("");
   const [encodeNodeId, setEncodeNodeId] = useState("");
 
   useEffect(() => {
     const t = setTimeout(() => {
-      setParams(q ? { q } : {});
+      const next = new URLSearchParams();
+      if (q) next.set("q", q);
+      if (sort === "savings") next.set("sort", "savings");
+      setParams(next);
       setDebouncedQ(q);
       setSelected({});
     }, 280);
     return () => clearTimeout(t);
-  }, [q, setParams]);
+  }, [q, sort, setParams]);
   useEffect(() => {
     void api.nodes().then((payload) => {
       setNodes(payload.nodes);
@@ -35,8 +39,8 @@ export function SuggestionsPage() {
     }).catch(() => undefined);
   }, []);
   const list = usePagedList({
-    queryKey: JSON.stringify([debouncedQ, filters]),
-    loadPage: (offset, limit) => api.suggestions(debouncedQ, filters, offset, limit),
+    queryKey: JSON.stringify([debouncedQ, filters, sort]),
+    loadPage: (offset, limit) => api.suggestions(debouncedQ, filters, offset, limit, sort),
     keyOf: (row: SuggestionRow) => row.id,
   });
   const items = list.items;
@@ -45,7 +49,7 @@ export function SuggestionsPage() {
     <section>
       <PageHead title="Suggestions" />
       <Help>
-        Suggestions is the work list: only titles that still need something. Open a title for custom work. Tracks-only means keep the video and clean languages. After size stays blank when the video will not shrink.
+        Suggestions is the work list: only titles that still need something. Open a title for custom work. Tracks-only means keep the video and clean languages. After size stays blank when the video will not shrink. Largest savings puts the biggest estimated disk wins first.
       </Help>
       <div className="mt-5 space-y-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-theme-sm dark:border-gray-800 dark:bg-white/[0.03]">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -62,6 +66,10 @@ export function SuggestionsPage() {
             </select>
             <select value={filters.codec ?? ""} onChange={(event) => setFilter("codec", event.target.value)}>
               <option value="">Any codec</option><option value="h264">H.264</option><option value="hevc">HEVC</option><option value="av1">AV1</option>
+            </select>
+            <select value={sort} onChange={(event) => setSort(event.target.value === "savings" ? "savings" : "title")} aria-label="Sort suggestions">
+              <option value="title">Title</option>
+              <option value="savings">Largest savings</option>
             </select>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -116,7 +124,11 @@ export function SuggestionsPage() {
                 <th>Title</th>
                 <th>Why</th>
                 <th>Now</th>
-                <th>After</th>
+                <th>
+                  <button type="button" onClick={() => setSort((current) => current === "savings" ? "title" : "savings")}>
+                    After
+                  </button>
+                </th>
                 <th>Actions</th>
               </tr>
             </thead>

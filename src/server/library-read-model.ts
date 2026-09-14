@@ -10,14 +10,20 @@ export type Page<T> = {
   total: number;
   healthyCount?: number;
   suggestionCount?: number;
+  libraryTotal?: number;
 };
 
 export function createLibraryReadModel(store: Store) {
   return {
-    movies(offset: number, limit: number, sort: "title" | "size" | "quality" = "title") {
-      const page = store.libraryPage({ type: "movie", offset, limit, sort });
+    movies(offset: number, limit: number, sort: "title" | "size" | "quality" = "title", work = false) {
+      const page = store.libraryPage({ type: "movie", offset, limit, sort, work });
       const health = store.movieHealth();
-      return { ...presentPage(store, page, offset, limit), healthyCount: health.healthyCount, suggestionCount: health.suggestionCount };
+      return {
+        ...presentPage(store, page, offset, limit),
+        healthyCount: health.healthyCount,
+        suggestionCount: health.suggestionCount,
+        libraryTotal: health.total,
+      };
     },
     series(offset: number, limit: number) {
       const page = store.seriesPage(offset, limit);
@@ -49,8 +55,8 @@ export function createLibraryReadModel(store: Store) {
         total: page.total,
       };
     },
-    episodes(instanceId: string, arrSeriesId: number, offset: number, limit: number) {
-      const page = store.libraryPage({ type: "episode", instanceId, arrSeriesId, offset, limit });
+    episodes(instanceId: string, arrSeriesId: number, offset: number, limit: number, work = false) {
+      const page = store.libraryPage({ type: "episode", instanceId, arrSeriesId, offset, limit, work });
       return presentPage(store, page, offset, limit);
     },
     item(id: string, detail = false) {

@@ -21,11 +21,11 @@ import {
   trimUrl,
 } from "./arr.ts";
 import { buildSuggestion } from "./suggest.ts";
-import { deleteArrFileAndSearch, soleNonPreferredAudio } from "./arr-search.ts";
+import { deleteArrFileAndSearch, deleteArrTrackedTitle } from "./arr-search.ts";
 import { displayTitle, matchesTitleSearch } from "./titles.ts";
 import { JobService } from "./jobs.ts";
 import { ffmpegOptimizer, isoRemuxInputs, toolLocaleEnv, type Optimizer } from "./optimize.ts";
-import { isDolbyVisionProfile5, isIsoPath } from "./inspect.ts";
+import { isIsoPath } from "./inspect.ts";
 import {
   applyLanguageToReport,
   detectLanguageClip,
@@ -685,7 +685,7 @@ export function createApp(opts: AppOptions) {
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
     const requestedSort = c.req.query("sort");
     const sort = requestedSort === "size" || requestedSort === "quality" ? requestedSort : "title";
-    return c.json(library.movies(offset, limit, sort));
+    return c.json(library.movies(offset, limit, sort, c.req.query("work") === "1"));
   });
   app.get("/api/library/series", (c) => {
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
@@ -697,7 +697,7 @@ export function createApp(opts: AppOptions) {
       return c.json({ error: "That series id is invalid." }, 400);
     }
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
-    return c.json(library.episodes(c.req.param("instanceId"), seriesId, offset, limit));
+    return c.json(library.episodes(c.req.param("instanceId"), seriesId, offset, limit, c.req.query("work") === "1"));
   });
   app.get("/api/inspect/status", (c) => {
     if (inspections.leftoverCount() > 0) void inspections.inspectPending();
@@ -888,41 +888,99 @@ export function createApp(opts: AppOptions) {
     return c.json({ ok: true, id: queued.id, plan: result.plan });
   });
 
-  app.post("/api/library/items/:id/search-preferred", async (c) => {
+  const confirmBody = async (c: Context): Promise<boolean> => {
+    const body = await c.req.json<{ confirm?: boolean }>().catch(() => ({} as { confirm?: boolean }));
+    return body.confirm === true;
+  };
+
+  const arrConnection = (item: { instanceId: string }) => {
+    const inst = store.getInstance(item.instanceId);
+    if (!inst || (inst.kind !== "radarr" && inst.kind !== "sonarr") || !inst.secret) return null;
+    return { kind: inst.kind, url: inst.url, apiKey: decryptSecret(secret, inst.secret) };
+  };
+
+  const replaceAndSearch = async (c: Context) => {
     const blocked = gateOptimize();
     if (blocked) return c.json({ error: blocked }, 403);
-    const body = await c.req.json<{ confirm?: boolean }>().catch(() => ({} as { confirm?: boolean }));
-    if (body.confirm !== true) {
+    if (!await confirmBody(c)) {
       return c.json({ error: "Confirm that Radarr or Sonarr should remove this file and search again." }, 400);
     }
-    const item = store.getItem(c.req.param("id"));
+    const item = store.getItem(c.req.param("id") ?? "");
     if (!item) return c.json({ error: "That title is not in the library." }, 404);
-    if (store.activeJobForItem(item.id) || store.pendingReviewForItem(item.id)) {
+    if (store.activeJobForPath(item.path, item.instanceId) || store.pendingReviewForPath(item.path, item.instanceId)) {
       return c.json({ error: "Finish or cancel the current work on this title first." }, 409);
     }
-    const report = store.getInspection(item.id);
-    if (!report) return c.json({ error: "This file has not been inspected yet, or the path is unreadable." }, 400);
-    const languageSearch = soleNonPreferredAudio(report.audio, store.getSettings().preferredLanguage);
-    const doviP5Search = isDolbyVisionProfile5(report);
-    if (!languageSearch && !doviP5Search) {
-      return c.json({ error: "This title does not need a Radarr or Sonarr search." }, 400);
-    }
-    const inst = store.getInstance(item.instanceId);
-    if (!inst || (inst.kind !== "radarr" && inst.kind !== "sonarr") || !inst.secret) {
-      return c.json({ error: "This title has no Radarr or Sonarr connection to search with." }, 400);
-    }
+    const inst = arrConnection(item);
+    if (!inst) return c.json({ error: "This title has no Radarr or Sonarr connection to search with." }, 400);
     const result = await deleteArrFileAndSearch({
       kind: inst.kind,
       url: inst.url,
-      apiKey: decryptSecret(secret, inst.secret),
+      apiKey: inst.apiKey,
       arrId: item.arrId,
       episodeFileId: item.arrEpisodeFileId,
     }, httpFetch);
     if (!result.ok) return c.json({ error: result.error }, 502);
-    store.addHistory(item.id, "searched", 0);
-    store.saveSuggestion(item.id, null);
+    const siblings = store.itemsForPath(item.path, item.instanceId);
+    for (const row of siblings) store.addHistory(row.id, "searched", 0);
+    store.deleteItemsForPath(item.path, item.instanceId);
+    return c.json({ ok: true, ...store.movieHealth(), ...item.type === "episode" && item.arrSeriesId != null
+      ? store.seriesHealth(item.instanceId, item.arrSeriesId)
+      : {} });
+  };
+
+  app.post("/api/library/items/:id/search-preferred", replaceAndSearch);
+  app.post("/api/library/items/:id/replace-search", replaceAndSearch);
+
+  const untrackTitle = async (c: Context, itemId: string) => {
+    const blocked = gateOptimize();
+    if (blocked) return c.json({ error: blocked }, 403);
+    if (!await confirmBody(c)) {
+      return c.json({ error: "Confirm that Radarr or Sonarr should delete this title and stop tracking it." }, 400);
+    }
+    const item = store.getItem(itemId);
+    if (!item) return c.json({ error: "That title is not in the library." }, 404);
+    const inst = arrConnection(item);
+    if (!inst) return c.json({ error: "This title has no Radarr or Sonarr connection to stop tracking with." }, 400);
+    if (item.type === "episode") {
+      if (item.arrSeriesId == null) return c.json({ error: "This episode has no series in Sonarr." }, 400);
+      if (store.seriesHasOpenWork(item.instanceId, item.arrSeriesId)) {
+        return c.json({ error: "Finish or cancel the current work on this series first." }, 409);
+      }
+      const result = await deleteArrTrackedTitle({
+        kind: "sonarr",
+        url: inst.url,
+        apiKey: inst.apiKey,
+        seriesId: item.arrSeriesId,
+      }, httpFetch);
+      if (!result.ok) return c.json({ error: result.error }, 502);
+      const episodes = store.listSeriesEpisodes(item.instanceId, item.arrSeriesId);
+      for (const row of episodes) store.addHistory(row.id, "removed", 0);
+      store.deleteSeries(item.instanceId, item.arrSeriesId);
+      return c.json({ ok: true, episodeCount: 0, healthyCount: 0, suggestionCount: 0 });
+    }
+    if (store.activeJobForItem(item.id) || store.pendingReviewForItem(item.id)) {
+      return c.json({ error: "Finish or cancel the current work on this title first." }, 409);
+    }
+    const result = await deleteArrTrackedTitle({
+      kind: "radarr",
+      url: inst.url,
+      apiKey: inst.apiKey,
+      movieId: item.arrId,
+    }, httpFetch);
+    if (!result.ok) return c.json({ error: result.error }, 502);
+    store.addHistory(item.id, "removed", 0);
     store.deleteLibraryItem(item.id);
-    return c.json({ ok: true });
+    return c.json({ ok: true, ...store.movieHealth() });
+  };
+
+  app.post("/api/library/items/:id/untrack", (c) => untrackTitle(c, c.req.param("id") ?? ""));
+
+  app.post("/api/library/series/:instanceId/:seriesId/untrack", async (c) => {
+    const seriesId = Number(c.req.param("seriesId"));
+    if (!Number.isSafeInteger(seriesId) || seriesId < 0) return c.json({ error: "That series id is invalid." }, 400);
+    const episodes = store.listSeriesEpisodes(c.req.param("instanceId"), seriesId);
+    if (episodes.length === 0) return c.json({ error: "That series is not in the library." }, 404);
+    return untrackTitle(c, episodes[0]!.id);
   });
 
   const extractLanguageClip = opts.extractLanguageClip ?? (async (args: string[]) => {
@@ -1105,7 +1163,8 @@ export function createApp(opts: AppOptions) {
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
     const parsed = suggestionFiltersFromQuery((name) => c.req.query(name));
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-    return c.json(store.suggestionPage(offset, limit, c.req.query("q") ?? "", parsed.filters));
+    const sort = c.req.query("sort") === "savings" ? "savings" : "title";
+    return c.json(store.suggestionPage(offset, limit, c.req.query("q") ?? "", parsed.filters, sort));
   });
 
   app.post("/api/suggestions/queue-filtered", async (c) => {

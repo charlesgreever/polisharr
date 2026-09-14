@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, formatSize, type ClusterNode, type ExecutablePlan, type InspectionReport, type LibraryRow } from "../api";
 import { Help, PageHead } from "../components/Shell";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
@@ -21,11 +21,13 @@ import {
   titleOptimizeLocked,
 } from "../title-plan";
 import { channelLabel, fileNameFromPath, usefulTrackTitle } from "../title-display";
+import { arrAppName, replaceSearchConfirm, untrackConfirm } from "../library-replace";
 
 type AudioAction = "keep" | "remove" | "replace_aac" | "replace_downmix" | "add_downmix";
 
 export function TitlePage() {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const [item, setItem] = useState<LibraryRow | null>(null);
   const [av1, setAv1] = useState(false);
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
@@ -252,11 +254,7 @@ export function TitlePage() {
         <Link className="btn-secondary" to={item.type === "movie" ? "/movies" : "/series"}>Back</Link>
       </PageHead>
       <Help>
-        Custom work is optional. Bulk suggestions still exist. Queue stays off until the plan differs from the source.
-        A sidecar is the new file waiting in Review until you Keep it. Direct write replaces the library file after an integrity check.
-        Codec replace turns one soundtrack into AAC at the same layout. Downmix makes a smaller layout such as stereo.
-        Size mode aims at a file size you type. Quality mode aims at an encoder quality number (lower is larger).
-        Identify language listens to a 45-second audio clip, or reads a few minutes of a text subtitle track. Untagged PGS can be identified from a short OCR sample when that helper is installed. Saving a language does not rewrite the library file. Queue this plan can remux a copy that writes the tag; Keep then replaces the library file.
+        {`Custom work is optional. Bulk suggestions still exist. Queue stays off until the plan differs from the source. A sidecar is the new file waiting in Review until you Keep it. Direct write replaces the library file after an integrity check. Codec replace turns one soundtrack into AAC at the same layout. Downmix makes a smaller layout such as stereo. Size mode aims at a file size you type. Quality mode aims at an encoder quality number (lower is larger). Identify language listens to a 45-second audio clip, or reads a few minutes of a text subtitle track. Untagged PGS can be identified from a short OCR sample when that helper is installed. Saving a language does not rewrite the library file. Queue this plan can remux a copy that writes the tag; Keep then replaces the library file. Ask ${arrName} to search again deletes this file and grabs a replacement using that app's quality profile. Stop tracking deletes the files and removes the movie or series from ${arrName}.`}
       </Help>
       {(locked || item.error) && (
         <p className="help">{item.error || "This title is still uninspected or unreadable. Optimize stays off until inspect finishes."}</p>
@@ -607,6 +605,32 @@ export function TitlePage() {
             {`Ask ${arrName} to search for a different release`}
           </button>
         )}
+        <button
+          className="btn-secondary"
+          type="button"
+          onClick={() => {
+            if (!window.confirm(replaceSearchConfirm(arrName, item.sharedFileLabel))) return;
+            void api.replaceSearch(id)
+              .then(() => navigate(item.type === "movie" ? "/movies" : "/series"))
+              .catch((e: Error) => setMsg(e.message));
+          }}
+        >
+          {`Ask ${arrName} to remove this file and search again`}
+        </button>
+        <button
+          className="btn-secondary danger"
+          type="button"
+          onClick={() => {
+            const kind = item.type === "episode" ? "series" : "movie";
+            const title = item.type === "episode" ? (item.showTitle || item.displayTitle) : item.displayTitle;
+            if (!window.confirm(untrackConfirm(arrName, title, kind))) return;
+            void api.untrackItem(id)
+              .then(() => navigate(item.type === "movie" ? "/movies" : "/series"))
+              .catch((e: Error) => setMsg(e.message));
+          }}
+        >
+          {`Stop tracking in ${arrName}`}
+        </button>
       </Section>
       {msg && <p className="ok text-sm">{msg}</p>}
     </section>

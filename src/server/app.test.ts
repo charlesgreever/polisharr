@@ -339,6 +339,163 @@ describe("public HTTP behavior", () => {
     const orphan = errors.items.find((row) => row.path === "/orphan.mkv");
     expect(orphan).toMatchObject({ itemId: null });
     expect(orphan).not.toHaveProperty("href");
+
+    const workEpisodes = (await (
+      await ctx.app.app.request("/api/library/series/sonarr-a/101/episodes?work=1", { headers })
+    ).json()) as { items: Array<{ id: string }>; total: number };
+    expect(workEpisodes).toMatchObject({ total: 1, items: [{ id: "episode-101-1" }] });
+    const allEpisodes = (await (
+      await ctx.app.app.request("/api/library/series/sonarr-a/101/episodes", { headers })
+    ).json()) as { items: Array<{ id: string }>; total: number };
+    expect(allEpisodes.total).toBe(2);
+  });
+
+  it("filters movies that need work and keeps overall health counts", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    ctx.app.jobs.stop();
+    const setupRes = await ctx.app.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const headers = { cookie: cookie(setupRes) };
+    ctx.store.upsertInstance({ id: "radarr-a", kind: "radarr", name: "Radarr A", url: "http://radarr", enabled: true });
+    const inspection = {
+      sourceSig: "p|1",
+      sourceMethod: "ffprobe" as const,
+      listingState: "complete" as const,
+      durationSec: 3600,
+      sizeBytes: 1,
+      sizePerHourGb: 1,
+      videoCodec: "hevc",
+      width: 1920,
+      height: 1080,
+      bitDepth: 8,
+      hdr: "none" as const,
+      audio: [] as [],
+      subtitles: [] as [],
+      hasChapters: false,
+      hasAttachments: false,
+    };
+    const movie = (id: string, arrId: number, path: string, sizeBytes: number) => {
+      ctx.store.upsertItem({
+        id,
+        instanceId: "radarr-a",
+        arrId,
+        arrSeriesId: null,
+        arrEpisodeFileId: null,
+        type: "movie",
+        title: id,
+        showTitle: null,
+        season: null,
+        episode: null,
+        episodeTitle: null,
+        path,
+        sizeBytes,
+        quality: "Bluray-1080p",
+        resolution: "1080",
+        profile: "HD",
+        tags: [],
+        posterRemoteUrl: null,
+        sizeExempt: false,
+      });
+    };
+    movie("healthy", 1, "/movies/healthy.mkv", 100);
+    movie("suggested", 2, "/movies/suggested.mkv", 400);
+    movie("unread", 3, "/movies/unread.mkv", 200);
+    movie("unreadable", 4, "/movies/unreadable.mkv", 300);
+    ctx.store.saveInspection("healthy", { ...inspection, sourceSig: "/movies/healthy.mkv|1" });
+    ctx.store.saveInspection("suggested", { ...inspection, sourceSig: "/movies/suggested.mkv|1" });
+    ctx.store.saveInspection("unreadable", { ...inspection, sourceSig: "/movies/unreadable.mkv|1" });
+    ctx.store.saveSuggestion("suggested", {
+      id: "sug-1",
+      itemId: "suggested",
+      actions: ["transcode"],
+      reasons: ["Over the size cap."],
+      warning: null,
+      category: "movie1080p",
+      estimatedSavingsBytes: 1,
+      now: { codec: "h264", quality: "HD", sizeBytes: 1, sizePerHourGb: 1 },
+      after: { codec: "hevc", quality: "HD", sizeBytes: 1, sizePerHourGb: 1 },
+      dismissed: false,
+      keepAudio: [],
+      stripAudio: [],
+      keepSubs: [],
+      stripSubs: [],
+    });
+    ctx.store.setFileError("/movies/unreadable.mkv", "unreadable", "Path is unreadable.");
+    const work = (await (
+      await ctx.app.app.request("/api/library/movies?work=1&sort=size", { headers })
+    ).json()) as { items: Array<{ id: string }>; total: number; libraryTotal: number; healthyCount: number; suggestionCount: number };
+    expect(work.libraryTotal).toBe(4);
+    expect(work.healthyCount).toBe(1);
+    expect(work.suggestionCount).toBe(1);
+    expect(work.total).toBe(3);
+    expect(work.items.map((item) => item.id)).toEqual(["suggested", "unreadable", "unread"]);
+  });
+
+  it("sorts suggestions by estimated savings", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    ctx.app.jobs.stop();
+    const setupRes = await ctx.app.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const headers = { cookie: cookie(setupRes) };
+    ctx.store.upsertInstance({ id: "radarr-a", kind: "radarr", name: "Radarr A", url: "http://radarr", enabled: true });
+    const suggestion = (id: string, title: string, savings: number | null, arrId: number) => {
+      ctx.store.upsertItem({
+        id,
+        instanceId: "radarr-a",
+        arrId,
+        arrSeriesId: null,
+        arrEpisodeFileId: null,
+        type: "movie",
+        title,
+        showTitle: null,
+        season: null,
+        episode: null,
+        episodeTitle: null,
+        path: `/movies/${id}.mkv`,
+        sizeBytes: 1,
+        quality: "HD",
+        resolution: "1080",
+        profile: "HD",
+        tags: [],
+        posterRemoteUrl: null,
+        sizeExempt: false,
+      });
+      ctx.store.saveSuggestion(id, {
+        id: `sug-${id}`,
+        itemId: id,
+        actions: ["transcode"],
+        reasons: ["Over the size cap."],
+        warning: null,
+        category: "movie1080p",
+        estimatedSavingsBytes: savings,
+        now: { codec: "h264", quality: "HD", sizeBytes: 1, sizePerHourGb: 1 },
+        after: { codec: "hevc", quality: "HD", sizeBytes: 1, sizePerHourGb: 1 },
+        dismissed: false,
+        keepAudio: [],
+        stripAudio: [],
+        keepSubs: [],
+        stripSubs: [],
+      });
+    };
+    suggestion("movie-a", "Alpha", 2_000_000_000, 1);
+    suggestion("movie-b", "Bravo", 12_000_000_000, 2);
+    suggestion("movie-c", "Charlie", null, 3);
+    const byTitle = (await (await ctx.app.app.request("/api/suggestions", { headers })).json()) as { items: Array<{ itemId: string }> };
+    expect(byTitle.items.map((item) => item.itemId)).toEqual(["movie-a", "movie-b", "movie-c"]);
+    const bySavings = (await (
+      await ctx.app.app.request("/api/suggestions?sort=savings", { headers })
+    ).json()) as { items: Array<{ itemId: string }> };
+    expect(bySavings.items.map((item) => item.itemId)).toEqual(["movie-b", "movie-a", "movie-c"]);
+    const moviesOnly = (await (
+      await ctx.app.app.request("/api/suggestions?type=movie&sort=savings", { headers })
+    ).json()) as { items: Array<{ itemId: string }> };
+    expect(moviesOnly.items.map((item) => item.itemId)).toEqual(["movie-b", "movie-a", "movie-c"]);
   });
 
   it("bounds every work-list response and exposes continuation metadata", async () => {
@@ -2820,6 +2977,316 @@ describe("public HTTP behavior", () => {
     expect(created.store.getItem(itemId)).toBeUndefined();
     expect(calls.some((call) => call.startsWith("DELETE ") && call.includes("/moviefile/77"))).toBe(true);
     expect(calls.some((call) => call.startsWith("POST ") && call.includes("/command"))).toBe(true);
+  });
+
+  it("replaces any title through Radarr or Sonarr after confirm and drops shared-file siblings", async () => {
+    const calls: string[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "opt-replace-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
+    const created = createApp({
+      env,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
+      readable: async () => true,
+      fetch: (async (url, init) => {
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        if (String(url).includes("/system/status")) return new Response(JSON.stringify({ appName: "Sonarr", version: "4" }));
+        return new Response("{}", { status: 201 });
+      }) as typeof fetch,
+    });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "sonarr", name: "Sonarr", url: "http://sonarr:8989", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ languageConfirmed: true, preferredLanguage: "eng", reviewPath: join(dir, "review") }),
+    });
+    const instanceId = created.store.listInstances()[0]?.id ?? "";
+    const episode = (id: string, arrId: number, episodeNo: number) => {
+      created.store.upsertItem({
+        id,
+        instanceId,
+        arrId,
+        arrSeriesId: 9,
+        arrEpisodeFileId: 77,
+        type: "episode",
+        title: "Paw Patrol",
+        showTitle: "Paw Patrol",
+        season: 8,
+        episode: episodeNo,
+        episodeTitle: `Episode ${episodeNo}`,
+        path: "/shows/paw.mkv",
+        sizeBytes: 1,
+        quality: "HD",
+        resolution: "1080",
+        profile: "TV",
+        tags: [],
+        posterRemoteUrl: null,
+        sizeExempt: false,
+      });
+    };
+    episode("ep-35", 35, 35);
+    episode("ep-36", 36, 36);
+    const denied = await created.app.request("/api/library/items/ep-35/replace-search", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    });
+    expect(denied.status).toBe(400);
+    const ok = await created.app.request("/api/library/items/ep-35/replace-search", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(ok.status).toBe(200);
+    expect(created.store.getItem("ep-35")).toBeUndefined();
+    expect(created.store.getItem("ep-36")).toBeUndefined();
+    expect(calls.some((call) => call.startsWith("DELETE ") && call.includes("/episodefile/77"))).toBe(true);
+    expect(calls.some((call) => call.startsWith("POST ") && call.includes("/command"))).toBe(true);
+  });
+
+  it("refuses replace-search when a sibling is in Review", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-replace-lock-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
+    const created = createApp({
+      env,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
+      readable: async () => true,
+      fetch: (async () => new Response("{}", { status: 201 })) as typeof fetch,
+    });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "sonarr", name: "Sonarr", url: "http://sonarr:8989", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ languageConfirmed: true, reviewPath: join(dir, "review") }),
+    });
+    const instanceId = created.store.listInstances()[0]?.id ?? "";
+    created.store.upsertItem({
+      id: "ep-35",
+      instanceId,
+      arrId: 35,
+      arrSeriesId: 9,
+      arrEpisodeFileId: 77,
+      type: "episode",
+      title: "Paw Patrol",
+      showTitle: "Paw Patrol",
+      season: 8,
+      episode: 35,
+      episodeTitle: "E35",
+      path: "/shows/paw.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "TV",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    created.store.upsertItem({
+      id: "ep-36",
+      instanceId,
+      arrId: 36,
+      arrSeriesId: 9,
+      arrEpisodeFileId: 77,
+      type: "episode",
+      title: "Paw Patrol",
+      showTitle: "Paw Patrol",
+      season: 8,
+      episode: 36,
+      episodeTitle: "E36",
+      path: "/shows/paw.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "TV",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    created.store.insertReview({
+      id: "rev-36",
+      jobId: "job-36",
+      itemId: "ep-36",
+      displayTitle: "Paw Patrol",
+      status: "pending",
+      flagged: false,
+      flagReason: null,
+      sourcePath: "/shows/paw.mkv",
+      sidecarPath: join(dir, "sidecar.mkv"),
+      source: { codec: "h264", quality: "HD", sizeBytes: 1, sizePerHourGb: 1, durationSec: 1, tracks: "" },
+      sidecar: { codec: "hevc", quality: "HD", sizeBytes: 1, sizePerHourGb: 1, durationSec: 1, tracks: "" },
+      error: null,
+    });
+    const locked = await created.app.request("/api/library/items/ep-35/replace-search", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(locked.status).toBe(409);
+    expect(created.store.getItem("ep-35")).toBeDefined();
+  });
+
+  it("stops tracking a movie in Radarr and a series in Sonarr", async () => {
+    const calls: string[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "opt-untrack-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
+    const created = createApp({
+      env,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
+      readable: async () => true,
+      fetch: (async (url, init) => {
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        if (String(url).includes("/system/status")) return new Response(JSON.stringify({ appName: "Radarr", version: "5" }));
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+    });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "sonarr", name: "Sonarr", url: "http://sonarr:8989", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ languageConfirmed: true, reviewPath: join(dir, "review") }),
+    });
+    const radarrId = created.store.listInstances().find((row) => row.kind === "radarr")?.id ?? "";
+    const sonarrId = created.store.listInstances().find((row) => row.kind === "sonarr")?.id ?? "";
+    const otherSonarr = created.store.upsertInstance({
+      id: "sonarr-b",
+      kind: "sonarr",
+      name: "Sonarr B",
+      url: "http://sonarr-b",
+      enabled: true,
+    });
+    created.store.upsertItem({
+      id: "movie-1",
+      instanceId: radarrId,
+      arrId: 10,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Dune",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: "/movies/dune.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    created.store.upsertItem({
+      id: "ep-1",
+      instanceId: sonarrId,
+      arrId: 1,
+      arrSeriesId: 42,
+      arrEpisodeFileId: 7,
+      type: "episode",
+      title: "SpongeBob SquarePants",
+      showTitle: "SpongeBob SquarePants",
+      season: 1,
+      episode: 1,
+      episodeTitle: "Help Wanted",
+      path: "/shows/s1e1.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "TV",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    created.store.upsertItem({
+      id: "ep-2",
+      instanceId: sonarrId,
+      arrId: 2,
+      arrSeriesId: 42,
+      arrEpisodeFileId: 8,
+      type: "episode",
+      title: "SpongeBob SquarePants",
+      showTitle: "SpongeBob SquarePants",
+      season: 1,
+      episode: 2,
+      episodeTitle: "Bubblestand",
+      path: "/shows/s1e2.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "TV",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    created.store.upsertItem({
+      id: "ep-other",
+      instanceId: otherSonarr,
+      arrId: 9,
+      arrSeriesId: 42,
+      arrEpisodeFileId: 9,
+      type: "episode",
+      title: "SpongeBob SquarePants",
+      showTitle: "SpongeBob SquarePants",
+      season: 1,
+      episode: 1,
+      episodeTitle: "Help Wanted",
+      path: "/shows-b/s1e1.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "TV",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    const noConfirm = await created.app.request("/api/library/items/movie-1/untrack", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    });
+    expect(noConfirm.status).toBe(400);
+    const movieOk = await created.app.request("/api/library/items/movie-1/untrack", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(movieOk.status).toBe(200);
+    expect(created.store.getItem("movie-1")).toBeUndefined();
+    expect(calls.some((call) => call.includes("DELETE ") && call.includes("/movie/10?") && call.includes("deleteFiles=true") && call.includes("addImportExclusion=true"))).toBe(true);
+    const seriesOk = await created.app.request(`/api/library/series/${sonarrId}/42/untrack`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(seriesOk.status).toBe(200);
+    expect(created.store.getItem("ep-1")).toBeUndefined();
+    expect(created.store.getItem("ep-2")).toBeUndefined();
+    expect(created.store.getItem("ep-other")).toBeDefined();
+    expect(calls.some((call) => call.includes("DELETE ") && call.includes("/series/42?") && call.includes("deleteFiles=true") && call.includes("addImportListExclusion=true"))).toBe(true);
   });
 
   it("identifies an untagged soundtrack and saves the language without rewriting the file", async () => {

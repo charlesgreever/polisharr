@@ -27,7 +27,7 @@ export function parseAudioMix(value: unknown): AudioMix | null {
   return value === "stereo" || value === "surround" ? value : null;
 }
 export type HardwareBackend = "cuda" | "vaapi" | "videotoolbox" | "none";
-export type ActivityOutcome = "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched";
+export type ActivityOutcome = "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched" | "removed";
 export type ExclusionKind = "path" | "profile" | "tag" | "title";
 
 export type SizeCaps = {

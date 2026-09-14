@@ -6,9 +6,11 @@ import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { AudioMixSelect } from "../components/AudioMixSelect";
 import { EncodeTargetSelect } from "../components/EncodeTargetSelect";
+import { LibraryHealthPills } from "../components/LibraryHealthPills";
 import { LibraryMediaCells, LibraryMediaHeaders } from "../components/LibraryMediaCells";
 import { Pill } from "../components/ui";
 import { loadRetainedPages, mergePage, needsFocusedPage } from "../library-pages";
+import { untrackConfirm } from "../library-replace";
 
 export function SeriesPage() {
   const [summaries, setSummaries] = useState<SeriesSummary[]>([]);
@@ -91,7 +93,7 @@ export function SeriesPage() {
       <PageHead title="Series">
         <RefreshLibrary onDone={refreshed} />
       </PageHead>
-      <Help>Series loads show headers first. Expand one show to load its episodes. Encode target on a show chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. Prefer stereo replaces surround with AAC stereo and drops the original mix, which is useful for kids TVs. Keep surround turns that off. House default follows Settings, which adds stereo for Atmos and keeps the original mix. Each header shows how many episodes are healthy and how many still have suggestions. Exempt on an episode keeps that file off the size cap so Polisharr only offers language cleanup and stereo. Optimize all episodes queues that show without expanding it.</Help>
+      <Help>Series loads show headers first. Expand one show to load its episodes. Encode target on a show chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. Prefer stereo replaces surround with AAC stereo and drops the original mix, which is useful for kids TVs. Keep surround turns that off. House default follows Settings, which adds stereo for Atmos and keeps the original mix. Each header shows how many episodes are healthy and how many still have suggestions. Click suggestions to list only episodes that still need work. Exempt on an episode keeps that file off the size cap so Polisharr only offers language cleanup and stereo. Optimize all episodes queues that show without expanding it. Stop tracking removes the show from Sonarr and deletes its files.</Help>
       {summaries.length === 0 ? (
         <div className="empty">
           <div className="space-y-3">
@@ -159,6 +161,7 @@ function SeriesGroup({
   onPatch: (patch: Partial<SeriesSummary>) => void;
 }) {
   const [open, setOpen] = useState(Boolean(focusId));
+  const [work, setWork] = useState(false);
   const [episodes, setEpisodes] = useState<LibraryRow[]>([]);
   const [nextOffset, setNextOffset] = useState<number | null>(0);
   const [error, setError] = useState("");
@@ -167,7 +170,9 @@ function SeriesGroup({
   const pendingRefreshResetRef = useRef(false);
   const pendingRetainRef = useRef(false);
   const episodesRef = useRef<LibraryRow[]>([]);
+  const workRef = useRef(work);
   episodesRef.current = episodes;
+  workRef.current = work;
 
   async function loadEpisodes(reset = false) {
     if (loadingRef.current) {
@@ -180,7 +185,7 @@ function SeriesGroup({
     const requestedRefresh = loadedRefreshRef.current;
     setError("");
     try {
-      const page = await api.seriesEpisodes(summary.instanceId, summary.arrSeriesId, offset);
+      const page = await api.seriesEpisodes(summary.instanceId, summary.arrSeriesId, offset, 50, workRef.current);
       if (requestedRefresh === loadedRefreshRef.current) {
         setEpisodes((current) => {
           const next = reset ? page.items : mergePage(current, page.items);
@@ -217,7 +222,7 @@ function SeriesGroup({
     setError("");
     try {
       const page = await loadRetainedPages(
-        (offset) => api.seriesEpisodes(summary.instanceId, summary.arrSeriesId, offset),
+        (offset) => api.seriesEpisodes(summary.instanceId, summary.arrSeriesId, offset, 50, workRef.current),
         loadedCount,
       );
       if (requestedRefresh === loadedRefreshRef.current) {
@@ -278,10 +283,20 @@ function SeriesGroup({
             <span className="series-title">{summary.showTitle}</span>
             <span className="series-meta">
               <span>{summary.instanceName} · {summary.episodeCount} episodes</span>
-              <span className="mt-1 flex flex-wrap gap-1">
-                <Pill tone="good">{summary.healthyCount} healthy</Pill>
-                <Pill tone={summary.suggestionCount > 0 ? "accent" : "neutral"}>{summary.suggestionCount} suggestions</Pill>
-              </span>
+              <LibraryHealthPills
+                healthyCount={summary.healthyCount}
+                suggestionCount={summary.suggestionCount}
+                work={work}
+                onWorkChange={(next) => {
+                  setWork(next);
+                  if (open) {
+                    setEpisodes([]);
+                    setNextOffset(0);
+                    workRef.current = next;
+                    void loadEpisodes(true);
+                  }
+                }}
+              />
             </span>
           </span>
         </button>
@@ -349,6 +364,21 @@ function SeriesGroup({
         >
           Optimize all episodes
         </button>
+        <button
+          className="btn-secondary danger whitespace-nowrap"
+          type="button"
+          onClick={() => {
+            if (!window.confirm(untrackConfirm("Sonarr", summary.showTitle, "series"))) return;
+            void api.untrackSeries(summary.instanceId, summary.arrSeriesId).then(() => {
+              onMsg("Sonarr stopped tracking this series.");
+              onPatch({ episodeCount: 0, healthyCount: 0, suggestionCount: 0 });
+              setEpisodes([]);
+              setNextOffset(null);
+            }).catch((cause: Error) => onMsg(cause.message));
+          }}
+        >
+          Stop tracking in Sonarr
+        </button>
       </div>
       {open && (
         <div className="series-table-wrap">
@@ -377,12 +407,23 @@ function SeriesGroup({
                       </div>
                     ) : null}
                   </td>
-                  <LibraryMediaCells item={item} onDone={() => void refreshLoaded()} />
+                  <LibraryMediaCells
+                    item={item}
+                    onDone={() => void refreshLoaded()}
+                    onHealth={(health) => onPatch({
+                      healthyCount: health.healthyCount,
+                      suggestionCount: health.suggestionCount,
+                    })}
+                  />
                 </tr>
               ))}
             </tbody>
           </table>
-          {episodes.length === 0 && !error && <div className="p-3 text-sm text-muted">Loading episodes…</div>}
+          {episodes.length === 0 && !error && (
+            <div className="p-3 text-sm text-muted">
+              {nextOffset === 0 ? "Loading episodes…" : work ? "Every episode is healthy." : "No episodes in this show."}
+            </div>
+          )}
           {nextOffset != null && episodes.length > 0 && (
             <div className="p-3 text-center">
               <button className="btn-secondary" type="button" onClick={() => void loadEpisodes()}>Load more episodes</button>

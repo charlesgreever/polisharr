@@ -9,7 +9,7 @@ export function HistoryPage() {
   return (
     <section>
       <PageHead title="History" />
-      <Help>History is the log of finished work: kept, discarded, flagged, failed, and cancelled.</Help>
+      <Help>History is the log of finished work: kept, discarded, flagged, failed, cancelled, searched, and removed.</Help>
       {items.length === 0 && list.loading && <div className="empty">Loading history…</div>}
       {items.length === 0 && !list.loading && !list.error && <div className="empty">No finished work yet.</div>}
       {items.length > 0 && (

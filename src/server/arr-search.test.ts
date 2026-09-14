@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deleteArrFileAndSearch, isArrSearchOnly, soleNonPreferredAudio } from "./arr-search.ts";
+import { deleteArrFileAndSearch, deleteArrTrackedTitle, isArrSearchOnly, soleNonPreferredAudio } from "./arr-search.ts";
 
 describe("preferred-language Arr search", () => {
   it("detects a single non-preferred soundtrack and ignores und and mixed files", () => {
@@ -61,5 +61,33 @@ describe("preferred-language Arr search", () => {
     if (result.ok) return;
     expect(result.error).toMatch(/unchanged/i);
     expect(calls.some((call) => call.includes("/command"))).toBe(false);
+  });
+
+  it("removes a Radarr movie and a Sonarr series with files and list exclusion", async () => {
+    const calls: string[] = [];
+    const movie = await deleteArrTrackedTitle({
+      kind: "radarr",
+      url: "http://radarr",
+      apiKey: "k",
+      movieId: 10,
+    }, (async (url, init) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    expect(movie).toEqual({ ok: true });
+    const series = await deleteArrTrackedTitle({
+      kind: "sonarr",
+      url: "http://sonarr",
+      apiKey: "k",
+      seriesId: 42,
+    }, (async (url, init) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    expect(series).toEqual({ ok: true });
+    expect(calls).toEqual([
+      "DELETE http://radarr/api/v3/movie/10?deleteFiles=true&addImportExclusion=true",
+      "DELETE http://sonarr/api/v3/series/42?deleteFiles=true&addImportListExclusion=true",
+    ]);
   });
 });

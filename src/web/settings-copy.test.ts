@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SIZE_CAP_GRID, hardwareBackendLabel, sizeCapLabel, transcodeBelowTargetLabel } from "./settings-copy";
+import { SIZE_CAP_GRID, hardwareBackendLabel, PLAYBACK_HISTORY_CLEARED, PLAYBACK_OBSERVE_HELP, sizeCapLabel, transcodeBelowTargetLabel } from "./settings-copy";
 
 describe("settings copy", () => {
   it("names size caps in everyday words", () => {
@@ -17,6 +17,12 @@ describe("settings copy", () => {
   it("names the below-target checkbox after the current Encode Target", () => {
     expect(transcodeBelowTargetLabel("hevc")).toBe("Transcode video below Target Encode (HEVC)");
     expect(transcodeBelowTargetLabel("av1")).toBe("Transcode video below Target Encode (AV1)");
+  });
+
+  it("discloses device names and that clearing history leaves live coverage", () => {
+    expect(PLAYBACK_OBSERVE_HELP).toContain("device name");
+    expect(PLAYBACK_OBSERVE_HELP).toContain("not usernames or IP addresses");
+    expect(PLAYBACK_HISTORY_CLEARED).toBe("Viewing history cleared. Live playback coverage is unchanged.");
   });
 
   it("names encode APIs the same way Review does", () => {

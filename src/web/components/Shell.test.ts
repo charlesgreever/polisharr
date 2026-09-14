@@ -34,5 +34,7 @@ describe("app shell", () => {
     expect(html).toContain("Polisharr");
     expect(html).toContain("0.2.1");
     expect(html).toContain("Switch to dark mode");
+    expect(html).toContain("Playback");
+    expect(html).toContain("href=\"/playback\"");
   });
 });

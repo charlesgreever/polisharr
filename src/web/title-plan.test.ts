@@ -4,11 +4,13 @@ import {
   audioChannelSelectClass,
   canIdentifyLanguage,
   canIdentifySubtitle,
+  applyPlaybackAudioDraft,
   canQueueCustomPlan,
   formatClipClock,
   isImageSubtitle,
   MISSING_WHISPER_LID,
   parseClipClock,
+  playbackVideoMode,
   titleOptimizeLocked,
   untaggedAudioNeedsLanguageIdHint,
 } from "./title-plan";
@@ -27,6 +29,14 @@ describe("title plan gating", () => {
     expect(canQueueCustomPlan(null, [], false)).toBe(false);
     expect(canQueueCustomPlan({ video: { kind: "size" } }, [], false)).toBe(true);
     expect(canQueueCustomPlan({ video: { kind: "copy" } }, ["Do nothing"], false)).toBe(false);
+  });
+
+  it("applies a playback add-stereo draft onto the custom editor", () => {
+    expect(playbackVideoMode({ video: { mode: "copy" } })).toBe("copy");
+    expect(applyPlaybackAudioDraft(
+      { 1: { action: "keep" } },
+      [{ index: 1, action: "add_downmix", channels: 2 }],
+    )).toEqual({ 1: { action: "add_downmix", channels: 2 } });
   });
 
   it("gives the audio action select a width that fits Replace with downmix", () => {

@@ -39,3 +39,9 @@ export function hardwareBackendLabel(backend: string): string {
 }
 
 export const FIELD_CONTROL = "h-10 w-full";
+
+export const PLAYBACK_OBSERVE_HELP =
+  "When this is on, Polisharr records which Jellyfin player converted a file and why. It stores the device name and viewing time, not usernames or IP addresses.";
+
+export const PLAYBACK_HISTORY_CLEARED =
+  "Viewing history cleared. Live playback coverage is unchanged.";

@@ -948,6 +948,21 @@ describe("store schema migration", () => {
     store.clearPlaybackHistory();
     expect(store.listPlaybackOccurrences().items).toEqual([]);
     expect(store.getPlaybackSettings()[0]?.observePlayback).toBe(true);
+    store.savePlaybackDismissal({
+      id: "diag-1",
+      connectionId: "jf",
+      deviceId: "tv",
+      reasonFamily: "audio",
+      revision: null,
+      match: "unmatched",
+      libraryItemIds: [],
+      path: null,
+      jellyfinItemId: "item",
+      dismissedAt: 1,
+    });
+    expect(store.listPlaybackDismissals()).toHaveLength(1);
+    store.clearPlaybackHistory();
+    expect(store.listPlaybackDismissals()).toEqual([]);
   });
 
   it("looks up a library path by exact match and by case-insensitive SQL", () => {

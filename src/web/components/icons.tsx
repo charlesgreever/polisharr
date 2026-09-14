@@ -23,6 +23,9 @@ export const Icons = {
   review: (p?: SVGProps<SVGSVGElement>) => (
     <Svg {...p}><path d="M5 12l4 4 10-10" /></Svg>
   ),
+  playback: (p?: SVGProps<SVGSVGElement>) => (
+    <Svg {...p}><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M10 9.5v5l4-2.5z" /></Svg>
+  ),
   errors: (p?: SVGProps<SVGSVGElement>) => (
     <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16h.01" /></Svg>
   ),

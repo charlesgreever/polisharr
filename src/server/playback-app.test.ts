@@ -292,6 +292,181 @@ describe("playback HTTP", () => {
     expect(observations.connections).toEqual([]);
   });
 
+  it("explains audio conversion, opens an add-stereo draft, and leaves the queue empty", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [playing()] }));
+    ctx.store.saveInspection("film-1080", surroundReport());
+    await ctx.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({ connections: [{ connectionId: ctx.jfId, observePlayback: true }] }),
+    });
+    const listed = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as {
+      items: Array<{ id: string; reasonFamily: string; recommendation: { kind: string; draft: unknown }; occurrenceCount: number }>;
+      windowDays: number;
+      total: number;
+    };
+    expect(listed.windowDays).toBe(7);
+    expect(listed.items).toHaveLength(1);
+    expect(listed.items[0]?.reasonFamily).toBe("audio");
+    expect(listed.items[0]?.recommendation.kind).toBe("add_stereo");
+    expect(listed.items[0]?.occurrenceCount).toBe(1);
+    const draft = await ctx.app.request(`/api/playback/diagnostics/${listed.items[0]!.id}/repair-draft`, {
+      method: "POST",
+      headers: ctx.headers,
+    });
+    expect(draft.status).toBe(200);
+    const body = await draft.json() as {
+      queued: boolean;
+      itemId: string;
+      kind: string;
+      draft: { audio?: Array<{ action: string; channels?: number }> };
+    };
+    expect(body.queued).toBe(false);
+    expect(body.itemId).toBe("film-1080");
+    expect(body.kind).toBe("add_stereo");
+    expect(body.draft.audio).toEqual([{ index: 1, action: "add_downmix", channels: 2 }]);
+    const jobs = await (await ctx.app.request("/api/jobs", { headers: ctx.headers })).json() as { items: unknown[] };
+    expect(jobs.items).toEqual([]);
+    await ctx.playbackMonitor.refresh();
+    const again = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as { items: Array<{ occurrenceCount: number }> };
+    expect(again.items[0]?.occurrenceCount).toBe(1);
+  });
+
+  it("filters diagnostics and observations together and caps pages at 100", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    const revision = { canonicalPath: "/mnt/nas/movies/film-1080.mkv", sizeBytes: 1, mtimeMs: 1, fileId: "1:1" };
+    for (let i = 0; i < 3; i += 1) {
+      ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+        id: `a-${i}`,
+        sessionId: `a-${i}`,
+        deviceId: "living-room",
+        deviceLabel: "Living Room TV",
+        lastSeenAt: Date.now(),
+        revision,
+      }));
+    }
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "bed",
+      sessionId: "bed",
+      deviceId: "bedroom",
+      deviceLabel: "Bedroom TV",
+      lastSeenAt: Date.now(),
+      revision,
+    }));
+    const filtered = await (await ctx.app.request("/api/playback/diagnostics?client=Living&reasonFamily=audio&title=Film", { headers: ctx.headers })).json() as {
+      items: Array<{ deviceId: string; occurrenceCount: number }>;
+    };
+    expect(filtered.items).toHaveLength(1);
+    expect(filtered.items[0]?.deviceId).toBe("living-room");
+    expect(filtered.items[0]?.occurrenceCount).toBe(3);
+    const bad = await ctx.app.request("/api/playback/diagnostics?days=14", { headers: ctx.headers });
+    expect(bad.status).toBe(400);
+    const page = await ctx.app.request("/api/playback/observations?limit=100", { headers: ctx.headers });
+    expect(page.status).toBe(200);
+    const over = await (await ctx.app.request("/api/playback/observations?limit=500", { headers: ctx.headers })).json() as { items: unknown[] };
+    expect(over.items.length).toBeLessThanOrEqual(100);
+  });
+
+  it("dismisses a recommendation until the file revision changes", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    const revision = { canonicalPath: "/mnt/nas/movies/film-1080.mkv", sizeBytes: 1, mtimeMs: 1, fileId: "1:1" };
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, { id: "one", sessionId: "one", revision }));
+    const listed = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as { items: Array<{ id: string }> };
+    expect(listed.items).toHaveLength(1);
+    const dismissed = await ctx.app.request(`/api/playback/diagnostics/${listed.items[0]!.id}/dismiss`, {
+      method: "POST",
+      headers: ctx.headers,
+    });
+    expect(dismissed.status).toBe(200);
+    expect((await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as { items: unknown[] }).items).toEqual([]);
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "two",
+      sessionId: "two",
+      revision: { ...revision, sizeBytes: 2, fileId: "1:2" },
+    }));
+    const after = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as { items: Array<{ id: string }> };
+    expect(after.items).toHaveLength(1);
+    expect(after.items[0]?.id).not.toBe(listed.items[0]?.id);
+  });
+
+  it("guides an existing stereo track instead of drafting a duplicate", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    ctx.store.saveInspection("film-1080", {
+      ...surroundReport(),
+      audio: [
+        { index: 1, language: "eng", channels: 8, codec: "truehd", title: "Atmos", untagged: false, commentary: false },
+        { index: 2, language: "eng", channels: 2, codec: "aac", title: "Stereo", untagged: false, commentary: false },
+      ],
+    });
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, { id: "stereo", sessionId: "stereo" }));
+    const listed = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as {
+      items: Array<{ recommendation: { kind: string; draft: unknown; canRepair: boolean } }>;
+    };
+    expect(listed.items[0]?.recommendation.kind).toBe("try_existing_stereo");
+    expect(listed.items[0]?.recommendation.canRepair).toBe(false);
+    expect(listed.items[0]?.recommendation.draft).toBeNull();
+    const jobs = await (await ctx.app.request("/api/jobs", { headers: ctx.headers })).json() as { items: unknown[] };
+    expect(jobs.items).toEqual([]);
+  });
+
+  it("does not auto-choose HEVC for video conversion and never removes subtitles", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    ctx.store.saveInspection("film-1080", surroundReport());
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "vid",
+      sessionId: "vid",
+      reasonFamily: "video",
+      rawReasons: ["VideoCodecNotSupported"],
+      reasons: ["Jellyfin converted the video on Living Room TV."],
+    }));
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "sub",
+      sessionId: "sub",
+      deviceId: "bedroom",
+      deviceLabel: "Bedroom TV",
+      reasonFamily: "subtitle",
+      rawReasons: ["SubtitleCodecNotSupported"],
+      selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: 2 },
+    }));
+    const listed = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as {
+      items: Array<{ reasonFamily: string; recommendation: { kind: string; draft: { video?: { mode: string }; subtitles?: unknown[] } } }>;
+    };
+    const video = listed.items.find((row) => row.reasonFamily === "video");
+    const subtitle = listed.items.find((row) => row.reasonFamily === "subtitle");
+    expect(video?.recommendation.kind).toBe("video_constraint");
+    expect(video?.recommendation.draft.video?.mode).toBe("copy");
+    expect(video?.recommendation.draft).not.toEqual(expect.objectContaining({ codec: "hevc" }));
+    expect(subtitle?.recommendation.kind).toBe("subtitle_guidance");
+    expect(subtitle?.recommendation.draft.subtitles ?? []).toEqual([]);
+  });
+
+  it("shows Direct Play after Keep on the title page and Not yet observed without a later play", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "before",
+      sessionId: "before",
+      lastSeenAt: 1_000,
+      endedAt: 1_000,
+    }));
+    ctx.store.addHistory("film-1080", "kept", 0, 2_000);
+    const pending = await (await ctx.app.request("/api/library/items/film-1080", { headers: ctx.headers })).json() as {
+      playback: { afterKeep: { sentence: string | null }; observations: unknown[] };
+    };
+    expect(pending.playback.afterKeep.sentence).toBe("Not yet observed.");
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "after",
+      sessionId: "after",
+      playMethod: "DirectPlay",
+      reasonFamily: null,
+      rawReasons: [],
+      lastSeenAt: 3_000,
+    }));
+    const observed = await (await ctx.app.request("/api/library/items/film-1080", { headers: ctx.headers })).json() as {
+      playback: { afterKeep: { sentence: string | null } };
+    };
+    expect(observed.playback.afterKeep.sentence).toBe("Direct playback observed on this device after Keep.");
+  });
+
   it("blocks playback routes on a worker", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-play-worker-"));
     const env = loadEnv({
@@ -308,6 +483,60 @@ describe("playback HTTP", () => {
     expect(res.status).toBe(409);
   });
 });
+
+function surroundReport() {
+  return {
+    sourceSig: "/mnt/nas/movies/film-1080.mkv|1",
+    sourceMethod: "ffprobe" as const,
+    listingState: "complete" as const,
+    durationSec: 3600,
+    sizeBytes: 8_000_000_000,
+    sizePerHourGb: 8,
+    videoCodec: "hevc",
+    width: 1920,
+    height: 1080,
+    bitDepth: 10,
+    hdr: "none" as const,
+    audio: [{ index: 1, language: "eng", channels: 8, codec: "truehd", title: "Atmos", untagged: false, commentary: false }],
+    subtitles: [{ index: 2, language: "eng", codec: "pgs", title: "", untagged: false, forced: false, sdh: false }],
+    hasChapters: false,
+    hasAttachments: false,
+  };
+}
+
+function seedOccurrence(connectionId: string, over: Record<string, unknown>) {
+  return {
+    id: "occ",
+    connectionId,
+    deviceId: "living-room",
+    deviceLabel: "Living Room TV",
+    sessionId: "sess",
+    itemId: "item-1",
+    mediaSourceId: "src-1080",
+    itemName: "The Film",
+    playMethod: "Transcode",
+    mediaType: "Video",
+    isPaused: false,
+    reasons: ["Jellyfin converted the audio on Living Room TV."],
+    rawReasons: ["AudioCodecNotSupported"],
+    reasonFamily: "audio",
+    selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: null },
+    match: "matched" as const,
+    libraryItemIds: ["film-1080"],
+    path: "/mnt/nas/movies/film-1080.mkv",
+    revision: {
+      canonicalPath: "/mnt/nas/movies/film-1080.mkv",
+      sizeBytes: 1,
+      mtimeMs: 1,
+      fileId: "1:1",
+    },
+    startedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    endedAt: null,
+    gap: false,
+    ...over,
+  };
+}
 
 async function waitUntil(check: () => boolean, timeoutMs = 1_000): Promise<void> {
   const start = Date.now();

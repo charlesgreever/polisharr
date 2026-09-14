@@ -12,6 +12,7 @@ import type {
   JobStatus,
   LibraryItem,
   PlaybackConnectionSettings,
+  PlaybackDismissal,
   PlaybackFileRevision,
   PlaybackMatchOutcome,
   PlaybackOccurrence,
@@ -245,6 +246,18 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS playback_occurrences_open
         ON playback_occurrences (connection_id, session_id, item_id, media_source_id)
         WHERE ended_at IS NULL;
+      CREATE TABLE IF NOT EXISTS playback_dismissals (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        reason_family TEXT,
+        revision TEXT,
+        match_outcome TEXT NOT NULL,
+        library_item_ids TEXT NOT NULL,
+        path TEXT,
+        jellyfin_item_id TEXT NOT NULL,
+        dismissed_at INTEGER NOT NULL
+      );
     `);
     this.ensureColumn("jobs", "position", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("jobs", "phase", "TEXT NOT NULL DEFAULT 'queued'");
@@ -402,6 +415,7 @@ export class Store {
       this.db.prepare("DELETE FROM series_preferences WHERE instance_id = ?").run(id);
       this.db.prepare("DELETE FROM playback_settings WHERE connection_id = ?").run(id);
       this.db.prepare("DELETE FROM playback_occurrences WHERE connection_id = ?").run(id);
+      this.db.prepare("DELETE FROM playback_dismissals WHERE connection_id = ?").run(id);
       this.db.prepare("DELETE FROM instances WHERE id = ?").run(id);
     })();
   }
@@ -1628,22 +1642,24 @@ export class Store {
     })();
   }
 
-  listPlaybackOccurrences(opts: { offset?: number; limit?: number; connectionId?: string; unmatched?: boolean } = {}): Page<PlaybackOccurrence> {
+  listPlaybackOccurrences(opts: PlaybackOccurrenceQuery = {}): Page<PlaybackOccurrence> {
     const offset = opts.offset ?? 0;
     const limit = opts.limit ?? 50;
-    const where = ["1 = 1"];
-    const params: unknown[] = [];
-    if (opts.connectionId) {
-      where.push("connection_id = ?");
-      params.push(opts.connectionId);
-    }
-    if (opts.unmatched) where.push("match_outcome <> 'matched'");
-    const clause = where.join(" AND ");
+    const { clause, params } = playbackOccurrenceWhere(opts);
     const total = (this.db.prepare(`SELECT COUNT(*) AS n FROM playback_occurrences WHERE ${clause}`).get(...params) as { n: number }).n;
     const rows = this.db.prepare(
       `SELECT * FROM playback_occurrences WHERE ${clause} ORDER BY last_seen_at DESC, id DESC LIMIT ? OFFSET ?`,
     ).all(...params, limit, offset) as Record<string, unknown>[];
     return page(rows.map(mapPlaybackOccurrence), total, offset, limit);
+  }
+
+  queryPlaybackOccurrences(opts: PlaybackOccurrenceQuery = {}): PlaybackOccurrence[] {
+    const { clause, params } = playbackOccurrenceWhere(opts);
+    const limit = Math.min(opts.limit ?? PLAYBACK_HISTORY_MAX, PLAYBACK_HISTORY_MAX);
+    const rows = this.db.prepare(
+      `SELECT * FROM playback_occurrences WHERE ${clause} ORDER BY last_seen_at DESC, id DESC LIMIT ?`,
+    ).all(...params, limit) as Record<string, unknown>[];
+    return rows.map(mapPlaybackOccurrence);
   }
 
   getPlaybackOccurrence(id: string): PlaybackOccurrence | undefined {
@@ -1733,6 +1749,40 @@ export class Store {
 
   clearPlaybackHistory(): void {
     this.db.prepare("DELETE FROM playback_occurrences").run();
+    this.db.prepare("DELETE FROM playback_dismissals").run();
+  }
+
+  lastKeptAtForItems(itemIds: string[]): number | null {
+    if (itemIds.length === 0) return null;
+    const placeholders = itemIds.map(() => "?").join(",");
+    const row = this.db.prepare(
+      `SELECT MAX(created_at) AS n FROM history WHERE outcome = 'kept' AND item_id IN (${placeholders})`,
+    ).get(...itemIds) as { n: number | null };
+    return row.n == null ? null : Number(row.n);
+  }
+
+  savePlaybackDismissal(row: PlaybackDismissal): void {
+    this.db.prepare(
+      `INSERT INTO playback_dismissals (
+         id, connection_id, device_id, reason_family, revision, match_outcome, library_item_ids, path, jellyfin_item_id, dismissed_at
+       ) VALUES (
+         @id, @connectionId, @deviceId, @reasonFamily, @revision, @match, @libraryItemIds, @path, @jellyfinItemId, @dismissedAt
+       )
+       ON CONFLICT(id) DO UPDATE SET dismissed_at = excluded.dismissed_at`,
+    ).run({
+      ...row,
+      revision: row.revision ? JSON.stringify(row.revision) : null,
+      libraryItemIds: JSON.stringify(row.libraryItemIds),
+    });
+  }
+
+  getPlaybackDismissal(id: string): PlaybackDismissal | undefined {
+    const row = this.db.prepare("SELECT * FROM playback_dismissals WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapPlaybackDismissal(row) : undefined;
+  }
+
+  listPlaybackDismissals(): PlaybackDismissal[] {
+    return (this.db.prepare("SELECT * FROM playback_dismissals").all() as Record<string, unknown>[]).map(mapPlaybackDismissal);
   }
 
   prunePlaybackHistory(now: number, limits: { maxAgeMs?: number; maxRows?: number } = {}): void {
@@ -1890,6 +1940,81 @@ function mapPlaybackSettings(row: Record<string, unknown>): PlaybackConnectionSe
     protectedNodeIds: stringList(JSON.parse(String(row.protected_node_ids ?? "[]"))),
     protectReplacement: Number(row.protect_replacement) === 1,
     coveredArrInstanceIds: stringList(JSON.parse(String(row.covered_arr_ids ?? "[]"))),
+  };
+}
+
+export type PlaybackOccurrenceQuery = {
+  offset?: number;
+  limit?: number;
+  connectionId?: string;
+  deviceId?: string;
+  reasonFamily?: string;
+  unmatched?: boolean;
+  libraryItemId?: string;
+  since?: number;
+  until?: number;
+  itemNameContains?: string;
+};
+
+function playbackOccurrenceWhere(opts: PlaybackOccurrenceQuery): { clause: string; params: unknown[] } {
+  const where = ["1 = 1"];
+  const params: unknown[] = [];
+  if (opts.connectionId) {
+    where.push("connection_id = ?");
+    params.push(opts.connectionId);
+  }
+  if (opts.deviceId) {
+    where.push("device_id = ?");
+    params.push(opts.deviceId);
+  }
+  if (opts.reasonFamily === "unknown") {
+    where.push("(reason_family IS NULL OR reason_family = 'unknown') AND IFNULL(play_method, '') <> 'DirectPlay'");
+  } else if (opts.reasonFamily) {
+    where.push("reason_family = ?");
+    params.push(opts.reasonFamily);
+  }
+  if (opts.unmatched) where.push("match_outcome <> 'matched'");
+  if (opts.libraryItemId) {
+    where.push("EXISTS (SELECT 1 FROM json_each(library_item_ids) WHERE value = ?)");
+    params.push(opts.libraryItemId);
+  }
+  if (opts.since != null) {
+    where.push("last_seen_at >= ?");
+    params.push(opts.since);
+  }
+  if (opts.until != null) {
+    where.push("last_seen_at <= ?");
+    params.push(opts.until);
+  }
+  if (opts.itemNameContains) {
+    where.push("item_name LIKE ?");
+    params.push(`%${opts.itemNameContains}%`);
+  }
+  return { clause: where.join(" AND "), params };
+}
+
+function mapPlaybackDismissal(row: Record<string, unknown>): PlaybackDismissal {
+  let revision: PlaybackFileRevision | null = null;
+  if (row.revision != null) {
+    const raw = JSON.parse(String(row.revision)) as Record<string, unknown>;
+    revision = {
+      canonicalPath: String(raw.canonicalPath ?? ""),
+      sizeBytes: typeof raw.sizeBytes === "number" ? raw.sizeBytes : null,
+      mtimeMs: typeof raw.mtimeMs === "number" ? raw.mtimeMs : null,
+      fileId: typeof raw.fileId === "string" ? raw.fileId : null,
+    };
+  }
+  return {
+    id: String(row.id),
+    connectionId: String(row.connection_id),
+    deviceId: String(row.device_id),
+    reasonFamily: row.reason_family == null ? null : String(row.reason_family),
+    revision,
+    match: playbackMatch(row.match_outcome),
+    libraryItemIds: stringList(JSON.parse(String(row.library_item_ids ?? "[]"))),
+    path: row.path == null ? null : String(row.path),
+    jellyfinItemId: String(row.jellyfin_item_id ?? ""),
+    dismissedAt: Number(row.dismissed_at),
   };
 }
 

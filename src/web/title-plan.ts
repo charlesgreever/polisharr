@@ -73,6 +73,35 @@ export function canIdentifySubtitle(
   return pgsAvailable && codec.includes("pgs");
 }
 
+export type AudioAction = "keep" | "remove" | "replace_aac" | "replace_downmix" | "add_downmix";
+
+export function applyPlaybackAudioDraft(
+  current: Record<number, { action: AudioAction; channels?: number }>,
+  choices: Array<{ index?: number; action?: string; channels?: number }> | undefined,
+): Record<number, { action: AudioAction; channels?: number }> {
+  if (!choices) return current;
+  const next = { ...current };
+  for (const choice of choices) {
+    if (typeof choice.index !== "number") continue;
+    const action = parseAudioAction(choice.action);
+    next[choice.index] = { action, channels: choice.channels ?? next[choice.index]?.channels ?? 2 };
+  }
+  return next;
+}
+
+export function playbackVideoMode(draft: { video?: { mode?: string } } | null | undefined): "copy" | "size" | "quality" {
+  const mode = draft?.video?.mode;
+  if (mode === "size" || mode === "quality") return mode;
+  return "copy";
+}
+
+function parseAudioAction(value: string | undefined): AudioAction {
+  if (value === "keep" || value === "remove" || value === "replace_aac" || value === "replace_downmix" || value === "add_downmix") {
+    return value;
+  }
+  return "keep";
+}
+
 export function isImageSubtitle(codec: string | undefined): boolean {
   const name = (codec ?? "").toLowerCase();
   return name.includes("pgs") || name.includes("dvd_subtitle") || name.includes("dvb_subtitle") || name.includes("xsub") || name.includes("vobsub");

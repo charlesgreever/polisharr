@@ -1,10 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type SettingsPayload } from "../api";
+import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type PlaybackSettingsPayload, type SettingsPayload } from "../api";
 import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
-import { FIELD_CONTROL, hardwareBackendLabel, SIZE_CAP_GRID } from "../settings-copy";
+import { FIELD_CONTROL, hardwareBackendLabel, PLAYBACK_HISTORY_CLEARED, PLAYBACK_OBSERVE_HELP, SIZE_CAP_GRID } from "../settings-copy";
 import { ANY_OPEN_NODE_ID } from "../encode-node";
 
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
@@ -25,6 +25,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [playback, setPlayback] = useState<PlaybackSettingsPayload | null>(null);
 
   const load = () => void api.settings().then((payload) => {
     setData(payload);
@@ -35,6 +36,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
     void api.hardware().then(setHw);
     void api.exclusions().then((result) => setExclusions(result.exclusions));
     void api.nodes().then((payload) => setNodes(payload.nodes));
+    void api.playbackSettings().then(setPlayback).catch(() => undefined);
     const id = setInterval(() => {
       void api.nodes().then((payload) => setNodes(payload.nodes)).catch(() => undefined);
     }, 10_000);
@@ -424,6 +426,70 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         </ul>
         <RefreshLibrary />
       </div>
+      {playback && playback.connections.length > 0 && (
+        <div className="glass space-y-4 p-5">
+          <h2 className="font-semibold">Jellyfin playback</h2>
+          <p className="help m-0">{PLAYBACK_OBSERVE_HELP}</p>
+          <ul className="space-y-3 text-sm">
+            {playback.connections.map((row) => (
+              <li key={row.connectionId} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
+                <div className="font-medium text-ink">{row.name}</div>
+                <div className="text-muted">{row.health.status}{row.health.stale ? " · stale" : ""}</div>
+                <label className="flex min-h-11 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={row.observePlayback}
+                    onChange={(event) => {
+                      const observePlayback = event.target.checked;
+                      void api.savePlaybackSettings({
+                        connections: playback.connections.map((current) => current.connectionId === row.connectionId
+                          ? { connectionId: current.connectionId, observePlayback }
+                          : { connectionId: current.connectionId, observePlayback: current.observePlayback, retainHistory: current.retainHistory }),
+                      }).then(setPlayback).then(() => setMsg(observePlayback ? "Playback observation is on for this connection." : "Playback observation is off for this connection.")).catch((error: Error) => setMsg(error.message));
+                    }}
+                  />
+                  Observe playback
+                </label>
+                <label className="flex min-h-11 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={row.retainHistory}
+                    onChange={(event) => {
+                      const retainHistory = event.target.checked;
+                      void api.savePlaybackSettings({
+                        connections: playback.connections.map((current) => current.connectionId === row.connectionId
+                          ? { connectionId: current.connectionId, retainHistory }
+                          : { connectionId: current.connectionId, observePlayback: current.observePlayback, retainHistory: current.retainHistory }),
+                      }).then(setPlayback).then(() => setMsg(retainHistory ? "Viewing history is kept for this connection." : "New viewing history will not be stored. Live coverage can stay on.")).catch((error: Error) => setMsg(error.message));
+                    }}
+                  />
+                  Keep viewing history
+                </label>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => void api.testPlaybackAccess(row.connectionId).then((result) => {
+                    setMsg(result.ok
+                      ? `${row.name} can see household playback.`
+                      : result.playback?.message || "Playback access failed.");
+                  }).catch((error: Error) => setMsg(error.message))}
+                >
+                  Test playback access
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button
+            className="btn-secondary"
+            type="button"
+            onClick={() => void api.clearPlaybackHistory().then(() => {
+              setMsg(PLAYBACK_HISTORY_CLEARED);
+            }).catch((error: Error) => setMsg(error.message))}
+          >
+            Clear viewing history
+          </button>
+        </div>
+      )}
       <div className="glass space-y-4 p-5">
         <h2 className="font-semibold">Radarr and Sonarr webhooks</h2>
         <p className="help">

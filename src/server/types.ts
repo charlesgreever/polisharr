@@ -449,6 +449,7 @@ export type CustomPlanFail = { ok: false; errors: PlanFieldError[] };
 export type CustomPlanResult = CustomPlanOk | CustomPlanFail;
 
 export const PLAYBACK_HISTORY_DAYS = 30;
+export const PLAYBACK_DIAGNOSTIC_DAYS = 7;
 export const PLAYBACK_HISTORY_MAX = 50_000;
 export const PLAYBACK_POLL_MS = 10_000;
 export const PLAYBACK_REQUEST_TIMEOUT_MS = 5_000;
@@ -534,3 +535,82 @@ export type PlaybackConnectionHealth = {
   householdVisible: boolean;
   stale: boolean;
 };
+
+export const PLAYBACK_REASON_FAMILIES = [
+  "audio",
+  "video",
+  "subtitle",
+  "container",
+  "bitrate",
+  "other",
+  "unknown",
+  "mixed",
+] as const;
+export type PlaybackReasonFamily = (typeof PLAYBACK_REASON_FAMILIES)[number];
+
+export type PlaybackRecommendationKind =
+  | "add_stereo"
+  | "try_existing_stereo"
+  | "subtitle_guidance"
+  | "video_constraint"
+  | "bitrate_suggestion"
+  | "container_guidance"
+  | "none";
+
+export type PlaybackRecommendation = {
+  kind: PlaybackRecommendationKind;
+  explanation: string;
+  canRepair: boolean;
+  openEditor: boolean;
+  draft: CustomPlanDraft | null;
+  suggestionId: string | null;
+};
+
+export type PlaybackAfterKeepStatus = "observed_direct" | "not_yet_observed" | "context_changed" | "none";
+
+export type PlaybackAfterKeep = {
+  status: PlaybackAfterKeepStatus;
+  sentence: string | null;
+};
+
+export type PlaybackDismissal = {
+  id: string;
+  connectionId: string;
+  deviceId: string;
+  reasonFamily: string | null;
+  revision: PlaybackFileRevision | null;
+  match: PlaybackMatchOutcome;
+  libraryItemIds: string[];
+  path: string | null;
+  jellyfinItemId: string;
+  dismissedAt: number;
+};
+
+export type PlaybackDiagnostic = {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  deviceId: string;
+  deviceLabel: string;
+  itemName: string;
+  libraryItemIds: string[];
+  itemId: string | null;
+  href: string | null;
+  jellyfinItemId: string;
+  reasonFamily: PlaybackReasonFamily;
+  summary: string;
+  rawReasons: string[];
+  playMethod: string | null;
+  match: PlaybackMatchOutcome;
+  occurrenceCount: number;
+  lastSeenAt: number;
+  startedAt: number;
+  revision: PlaybackFileRevision | null;
+  path: string | null;
+  selectedTracks: PlaybackSelectedTracks;
+  recommendation: PlaybackRecommendation;
+  afterKeep: PlaybackAfterKeep;
+};
+
+export const AFTER_KEEP_OBSERVED = "Direct playback observed on this device after Keep.";
+export const AFTER_KEEP_NOT_YET = "Not yet observed.";

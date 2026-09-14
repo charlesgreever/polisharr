@@ -162,7 +162,7 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
   const now = () => opts.clock?.() ?? Date.now();
   const pollMs = opts.pollMs ?? PLAYBACK_POLL_MS;
   const staleMs = opts.staleMs ?? PLAYBACK_STALE_MS;
-  const statFile = opts.statFile ?? defaultStat;
+  const statFile = opts.statFile ?? statPlaybackRevision;
   const live = new Map<string, ConnectionLive>();
   let timer: ReturnType<typeof setInterval> | undefined;
   let inFlight: Promise<void> | null = null;
@@ -641,7 +641,7 @@ function parseIdList(value: unknown, label: string): { ok: true; ids: string[] }
   return { ok: true, ids: value };
 }
 
-async function defaultStat(path: string): Promise<PlaybackFileRevision | null> {
+export async function statPlaybackRevision(path: string): Promise<PlaybackFileRevision | null> {
   const canonicalPath = canonicalMediaPath(path);
   try {
     const info = await stat(path);

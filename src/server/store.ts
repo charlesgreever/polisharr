@@ -11,12 +11,17 @@ import type {
   JobPhase,
   JobStatus,
   LibraryItem,
+  PlaybackConnectionSettings,
+  PlaybackFileRevision,
+  PlaybackMatchOutcome,
+  PlaybackOccurrence,
   ReviewItem,
   ReviewStatus,
   Settings,
   Suggestion,
   VideoTarget,
 } from "./types.ts";
+import { PLAYBACK_HISTORY_DAYS, PLAYBACK_HISTORY_MAX } from "./types.ts";
 import { parseAudioMix, parseVideoTarget, type AudioMix } from "./types.ts";
 import { normalizeInspection } from "./inspect.ts";
 import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
@@ -200,6 +205,46 @@ export class Store {
         version TEXT NOT NULL DEFAULT '',
         current_job_id TEXT
       );
+      CREATE TABLE IF NOT EXISTS playback_settings (
+        connection_id TEXT PRIMARY KEY,
+        observe INTEGER NOT NULL DEFAULT 0,
+        retain_history INTEGER NOT NULL DEFAULT 1,
+        protect_nodes INTEGER NOT NULL DEFAULT 0,
+        protected_node_ids TEXT NOT NULL DEFAULT '[]',
+        protect_replacement INTEGER NOT NULL DEFAULT 0,
+        covered_arr_ids TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE TABLE IF NOT EXISTS playback_occurrences (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        device_label TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        media_source_id TEXT NOT NULL,
+        item_name TEXT NOT NULL,
+        play_method TEXT,
+        media_type TEXT,
+        is_paused INTEGER,
+        reasons TEXT NOT NULL,
+        raw_reasons TEXT NOT NULL,
+        reason_family TEXT,
+        audio_stream_index INTEGER,
+        subtitle_stream_index INTEGER,
+        match_outcome TEXT NOT NULL,
+        library_item_ids TEXT NOT NULL,
+        path TEXT,
+        revision TEXT,
+        started_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        gap INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS playback_occurrences_seen ON playback_occurrences (last_seen_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS playback_occurrences_connection ON playback_occurrences (connection_id, last_seen_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS playback_occurrences_open
+        ON playback_occurrences (connection_id, session_id, item_id, media_source_id)
+        WHERE ended_at IS NULL;
     `);
     this.ensureColumn("jobs", "position", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("jobs", "phase", "TEXT NOT NULL DEFAULT 'queued'");
@@ -355,6 +400,8 @@ export class Store {
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM library_roots WHERE instance_id = ?").run(id);
       this.db.prepare("DELETE FROM series_preferences WHERE instance_id = ?").run(id);
+      this.db.prepare("DELETE FROM playback_settings WHERE connection_id = ?").run(id);
+      this.db.prepare("DELETE FROM playback_occurrences WHERE connection_id = ?").run(id);
       this.db.prepare("DELETE FROM instances WHERE id = ?").run(id);
     })();
   }
@@ -423,6 +470,16 @@ export class Store {
        WHERE i.path = ? AND i.instance_id = ?
        ORDER BY i.season, i.episode, i.id`,
     ).all(path, instanceId) as Record<string, unknown>[];
+    return rows.map(mapItem);
+  }
+
+  itemsForCanonicalPath(path: string): LibraryItem[] {
+    if (!path) return [];
+    const rows = this.db.prepare(
+      `SELECT i.*, inst.name AS instance_name FROM library_items i JOIN instances inst ON inst.id = i.instance_id
+       WHERE i.path = ?
+       ORDER BY i.season, i.episode, i.id`,
+    ).all(path) as Record<string, unknown>[];
     return rows.map(mapItem);
   }
 
@@ -1507,6 +1564,179 @@ export class Store {
   close(): void {
     this.db.close();
   }
+
+  defaultPlaybackConnectionSettings(connectionId: string): PlaybackConnectionSettings {
+    const arrIds = this.listInstances()
+      .filter((row) => row.kind === "radarr" || row.kind === "sonarr")
+      .map((row) => row.id);
+    return {
+      connectionId,
+      observePlayback: false,
+      retainHistory: true,
+      protectNodes: false,
+      protectedNodeIds: [],
+      protectReplacement: false,
+      coveredArrInstanceIds: arrIds,
+    };
+  }
+
+  getPlaybackSettings(): PlaybackConnectionSettings[] {
+    const saved = new Map(
+      (this.db.prepare("SELECT * FROM playback_settings").all() as Record<string, unknown>[]).map((row) => {
+        const mapped = mapPlaybackSettings(row);
+        return [mapped.connectionId, mapped] as const;
+      }),
+    );
+    return this.listInstances()
+      .filter((row) => row.kind === "jellyfin")
+      .map((row) => saved.get(row.id) ?? this.defaultPlaybackConnectionSettings(row.id));
+  }
+
+  getPlaybackConnectionSettings(connectionId: string): PlaybackConnectionSettings | undefined {
+    return this.getPlaybackSettings().find((row) => row.connectionId === connectionId);
+  }
+
+  savePlaybackSettings(connections: PlaybackConnectionSettings[]): void {
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM playback_settings").run();
+      const insert = this.db.prepare(
+        `INSERT INTO playback_settings (
+           connection_id, observe, retain_history, protect_nodes, protected_node_ids, protect_replacement, covered_arr_ids
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of connections) {
+        insert.run(
+          row.connectionId,
+          row.observePlayback ? 1 : 0,
+          row.retainHistory ? 1 : 0,
+          row.protectNodes ? 1 : 0,
+          JSON.stringify(row.protectedNodeIds),
+          row.protectReplacement ? 1 : 0,
+          JSON.stringify(row.coveredArrInstanceIds),
+        );
+      }
+    })();
+  }
+
+  listPlaybackOccurrences(opts: { offset?: number; limit?: number; connectionId?: string; unmatched?: boolean } = {}): Page<PlaybackOccurrence> {
+    const offset = opts.offset ?? 0;
+    const limit = opts.limit ?? 50;
+    const where = ["1 = 1"];
+    const params: unknown[] = [];
+    if (opts.connectionId) {
+      where.push("connection_id = ?");
+      params.push(opts.connectionId);
+    }
+    if (opts.unmatched) where.push("match_outcome <> 'matched'");
+    const clause = where.join(" AND ");
+    const total = (this.db.prepare(`SELECT COUNT(*) AS n FROM playback_occurrences WHERE ${clause}`).get(...params) as { n: number }).n;
+    const rows = this.db.prepare(
+      `SELECT * FROM playback_occurrences WHERE ${clause} ORDER BY last_seen_at DESC, id DESC LIMIT ? OFFSET ?`,
+    ).all(...params, limit, offset) as Record<string, unknown>[];
+    return page(rows.map(mapPlaybackOccurrence), total, offset, limit);
+  }
+
+  getPlaybackOccurrence(id: string): PlaybackOccurrence | undefined {
+    const row = this.db.prepare("SELECT * FROM playback_occurrences WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapPlaybackOccurrence(row) : undefined;
+  }
+
+  openPlaybackOccurrence(connectionId: string, sessionId: string, itemId: string, mediaSourceId: string): PlaybackOccurrence | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM playback_occurrences
+       WHERE connection_id = ? AND session_id = ? AND item_id = ? AND media_source_id = ? AND ended_at IS NULL`,
+    ).get(connectionId, sessionId, itemId, mediaSourceId) as Record<string, unknown> | undefined;
+    return row ? mapPlaybackOccurrence(row) : undefined;
+  }
+
+  listOpenPlaybackOccurrences(connectionId?: string): PlaybackOccurrence[] {
+    const rows = connectionId
+      ? this.db.prepare("SELECT * FROM playback_occurrences WHERE ended_at IS NULL AND connection_id = ?").all(connectionId)
+      : this.db.prepare("SELECT * FROM playback_occurrences WHERE ended_at IS NULL").all();
+    return (rows as Record<string, unknown>[]).map(mapPlaybackOccurrence);
+  }
+
+  savePlaybackOccurrence(row: PlaybackOccurrence): void {
+    this.db.prepare(
+      `INSERT INTO playback_occurrences (
+         id, connection_id, device_id, device_label, session_id, item_id, media_source_id, item_name, play_method,
+         media_type, is_paused, reasons, raw_reasons, reason_family, audio_stream_index, subtitle_stream_index,
+         match_outcome, library_item_ids, path, revision, started_at, last_seen_at, ended_at, gap
+       ) VALUES (
+         @id, @connectionId, @deviceId, @deviceLabel, @sessionId, @itemId, @mediaSourceId, @itemName, @playMethod,
+         @mediaType, @isPaused, @reasons, @rawReasons, @reasonFamily, @audioStreamIndex, @subtitleStreamIndex,
+         @match, @libraryItemIds, @path, @revision, @startedAt, @lastSeenAt, @endedAt, @gap
+       )
+       ON CONFLICT(id) DO UPDATE SET
+         device_id = excluded.device_id,
+         device_label = excluded.device_label,
+         item_name = excluded.item_name,
+         play_method = excluded.play_method,
+         media_type = excluded.media_type,
+         is_paused = excluded.is_paused,
+         reasons = excluded.reasons,
+         raw_reasons = excluded.raw_reasons,
+         reason_family = excluded.reason_family,
+         audio_stream_index = excluded.audio_stream_index,
+         subtitle_stream_index = excluded.subtitle_stream_index,
+         match_outcome = excluded.match_outcome,
+         library_item_ids = excluded.library_item_ids,
+         path = excluded.path,
+         revision = excluded.revision,
+         last_seen_at = excluded.last_seen_at,
+         ended_at = excluded.ended_at,
+         gap = excluded.gap`,
+    ).run({
+      ...row,
+      playMethod: row.playMethod,
+      mediaType: row.mediaType,
+      isPaused: row.isPaused == null ? null : row.isPaused ? 1 : 0,
+      reasons: JSON.stringify(row.reasons),
+      rawReasons: JSON.stringify(row.rawReasons),
+      audioStreamIndex: row.selectedTracks.audioStreamIndex,
+      subtitleStreamIndex: row.selectedTracks.subtitleStreamIndex,
+      libraryItemIds: JSON.stringify(row.libraryItemIds),
+      revision: row.revision ? JSON.stringify(row.revision) : null,
+      gap: row.gap ? 1 : 0,
+    });
+  }
+
+  closePlaybackOccurrence(id: string, endedAt: number, gap: boolean): void {
+    this.db.prepare("UPDATE playback_occurrences SET ended_at = ?, gap = ? WHERE id = ? AND ended_at IS NULL").run(
+      endedAt,
+      gap ? 1 : 0,
+      id,
+    );
+  }
+
+  closeOpenPlaybackOccurrences(connectionId: string | null, endedAt: number, gap: boolean): void {
+    if (connectionId) {
+      this.db.prepare("UPDATE playback_occurrences SET ended_at = ?, gap = ? WHERE connection_id = ? AND ended_at IS NULL").run(
+        endedAt,
+        gap ? 1 : 0,
+        connectionId,
+      );
+      return;
+    }
+    this.db.prepare("UPDATE playback_occurrences SET ended_at = ?, gap = ? WHERE ended_at IS NULL").run(endedAt, gap ? 1 : 0);
+  }
+
+  clearPlaybackHistory(): void {
+    this.db.prepare("DELETE FROM playback_occurrences").run();
+  }
+
+  prunePlaybackHistory(now: number, limits: { maxAgeMs?: number; maxRows?: number } = {}): void {
+    const maxAgeMs = limits.maxAgeMs ?? PLAYBACK_HISTORY_DAYS * 24 * 60 * 60 * 1000;
+    const maxRows = limits.maxRows ?? PLAYBACK_HISTORY_MAX;
+    this.db.prepare("DELETE FROM playback_occurrences WHERE last_seen_at < ?").run(now - maxAgeMs);
+    const count = (this.db.prepare("SELECT COUNT(*) AS n FROM playback_occurrences").get() as { n: number }).n;
+    if (count <= maxRows) return;
+    this.db.prepare(
+      `DELETE FROM playback_occurrences WHERE id IN (
+         SELECT id FROM playback_occurrences ORDER BY last_seen_at ASC, id ASC LIMIT ?
+       )`,
+    ).run(count - maxRows);
+  }
 }
 
 function mapItem(row: Record<string, unknown>): LibraryItem {
@@ -1639,6 +1869,64 @@ function mapInstance(row: Record<string, unknown>): StoredInstance {
     secret: row.secret == null ? null : String(row.secret),
     enabled: Number(row.enabled) === 1,
   };
+}
+
+function mapPlaybackSettings(row: Record<string, unknown>): PlaybackConnectionSettings {
+  return {
+    connectionId: String(row.connection_id),
+    observePlayback: Number(row.observe) === 1,
+    retainHistory: Number(row.retain_history) === 1,
+    protectNodes: Number(row.protect_nodes) === 1,
+    protectedNodeIds: stringList(JSON.parse(String(row.protected_node_ids ?? "[]"))),
+    protectReplacement: Number(row.protect_replacement) === 1,
+    coveredArrInstanceIds: stringList(JSON.parse(String(row.covered_arr_ids ?? "[]"))),
+  };
+}
+
+function mapPlaybackOccurrence(row: Record<string, unknown>): PlaybackOccurrence {
+  let revision: PlaybackFileRevision | null = null;
+  if (row.revision != null) {
+    const raw = JSON.parse(String(row.revision)) as Record<string, unknown>;
+    revision = {
+      canonicalPath: String(raw.canonicalPath ?? ""),
+      sizeBytes: typeof raw.sizeBytes === "number" ? raw.sizeBytes : null,
+      mtimeMs: typeof raw.mtimeMs === "number" ? raw.mtimeMs : null,
+      fileId: typeof raw.fileId === "string" ? raw.fileId : null,
+    };
+  }
+  return {
+    id: String(row.id),
+    connectionId: String(row.connection_id),
+    deviceId: String(row.device_id),
+    deviceLabel: String(row.device_label),
+    sessionId: String(row.session_id),
+    itemId: String(row.item_id),
+    mediaSourceId: String(row.media_source_id),
+    itemName: String(row.item_name),
+    playMethod: row.play_method == null ? null : String(row.play_method),
+    mediaType: row.media_type == null ? null : String(row.media_type),
+    isPaused: row.is_paused == null ? null : Number(row.is_paused) === 1,
+    reasons: stringList(JSON.parse(String(row.reasons ?? "[]"))),
+    rawReasons: stringList(JSON.parse(String(row.raw_reasons ?? "[]"))),
+    reasonFamily: row.reason_family == null ? null : String(row.reason_family),
+    selectedTracks: {
+      audioStreamIndex: row.audio_stream_index == null ? null : Number(row.audio_stream_index),
+      subtitleStreamIndex: row.subtitle_stream_index == null ? null : Number(row.subtitle_stream_index),
+    },
+    match: playbackMatch(row.match_outcome),
+    libraryItemIds: stringList(JSON.parse(String(row.library_item_ids ?? "[]"))),
+    path: row.path == null ? null : String(row.path),
+    revision,
+    startedAt: Number(row.started_at),
+    lastSeenAt: Number(row.last_seen_at),
+    endedAt: row.ended_at == null ? null : Number(row.ended_at),
+    gap: Number(row.gap) === 1,
+  };
+}
+
+function playbackMatch(value: unknown): PlaybackMatchOutcome {
+  if (value === "matched" || value === "unmatched" || value === "ambiguous" || value === "remote") return value;
+  throw new Error(`The saved playback match ${String(value)} is invalid.`);
 }
 
 function mediaType(value: unknown): LibraryItem["type"] {

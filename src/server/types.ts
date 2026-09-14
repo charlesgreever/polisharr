@@ -447,3 +447,90 @@ export type PlanFieldError = { field: string; message: string };
 export type CustomPlanOk = { ok: true; plan: ExecutablePlan };
 export type CustomPlanFail = { ok: false; errors: PlanFieldError[] };
 export type CustomPlanResult = CustomPlanOk | CustomPlanFail;
+
+export const PLAYBACK_HISTORY_DAYS = 30;
+export const PLAYBACK_HISTORY_MAX = 50_000;
+export const PLAYBACK_POLL_MS = 10_000;
+export const PLAYBACK_REQUEST_TIMEOUT_MS = 5_000;
+export const PLAYBACK_STALE_MS = 30_000;
+export const PLAYBACK_SOURCE_CACHE_MS = 60_000;
+export const PLAYBACK_MAX_SESSIONS = 1_000;
+export const PLAYBACK_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const PLAYBACK_SOURCE_CONCURRENCY = 2;
+export const PLAYBACK_OCCURRENCE_MISS_POLLS = 2;
+export const PLAYBACK_REASON_MAX_CHARS = 240;
+export const PLAYBACK_TEXT_MAX_CHARS = 240;
+
+export type PlaybackHealthStatus =
+  | "off"
+  | "unknown"
+  | "idle"
+  | "playing"
+  | "stale"
+  | "error"
+  | "incomplete"
+  | "unavailable";
+
+export type PlaybackCredentialKind = "apiKey" | "userToken" | "unknown";
+
+export type PlaybackMatchOutcome = "matched" | "unmatched" | "ambiguous" | "remote";
+
+export type PlaybackConnectionSettings = {
+  connectionId: string;
+  observePlayback: boolean;
+  retainHistory: boolean;
+  protectNodes: boolean;
+  protectedNodeIds: string[];
+  protectReplacement: boolean;
+  coveredArrInstanceIds: string[];
+};
+
+export type PlaybackFileRevision = {
+  canonicalPath: string;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+  fileId: string | null;
+};
+
+export type PlaybackSelectedTracks = {
+  audioStreamIndex: number | null;
+  subtitleStreamIndex: number | null;
+};
+
+export type PlaybackOccurrence = {
+  id: string;
+  connectionId: string;
+  deviceId: string;
+  deviceLabel: string;
+  sessionId: string;
+  itemId: string;
+  mediaSourceId: string;
+  itemName: string;
+  playMethod: string | null;
+  mediaType: string | null;
+  isPaused: boolean | null;
+  reasons: string[];
+  rawReasons: string[];
+  reasonFamily: string | null;
+  selectedTracks: PlaybackSelectedTracks;
+  match: PlaybackMatchOutcome;
+  libraryItemIds: string[];
+  path: string | null;
+  revision: PlaybackFileRevision | null;
+  startedAt: number;
+  lastSeenAt: number;
+  endedAt: number | null;
+  gap: boolean;
+};
+
+export type PlaybackConnectionHealth = {
+  connectionId: string;
+  observePlayback: boolean;
+  status: PlaybackHealthStatus;
+  lastSuccessAt: number | null;
+  lastError: string | null;
+  complete: boolean;
+  credentialKind: PlaybackCredentialKind;
+  householdVisible: boolean;
+  stale: boolean;
+};

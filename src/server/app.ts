@@ -35,6 +35,20 @@ import {
 } from "./language-id.ts";
 import { applySubtitleLanguageToReport, detectSubtitleLanguageSample } from "./subtitle-language-id.ts";
 import { testJellyfin, testPlex } from "./notify.ts";
+import { createJellyfinPlayback } from "./jellyfin-playback.ts";
+import {
+  createPlaybackMonitor,
+  observationSummary,
+  parsePlaybackSettingsInput,
+  type PlaybackMonitor,
+} from "./playback-monitor.ts";
+import {
+  PLAYBACK_HISTORY_DAYS,
+  PLAYBACK_HISTORY_MAX,
+  PLAYBACK_POLL_MS,
+  PLAYBACK_REQUEST_TIMEOUT_MS,
+  PLAYBACK_STALE_MS,
+} from "./types.ts";
 import { profilePreviews, syncProfiles } from "./arr-profiles.ts";
 import { validateCustomPlan } from "./custom-plan.ts";
 import type { ArrKind, CustomPlanDraft, HardwareInfo, PlayerKind, Settings, Suggestion } from "./types.ts";
@@ -109,6 +123,9 @@ export type AppOptions = {
   extractSubtitleSup?: (args: string[]) => Promise<void>;
   runPgsOcr?: (supPath: string) => Promise<string>;
   version?: string;
+  playbackPollMs?: number;
+  playbackTimeoutMs?: number;
+  playbackStaleMs?: number;
 };
 
 export function createApp(opts: AppOptions) {
@@ -141,6 +158,21 @@ export function createApp(opts: AppOptions) {
   });
   const isWorker = opts.env.role === "worker";
   if (!isWorker) jobs.start();
+  const jellyfinPlayback = createJellyfinPlayback({
+    fetch: httpFetch,
+    clock: opts.clock,
+    timeoutMs: opts.playbackTimeoutMs ?? PLAYBACK_REQUEST_TIMEOUT_MS,
+  });
+  const playbackMonitor: PlaybackMonitor = createPlaybackMonitor({
+    store,
+    fetch: httpFetch,
+    decrypt: (packed) => decryptSecret(secret, packed),
+    clock: opts.clock,
+    pollMs: opts.playbackPollMs ?? PLAYBACK_POLL_MS,
+    staleMs: opts.playbackStaleMs ?? PLAYBACK_STALE_MS,
+    playback: jellyfinPlayback,
+  });
+  if (!isWorker) playbackMonitor.start();
   const sync = new LibrarySync({
     store,
     fetch: httpFetch,
@@ -310,6 +342,8 @@ export function createApp(opts: AppOptions) {
   app.use("/api/nodes/*", authed);
   app.use("/api/auth/password", authed);
   app.use("/api/queue", authed);
+  app.use("/api/playback", authed);
+  app.use("/api/playback/*", authed);
 
   function gateOptimize(): string | null {
     const state = firstRunState();
@@ -608,6 +642,104 @@ export function createApp(opts: AppOptions) {
     const result = await testJellyfin(inst.url, key, httpFetch);
     return c.json(result, result.ok ? 200 : 400);
   });
+
+  app.get("/api/playback/settings", (c) => c.json(playbackSettingsPayload()));
+
+  app.put("/api/playback/settings", async (c) => {
+    const body: unknown = await readJson(c);
+    const jellyfinIds = store.listInstances().filter((row) => row.kind === "jellyfin").map((row) => row.id);
+    const arrIds = store.listInstances().filter((row) => row.kind === "radarr" || row.kind === "sonarr").map((row) => row.id);
+    const nodeIds = [...store.listNodes().map((row) => row.id), store.localNodeId()];
+    const parsed = parsePlaybackSettingsInput(body, { jellyfinIds, arrIds, nodeIds });
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const overlay = new Map(parsed.connections.map((row) => [row.connectionId, row]));
+    const next = store.getPlaybackSettings().map((row) => overlay.get(row.connectionId) ?? row);
+    store.savePlaybackSettings(next);
+    await playbackMonitor.refresh();
+    return c.json({ ok: true, ...playbackSettingsPayload() });
+  });
+
+  app.post("/api/playback/connections/:id/test", async (c) => {
+    const inst = store.getInstance(c.req.param("id"));
+    if (!inst || inst.kind !== "jellyfin") return c.json({ error: "That Jellyfin connection does not exist." }, 404);
+    const key = inst.secret ? decryptSecret(secret, inst.secret) : "";
+    const connection = await testJellyfin(inst.url, key, httpFetch, opts.playbackTimeoutMs ?? PLAYBACK_REQUEST_TIMEOUT_MS);
+    if (!connection.ok) {
+      return c.json({
+        ok: false,
+        connection,
+        playback: {
+          ok: false,
+          credentialKind: "unknown",
+          householdVisible: false,
+          kind: "connect",
+          message: connection.message,
+        },
+      }, 400);
+    }
+    const playback = await jellyfinPlayback.testPlaybackAccess({ url: inst.url, token: key });
+    return c.json({
+      ok: playback.ok,
+      connection,
+      playback,
+    }, playback.ok ? 200 : 400);
+  });
+
+  app.get("/api/playback/observations", (c) => {
+    const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
+    const unmatched = c.req.query("unmatched") === "1";
+    const connectionId = c.req.query("connectionId");
+    const listed = store.listPlaybackOccurrences({
+      offset,
+      limit,
+      unmatched: unmatched || undefined,
+      connectionId: connectionId || undefined,
+    });
+    const coverage = playbackMonitor.coverage();
+    const stale = new Set(coverage.connections.filter((row) => row.stale).map((row) => row.connectionId));
+    return c.json({
+      items: listed.items.map((row) => ({
+        ...row,
+        summary: observationSummary(row),
+        stale: stale.has(row.connectionId),
+      })),
+      total: listed.total,
+      nextOffset: listed.nextOffset,
+      connections: coverage.connections,
+    });
+  });
+
+  app.delete("/api/playback/history", (c) => {
+    store.clearPlaybackHistory();
+    return c.json({ ok: true, coverage: playbackMonitor.coverage() });
+  });
+
+  function playbackSettingsPayload() {
+    const coverage = new Map(playbackMonitor.coverage().connections.map((row) => [row.connectionId, row]));
+    return {
+      connections: store.getPlaybackSettings().map((row) => {
+        const inst = store.getInstance(row.connectionId);
+        return {
+          ...row,
+          name: inst?.name ?? "",
+          url: inst?.url ?? "",
+          health: coverage.get(row.connectionId) ?? {
+            connectionId: row.connectionId,
+            observePlayback: row.observePlayback,
+            status: row.observePlayback ? "unknown" : "off",
+            lastSuccessAt: null,
+            lastError: null,
+            complete: false,
+            credentialKind: "unknown",
+            householdVisible: false,
+            stale: row.observePlayback,
+          },
+        };
+      }),
+      historyDays: PLAYBACK_HISTORY_DAYS,
+      historyMaxOccurrences: PLAYBACK_HISTORY_MAX,
+    };
+  }
 
   app.post("/api/library/refresh", async (c) => {
     const result = await sync.refresh();
@@ -1657,7 +1789,7 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
-  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop };
+  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor };
 }
 
 async function readJson(c: Context): Promise<unknown> {

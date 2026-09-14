@@ -894,4 +894,59 @@ describe("store schema migration", () => {
     store.setSeriesAudioMix(sonarr, 42, null);
     expect(store.audioMixForItem(store.getItem(episodeId)!)).toBeNull();
   });
+
+  it("defaults playback observation off and prunes history by age and count", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-playback-")), "polisharr.db"));
+    stores.push(store);
+    store.upsertInstance({ id: "jf", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin", enabled: true });
+    store.upsertInstance({ id: "radarr", kind: "radarr", name: "Radarr", url: "http://radarr", enabled: true });
+    const settings = store.getPlaybackSettings();
+    expect(settings).toEqual([expect.objectContaining({
+      connectionId: "jf",
+      observePlayback: false,
+      retainHistory: true,
+      protectNodes: false,
+      protectReplacement: false,
+      coveredArrInstanceIds: ["radarr"],
+    })]);
+    store.savePlaybackSettings([{ ...settings[0]!, observePlayback: true }]);
+    const reopened = new Store(store.db.name);
+    stores.push(reopened);
+    expect(reopened.getPlaybackSettings()[0]?.observePlayback).toBe(true);
+    const occurrence = (id: string, seen: number) => ({
+      id,
+      connectionId: "jf",
+      deviceId: "tv",
+      deviceLabel: "TV",
+      sessionId: id,
+      itemId: "item",
+      mediaSourceId: "src",
+      itemName: "Film",
+      playMethod: "DirectPlay",
+      mediaType: "Video",
+      isPaused: false,
+      reasons: [],
+      rawReasons: [],
+      reasonFamily: null,
+      selectedTracks: { audioStreamIndex: null, subtitleStreamIndex: null },
+      match: "unmatched" as const,
+      libraryItemIds: [],
+      path: null,
+      revision: null,
+      startedAt: seen,
+      lastSeenAt: seen,
+      endedAt: seen,
+      gap: false,
+    });
+    store.savePlaybackOccurrence(occurrence("old", 1));
+    store.savePlaybackOccurrence(occurrence("mid", 50));
+    store.savePlaybackOccurrence(occurrence("new", 100));
+    store.prunePlaybackHistory(100, { maxAgeMs: 80, maxRows: 10 });
+    expect(store.listPlaybackOccurrences().items.map((row) => row.id).sort()).toEqual(["mid", "new"]);
+    store.prunePlaybackHistory(100, { maxAgeMs: 1_000, maxRows: 1 });
+    expect(store.listPlaybackOccurrences().items.map((row) => row.id)).toEqual(["new"]);
+    store.clearPlaybackHistory();
+    expect(store.listPlaybackOccurrences().items).toEqual([]);
+    expect(store.getPlaybackSettings()[0]?.observePlayback).toBe(true);
+  });
 });

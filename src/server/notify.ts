@@ -48,13 +48,24 @@ export async function testPlex(url: string, token: string, httpFetch: typeof fet
   }
 }
 
-export async function testJellyfin(url: string, token: string, httpFetch: typeof fetch): Promise<{ ok: true } | { ok: false; message: string }> {
+export async function testJellyfin(
+  url: string,
+  token: string,
+  httpFetch: typeof fetch,
+  timeoutMs = 5_000,
+): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
-    const res = await httpFetch(`${trimUrl(url)}/System/Info`, { headers: jellyfinAuthHeaders(token) });
+    const res = await httpFetch(`${trimUrl(url)}/System/Info`, {
+      headers: jellyfinAuthHeaders(token),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (res.status === 401) return { ok: false, message: "Jellyfin rejected this token." };
     if (!res.ok) return { ok: false, message: `Jellyfin returned HTTP ${res.status}.` };
     return { ok: true };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      return { ok: false, message: "Jellyfin did not answer before the timeout." };
+    }
     return { ok: false, message: "Polisharr could not reach Jellyfin." };
   }
 }

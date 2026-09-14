@@ -818,6 +818,10 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   const vaapiDecode = usesVaapiDecode(req.backend, req.report.videoCodec);
   const videotoolboxDecode = usesVideotoolboxDecode(req.backend, req.report.videoCodec);
   const args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y"];
+  if (req.backend === "cuda" || req.backend === "vaapi") {
+    // ffmpeg 7 inserts software auto_scale after scale_cuda/scale_vaapi, which fails with ENOSYS.
+    args.push("-auto_conversion_filters", "0");
+  }
   if (req.backend === "vaapi") {
     const device = req.vaapiDevice || "/dev/dri/renderD128";
     args.push("-init_hw_device", `vaapi=va:${device}`, "-filter_hw_device", "va");
@@ -848,6 +852,10 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
     args.push("-vf", "scale=1920:1080");
   }
   args.push("-c:v", encoder);
+  if (nvdec || vaapiDecode) {
+    // WEB-DLs can change SPS mid-file. Reinit of a CUDA/VAAPI graph fails with "Error reinitializing filters".
+    args.push("-reinit_filter:v", "0");
+  }
   if (req.backend === "videotoolbox") {
     // allow_sw=0 fails closed if the media engine is missing instead of a CPU encode.
     args.push("-allow_sw", "0", "-realtime", "0");

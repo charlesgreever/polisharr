@@ -41,6 +41,7 @@ export const api = {
     settings: { writeMode: string; videoTarget: string; preferredLanguage?: string };
     languageId?: { available?: boolean };
     pgsOcr?: { available?: boolean };
+    playback?: PlaybackTitleSummary;
   }>(`/api/library/items/${id}`),
   previewPlan: async (id: string, draft: Record<string, unknown>) => {
     const res = await fetch(`/api/library/items/${id}/plan`, {
@@ -50,8 +51,8 @@ export const api = {
     });
     return (await res.json()) as { ok?: boolean; plan?: ExecutablePlan; errors?: Array<{ field: string; message: string }>; error?: string };
   },
-  queueCustom: (id: string, draft: Record<string, unknown>, runNow = false, assignedNodeId?: string) =>
-    req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow, assignedNodeId }) }),
+  queueCustom: (id: string, draft: Record<string, unknown>, runNow = false, assignedNodeId?: string, playbackDiagnosticId?: string) =>
+    req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow, assignedNodeId, playbackDiagnosticId }) }),
   searchPreferred: (id: string) =>
     req(`/api/library/items/${id}/search-preferred`, { method: "POST", body: JSON.stringify({ confirm: true }) }),
   replaceSearch: (id: string) =>
@@ -177,7 +178,37 @@ export const api = {
   playbackSettings: () => req<PlaybackSettingsPayload>("/api/playback/settings"),
   savePlaybackSettings: (body: { connections: PlaybackConnectionUpdate[] }) =>
     req<PlaybackSettingsPayload>("/api/playback/settings", { method: "PUT", body: JSON.stringify(body) }),
+  testPlaybackAccess: (id: string) =>
+    req<{ ok: boolean; playback?: { householdVisible?: boolean; message?: string | null; kind?: string } }>(
+      `/api/playback/connections/${encodeURIComponent(id)}/test`,
+      { method: "POST" },
+    ),
+  playbackDiagnostics: (query: PlaybackListParams = {}) =>
+    req<PlaybackListPage<PlaybackDiagnostic>>(`/api/playback/diagnostics?${playbackQuery(query)}`),
+  playbackObservations: (query: PlaybackListParams = {}) =>
+    req<PlaybackListPage<PlaybackObservation>>(`/api/playback/observations?${playbackQuery(query)}`),
+  dismissPlaybackDiagnostic: (id: string) =>
+    req<{ ok: true }>(`/api/playback/diagnostics/${encodeURIComponent(id)}/dismiss`, { method: "POST" }),
+  playbackRepairDraft: (id: string) =>
+    req<PlaybackRepairDraft>(`/api/playback/diagnostics/${encodeURIComponent(id)}/repair-draft`, { method: "POST" }),
+  clearPlaybackHistory: () =>
+    req<{ ok: true }>(`/api/playback/history`, { method: "DELETE" }),
 };
+
+function playbackQuery(query: PlaybackListParams): string {
+  const params = new URLSearchParams();
+  if (query.offset != null) params.set("offset", String(query.offset));
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.days != null) params.set("days", String(query.days));
+  if (query.connectionId) params.set("connectionId", query.connectionId);
+  if (query.deviceId) params.set("deviceId", query.deviceId);
+  if (query.client) params.set("client", query.client);
+  if (query.reasonFamily) params.set("reasonFamily", query.reasonFamily);
+  if (query.title) params.set("title", query.title);
+  if (query.itemId) params.set("itemId", query.itemId);
+  if (query.unmatched) params.set("unmatched", "1");
+  return params.toString();
+}
 
 export type LibraryPage<T> = {
   items: T[];
@@ -536,6 +567,84 @@ export type ExecutablePlan = {
   warning: string | null;
   estimatedOutputBytes: number | null;
   video: { kind: "copy" | "size" | "quality" };
+};
+export type PlaybackListParams = {
+  offset?: number;
+  limit?: number;
+  days?: 7 | 30;
+  connectionId?: string;
+  deviceId?: string;
+  client?: string;
+  reasonFamily?: string;
+  title?: string;
+  itemId?: string;
+  unmatched?: boolean;
+};
+export type PlaybackListPage<T> = LibraryPage<T> & {
+  windowDays: number;
+  windowStartAt: number;
+  connections: Array<{ connectionId: string; status: string; stale?: boolean; observePlayback?: boolean }>;
+};
+export type PlaybackRecommendation = {
+  kind: string;
+  explanation: string;
+  canRepair: boolean;
+  openEditor: boolean;
+  draft: Record<string, unknown> | null;
+  suggestionId: string | null;
+};
+export type PlaybackAfterKeep = { status: string; sentence: string | null };
+export type PlaybackDiagnostic = {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  deviceId: string;
+  deviceLabel: string;
+  itemName: string;
+  libraryItemIds: string[];
+  itemId: string | null;
+  href: string | null;
+  reasonFamily: string;
+  summary: string;
+  rawReasons: string[];
+  playMethod: string | null;
+  match: string;
+  occurrenceCount: number;
+  lastSeenAt: number;
+  recommendation: PlaybackRecommendation;
+  afterKeep: PlaybackAfterKeep;
+  stale: boolean;
+};
+export type PlaybackObservation = {
+  id: string;
+  connectionId: string;
+  deviceId: string;
+  deviceLabel: string;
+  itemName: string;
+  libraryItemIds: string[];
+  summary: string;
+  playMethod: string | null;
+  reasonFamily: string | null;
+  rawReasons: string[];
+  match: string;
+  lastSeenAt: number;
+  stale: boolean;
+};
+export type PlaybackRepairDraft = {
+  ok: true;
+  diagnosticId: string;
+  itemId: string;
+  href: string;
+  explanation: string;
+  kind: string;
+  draft: Record<string, unknown>;
+  queued: boolean;
+};
+export type PlaybackTitleSummary = {
+  windowDays: number;
+  observations: PlaybackObservation[];
+  afterKeep: PlaybackAfterKeep;
+  problemCount: number;
 };
 
 export function formatSize(bytes: number | null | undefined): string {

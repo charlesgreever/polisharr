@@ -5,6 +5,11 @@ import {
   PLAYBACK_PRIORITY_LABEL,
   SIZE_CAP_GRID,
   hardwareBackendLabel,
+  PLAYBACK_HISTORY_CLEARED,
+  PLAYBACK_HISTORY_CONFIRM,
+  PLAYBACK_OBSERVE_HELP,
+  playbackFamilyLabel,
+  playbackHealthLabel,
   sizeCapLabel,
   transcodeBelowTargetLabel,
 } from "./settings-copy";
@@ -25,6 +30,17 @@ describe("settings copy", () => {
   it("names the below-target checkbox after the current Encode Target", () => {
     expect(transcodeBelowTargetLabel("hevc")).toBe("Transcode video below Target Encode (HEVC)");
     expect(transcodeBelowTargetLabel("av1")).toBe("Transcode video below Target Encode (AV1)");
+  });
+
+  it("discloses device names and that clearing history leaves live coverage", () => {
+    expect(PLAYBACK_OBSERVE_HELP).toContain("device name");
+    expect(PLAYBACK_OBSERVE_HELP).toContain("not usernames or IP addresses");
+    expect(PLAYBACK_HISTORY_CLEARED).toBe("Viewing history cleared. Live playback coverage is unchanged.");
+    expect(PLAYBACK_HISTORY_CONFIRM).toContain("dismissed recommendations");
+    expect(playbackFamilyLabel("audio")).toBe("Audio conversion");
+    expect(playbackFamilyLabel("bitrate")).toBe("Bitrate limit");
+    expect(playbackHealthLabel("playing")).toBe("Jellyfin is playing");
+    expect(playbackHealthLabel("playing", true)).toBe("Last check is stale");
   });
 
   it("names encode APIs the same way Review does", () => {

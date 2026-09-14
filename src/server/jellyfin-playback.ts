@@ -316,9 +316,21 @@ export function parseTranscodeReasons(value: unknown): string[] {
   return [];
 }
 
+export function transcodeReasonFamilies(reasons: string[]): string[] {
+  const families: string[] = [];
+  const seen = new Set<string>();
+  for (const reason of reasons) {
+    const family = reasonFamilyOf(reason);
+    if (seen.has(family)) continue;
+    seen.add(family);
+    families.push(family);
+  }
+  return families;
+}
+
 export function transcodeReasonFamily(reasons: string[]): string | null {
-  if (reasons.length === 0) return null;
-  const families = [...new Set(reasons.map(reasonFamilyOf))];
+  const families = transcodeReasonFamilies(reasons);
+  if (families.length === 0) return null;
   if (families.length === 1) return families[0] ?? null;
   return "mixed";
 }

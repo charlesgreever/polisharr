@@ -39,7 +39,6 @@ import { testJellyfin, testPlex } from "./notify.ts";
 import { createJellyfinPlayback } from "./jellyfin-playback.ts";
 import {
   createPlaybackMonitor,
-  observationSummary,
   parsePlaybackSettingsInput,
   type PlaybackMonitor,
 } from "./playback-monitor.ts";
@@ -51,6 +50,11 @@ import {
   type PlaybackDecision,
 } from "./playback-policy.ts";
 import {
+  createPlaybackDiagnostics,
+  parsePlaybackListQuery,
+} from "./playback-diagnostics.ts";
+import {
+  PLAYBACK_DIAGNOSTIC_DAYS,
   PLAYBACK_HISTORY_DAYS,
   PLAYBACK_HISTORY_MAX,
   PLAYBACK_POLL_MS,
@@ -253,6 +257,19 @@ export function createApp(opts: AppOptions) {
     void playbackMonitor.refresh();
   };
   if (!isWorker) playbackMonitor.start();
+  function itemExcluded(item: { path: string; profile: string; tags: string[]; title: string; showTitle: string | null }): boolean {
+    return store.listExclusions().some((rule) => {
+      if (rule.kind === "path") return item.path.startsWith(rule.value);
+      if (rule.kind === "profile") return item.profile === rule.value;
+      if (rule.kind === "tag") return item.tags.includes(rule.value);
+      return item.title === rule.value || item.showTitle === rule.value;
+    });
+  }
+  const playbackDiagnostics = createPlaybackDiagnostics({
+    store,
+    clock: opts.clock,
+    isExcluded: (item) => itemExcluded(item),
+  });
   const sync = new LibrarySync({
     store,
     fetch: httpFetch,
@@ -824,27 +841,53 @@ export function createApp(opts: AppOptions) {
   });
 
   app.get("/api/playback/observations", (c) => {
-    const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
-    const unmatched = c.req.query("unmatched") === "1";
-    const connectionId = c.req.query("connectionId");
-    const listed = store.listPlaybackOccurrences({
-      offset,
-      limit,
-      unmatched: unmatched || undefined,
-      connectionId: connectionId || undefined,
-    });
+    const parsed = parsePlaybackListQuery(playbackQuery(c), { days: PLAYBACK_HISTORY_DAYS });
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const listed = playbackDiagnostics.listObservations(parsed.value);
     const coverage = playbackMonitor.coverage();
     const stale = new Set(coverage.connections.filter((row) => row.stale).map((row) => row.connectionId));
     return c.json({
       items: listed.items.map((row) => ({
         ...row,
-        summary: observationSummary(row),
         stale: stale.has(row.connectionId),
       })),
       total: listed.total,
       nextOffset: listed.nextOffset,
+      windowDays: listed.windowDays,
+      windowStartAt: listed.windowStartAt,
       connections: coverage.connections,
     });
+  });
+
+  app.get("/api/playback/diagnostics", (c) => {
+    const parsed = parsePlaybackListQuery(playbackQuery(c), { days: PLAYBACK_DIAGNOSTIC_DAYS });
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const listed = playbackDiagnostics.listDiagnostics(parsed.value);
+    const coverage = playbackMonitor.coverage();
+    const stale = new Set(coverage.connections.filter((row) => row.stale).map((row) => row.connectionId));
+    return c.json({
+      items: listed.items.map((row) => ({
+        ...row,
+        stale: stale.has(row.connectionId),
+      })),
+      total: listed.total,
+      nextOffset: listed.nextOffset,
+      windowDays: listed.windowDays,
+      windowStartAt: listed.windowStartAt,
+      connections: coverage.connections,
+    });
+  });
+
+  app.post("/api/playback/diagnostics/:id/dismiss", (c) => {
+    const result = playbackDiagnostics.dismiss(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/playback/diagnostics/:id/repair-draft", async (c) => {
+    const result = await playbackDiagnostics.repairDraft(c.req.param("id"));
+    if (!("ok" in result)) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, ...result.repair, queued: false });
   });
 
   app.delete("/api/playback/history", (c) => {
@@ -943,12 +986,7 @@ export function createApp(opts: AppOptions) {
 
   function isExcluded(item: ReturnType<Store["getItem"]>): boolean {
     if (!item) return false;
-    return store.listExclusions().some((rule) => {
-      if (rule.kind === "path") return item.path.startsWith(rule.value);
-      if (rule.kind === "profile") return item.profile === rule.value;
-      if (rule.kind === "tag") return item.tags.includes(rule.value);
-      return item.title === rule.value || item.showTitle === rule.value;
-    });
+    return itemExcluded(item);
   }
 
   app.get("/api/library/movies", (c) => {
@@ -1112,6 +1150,7 @@ export function createApp(opts: AppOptions) {
       },
       languageId: { available: Boolean(opts.runLanguageLid || opts.env.whisperLid) },
       pgsOcr: { available: Boolean(opts.runPgsOcr || opts.env.pgsOcr) },
+      playback: playbackDiagnostics.titleSummary(item.id),
     });
   });
 
@@ -1140,7 +1179,14 @@ export function createApp(opts: AppOptions) {
     if (!item) return c.json({ error: "That title is not in the library." }, 404);
     const report = store.getInspection(item.id);
     if (!report) return c.json({ error: "This file has not been inspected yet, or the path is unreadable." }, 400);
-    const body = await c.req.json<{ draft?: CustomPlanDraft; runNow?: boolean; assignedNodeId?: string }>();
+    const body = await c.req.json<{ draft?: CustomPlanDraft; runNow?: boolean; assignedNodeId?: string; playbackDiagnosticId?: string }>();
+    if (typeof body.playbackDiagnosticId === "string" && body.playbackDiagnosticId) {
+      const evidence = await playbackDiagnostics.revalidate(body.playbackDiagnosticId);
+      if (!("ok" in evidence)) return c.json({ error: evidence.error }, evidence.status);
+      if (evidence.item.id !== item.id) {
+        return c.json({ error: "That repair draft belongs to a different title." }, 409);
+      }
+    }
     const result = validateCustomPlan({
       item,
       report,
@@ -2081,6 +2127,21 @@ function suggestionSettingsChanged(current: Settings, next: Settings): boolean {
     JSON.stringify(current.sizeCaps) !== JSON.stringify(next.sizeCaps) ||
     JSON.stringify(current.suggestionDefaults) !== JSON.stringify(next.suggestionDefaults)
   );
+}
+
+function playbackQuery(c: Context): Record<string, string | undefined> {
+  return {
+    days: c.req.query("days"),
+    offset: c.req.query("offset"),
+    limit: c.req.query("limit"),
+    connectionId: c.req.query("connectionId"),
+    deviceId: c.req.query("deviceId"),
+    client: c.req.query("client"),
+    reasonFamily: c.req.query("reasonFamily"),
+    title: c.req.query("title"),
+    itemId: c.req.query("itemId"),
+    unmatched: c.req.query("unmatched"),
+  };
 }
 
 function pageRequest(rawOffset: string | undefined, rawLimit: string | undefined): { offset: number; limit: number } {

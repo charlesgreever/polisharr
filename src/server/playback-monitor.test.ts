@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "./store.ts";
-import { createPlaybackMonitor, mediaPathsEqual } from "./playback-monitor.ts";
+import { createPlaybackMonitor, mediaPathsEqual, parsePlaybackSettingsInput } from "./playback-monitor.ts";
 import type { LibraryItem } from "./types.ts";
 
 const stores: Store[] = [];
@@ -116,7 +116,11 @@ function monitorFor(db: Store, sessions: () => unknown, extras: { now?: () => nu
     fetch: (async (url) => {
       const text = String(url);
       if (text.endsWith("/Auth/Keys")) return json({ Items: [{ AccessToken: "server-key", AppName: "Polisharr" }] });
-      if (text.endsWith("/Sessions")) return json(sessions());
+      if (text.endsWith("/Sessions")) {
+        const payload = sessions();
+        if (payload instanceof Error) throw payload;
+        return json(payload);
+      }
       if (text.includes("/PlaybackInfo")) {
         return json({
           MediaSources: [
@@ -142,6 +146,63 @@ describe("playback path matching", () => {
     expect(mediaPathsEqual("/mnt/nas/movies/film-1080.mkv", "/mnt/nas/movies/film-1080.mkv")).toBe(true);
     expect(mediaPathsEqual("/mnt/nas/movies/film-1080.mkv", "/mnt/other/film-1080.mkv")).toBe(false);
     expect(mediaPathsEqual("/mnt/nas/movies/film-1080.mkv", "The Film")).toBe(false);
+  });
+});
+
+describe("playback settings input", () => {
+  it("keeps stored coverage when a PUT only enables observation", () => {
+    const parsed = parsePlaybackSettingsInput(
+      { connections: [{ connectionId: "jf", observePlayback: true }] },
+      {
+        jellyfinIds: ["jf"],
+        arrIds: ["radarr", "sonarr"],
+        nodeIds: ["node-1"],
+        current: [{
+          connectionId: "jf",
+          observePlayback: false,
+          retainHistory: true,
+          protectNodes: true,
+          protectedNodeIds: ["node-1"],
+          protectReplacement: true,
+          coveredArrInstanceIds: ["radarr", "sonarr"],
+        }],
+      },
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.connections[0]).toEqual({
+      connectionId: "jf",
+      observePlayback: true,
+      retainHistory: true,
+      protectNodes: true,
+      protectedNodeIds: ["node-1"],
+      protectReplacement: true,
+      coveredArrInstanceIds: ["radarr", "sonarr"],
+    });
+  });
+
+  it("clears Arr coverage only when the list is sent", () => {
+    const parsed = parsePlaybackSettingsInput(
+      { connections: [{ connectionId: "jf", coveredArrInstanceIds: [] }] },
+      {
+        jellyfinIds: ["jf"],
+        arrIds: ["radarr"],
+        nodeIds: [],
+        current: [{
+          connectionId: "jf",
+          observePlayback: true,
+          retainHistory: true,
+          protectNodes: false,
+          protectedNodeIds: [],
+          protectReplacement: false,
+          coveredArrInstanceIds: ["radarr"],
+        }],
+      },
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.connections[0]?.observePlayback).toBe(true);
+    expect(parsed.connections[0]?.coveredArrInstanceIds).toEqual([]);
   });
 });
 
@@ -204,11 +265,27 @@ describe("playback monitor", () => {
       fetch: (async (url) => {
         if (String(url).endsWith("/Auth/Keys")) return json({ Items: [{ AccessToken: "server-key" }] });
         if (String(url).endsWith("/Sessions")) {
-          return json([playing({
-            NowPlayingItem: { Id: "item-x", Name: "The Film", Type: "Movie", MediaType: "Video" },
-            PlayState: { IsPaused: false, PlayMethod: "DirectPlay" },
-            TranscodingInfo: null,
-          })]);
+          return json([
+            playing({
+              Id: "sess-title",
+              NowPlayingItem: { Id: "item-x", Name: "The Film", Type: "Movie", MediaType: "Video" },
+              PlayState: { IsPaused: false, PlayMethod: "DirectPlay" },
+              TranscodingInfo: null,
+            }),
+            playing({
+              Id: "sess-base",
+              NowPlayingItem: {
+                Id: "item-base",
+                Name: "The Film",
+                Type: "Movie",
+                MediaType: "Video",
+                Path: "/downloads/film-1080.mkv",
+                MediaSources: [{ Id: "src-base", Path: "/downloads/film-1080.mkv", Protocol: "File", IsRemote: false }],
+              },
+              PlayState: { IsPaused: false, MediaSourceId: "src-base", PlayMethod: "DirectPlay" },
+              TranscodingInfo: null,
+            }),
+          ]);
         }
         return json({ MediaSources: [] });
       }) as typeof fetch,
@@ -217,8 +294,10 @@ describe("playback monitor", () => {
     db.savePlaybackSettings([{ ...db.defaultPlaybackConnectionSettings("jf"), observePlayback: true }]);
     monitor.start();
     await monitor.refresh();
-    expect(db.listPlaybackOccurrences().items[0]?.match).toBe("unmatched");
-    expect(db.listPlaybackOccurrences().items[0]?.libraryItemIds).toEqual([]);
+    const rows = db.listPlaybackOccurrences().items;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.match === "unmatched" && row.libraryItemIds.length === 0)).toBe(true);
+    expect(rows.some((row) => row.sessionId === "sess-base")).toBe(true);
     expect(db.errorPage(0, 50).items).toEqual([]);
   });
 
@@ -250,23 +329,13 @@ describe("playback monitor", () => {
     now += 10_000;
     await monitor.refresh();
     const beforeFail = db.listPlaybackOccurrences().items.find((row) => row.sessionId === "sess-fail");
+    expect(beforeFail?.endedAt).toBeNull();
     payload = new Error("offline");
-    const failing = createPlaybackMonitor({
-      store: db,
-      decrypt: (value) => value,
-      clock: () => now + 10_000,
-      pollMs: 0,
-      fetch: (async (url) => {
-        if (String(url).endsWith("/Auth/Keys")) return json({ Items: [{ AccessToken: "server-key" }] });
-        throw new Error("offline");
-      }) as typeof fetch,
-    });
-    monitors.push(failing);
-    failing.start();
-    await failing.refresh();
+    now += 10_000;
+    await monitor.refresh();
     const afterFail = db.getPlaybackOccurrence(beforeFail!.id);
     expect(afterFail?.gap).toBe(true);
-    expect(afterFail?.endedAt).not.toBeNull();
+    expect(afterFail?.endedAt).toBe(now);
   });
 
   it("shares one in-flight fetch across two refresh calls and a timer", async () => {
@@ -337,6 +406,53 @@ describe("playback monitor", () => {
     await monitor.refresh();
     expect(db.listPlaybackOccurrences().items).toHaveLength(0);
     expect(monitor.coverage().connections[0]?.status).toBe("playing");
+  });
+
+  it("re-checks household access after the saved token changes", async () => {
+    const db = store();
+    seedLibrary(db);
+    let secret = "user-token";
+    const monitor = createPlaybackMonitor({
+      store: db,
+      decrypt: () => secret,
+      clock: () => 5_000,
+      pollMs: 0,
+      fetch: (async (url) => {
+        if (String(url).endsWith("/Auth/Keys")) {
+          if (secret === "user-token") return json({}, 403);
+          return json({ Items: [{ AccessToken: "server-key" }] });
+        }
+        if (String(url).endsWith("/Sessions")) return json([]);
+        return json({ MediaSources: [] });
+      }) as typeof fetch,
+    });
+    monitors.push(monitor);
+    db.savePlaybackSettings([{ ...db.defaultPlaybackConnectionSettings("jf"), observePlayback: true }]);
+    monitor.start();
+    await monitor.refresh();
+    expect(monitor.coverage().connections[0]).toMatchObject({
+      credentialKind: "userToken",
+      householdVisible: false,
+      status: "unavailable",
+    });
+    secret = "server-key";
+    await monitor.refresh();
+    expect(monitor.coverage().connections[0]).toMatchObject({
+      credentialKind: "apiKey",
+      householdVisible: true,
+      status: "idle",
+    });
+  });
+
+  it("drops live coverage when a Jellyfin connection is forgotten", async () => {
+    const db = store();
+    seedLibrary(db);
+    const monitor = monitorFor(db, () => []);
+    await monitor.refresh();
+    expect(monitor.coverage().connections.some((row) => row.connectionId === "jf")).toBe(true);
+    db.deleteInstance("jf");
+    monitor.forgetConnection("jf");
+    expect(monitor.coverage().connections.some((row) => row.connectionId === "jf")).toBe(false);
   });
 
   it("does not poll Jellyfin when observation is off", async () => {

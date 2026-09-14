@@ -157,6 +157,16 @@ describe("playback HTTP", () => {
     const body = await listed.json() as { connections: Array<{ observePlayback: boolean; health: { status: string } }> };
     expect(body.connections[0]?.observePlayback).toBe(false);
     expect(body.connections[0]?.health.status).toBe("off");
+    const radarrId = ctx.store.listInstances().find((row) => row.kind === "radarr")?.id;
+    const enabled = await ctx.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({ connections: [{ connectionId: ctx.jfId, observePlayback: true }] }),
+    });
+    const saved = await enabled.json() as { connections: Array<{ observePlayback: boolean; coveredArrInstanceIds: string[]; protectNodes: boolean }> };
+    expect(saved.connections[0]?.observePlayback).toBe(true);
+    expect(saved.connections[0]?.protectNodes).toBe(false);
+    expect(saved.connections[0]?.coveredArrInstanceIds).toEqual([radarrId]);
   });
 
   it("reports a server API key as household-capable and a user token as missing access", async () => {
@@ -258,6 +268,28 @@ describe("playback HTTP", () => {
     const cleared = await ctx.app.request("/api/playback/history", { method: "DELETE", headers: ctx.headers });
     const clearedBody = await cleared.json() as { coverage: { connections: Array<{ status: string }> } };
     expect(clearedBody.coverage.connections[0]?.status).toBe("playing");
+  });
+
+  it("forgets playback coverage when the Jellyfin connection is removed", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    await ctx.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({ connections: [{ connectionId: ctx.jfId, observePlayback: true }] }),
+    });
+    expect((await (await ctx.app.request("/api/playback/settings", { headers: ctx.headers })).json() as {
+      connections: Array<{ connectionId: string }>;
+    }).connections.map((row) => row.connectionId)).toEqual([ctx.jfId]);
+    const removed = await ctx.app.request(`/api/integrations/${ctx.jfId}`, { method: "DELETE", headers: ctx.headers });
+    expect(removed.status).toBe(200);
+    const settings = await (await ctx.app.request("/api/playback/settings", { headers: ctx.headers })).json() as {
+      connections: Array<{ connectionId: string }>;
+    };
+    const observations = await (await ctx.app.request("/api/playback/observations", { headers: ctx.headers })).json() as {
+      connections: Array<{ connectionId: string }>;
+    };
+    expect(settings.connections).toEqual([]);
+    expect(observations.connections).toEqual([]);
   });
 
   it("blocks playback routes on a worker", async () => {

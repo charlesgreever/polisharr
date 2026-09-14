@@ -615,11 +615,15 @@ export function createApp(opts: AppOptions) {
       secret: secretPlain ? encryptSecret(secret, secretPlain) : undefined,
       enabled: body.enabled ?? true,
     });
+    if (body.kind === "jellyfin") playbackMonitor.forgetConnection(id);
     return c.json({ ok: true, id, instances: publicInstances() });
   });
 
   app.delete("/api/integrations/:id", (c) => {
-    store.deleteInstance(c.req.param("id"));
+    const id = c.req.param("id");
+    const inst = store.getInstance(id);
+    store.deleteInstance(id);
+    if (inst?.kind === "jellyfin") playbackMonitor.forgetConnection(id);
     return c.json({ ok: true, instances: publicInstances() });
   });
 
@@ -650,7 +654,12 @@ export function createApp(opts: AppOptions) {
     const jellyfinIds = store.listInstances().filter((row) => row.kind === "jellyfin").map((row) => row.id);
     const arrIds = store.listInstances().filter((row) => row.kind === "radarr" || row.kind === "sonarr").map((row) => row.id);
     const nodeIds = [...store.listNodes().map((row) => row.id), store.localNodeId()];
-    const parsed = parsePlaybackSettingsInput(body, { jellyfinIds, arrIds, nodeIds });
+    const parsed = parsePlaybackSettingsInput(body, {
+      jellyfinIds,
+      arrIds,
+      nodeIds,
+      current: store.getPlaybackSettings(),
+    });
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     const overlay = new Map(parsed.connections.map((row) => [row.connectionId, row]));
     const next = store.getPlaybackSettings().map((row) => overlay.get(row.connectionId) ?? row);

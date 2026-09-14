@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { displayTitle } from "./titles.ts";
 import type { Store } from "./store.ts";
@@ -13,6 +13,7 @@ import {
   type PlaybackHealthStatus,
   type PlaybackMatchOutcome,
   type PlaybackOccurrence,
+  type LibraryItem,
 } from "./types.ts";
 import {
   createJellyfinPlayback,
@@ -35,6 +36,7 @@ export type PlaybackMonitor = {
   stop(): Promise<void>;
   refresh(): Promise<void>;
   coverage(): PlaybackCoverage;
+  forgetConnection(connectionId: string): void;
 };
 
 export type PlaybackMonitorOptions = {
@@ -51,6 +53,7 @@ export type PlaybackMonitorOptions = {
 type ConnectionLive = {
   health: PlaybackConnectionHealth;
   missCounts: Map<string, number>;
+  tokenFingerprint: string | null;
 };
 
 export function canonicalMediaPath(path: string): string {
@@ -70,7 +73,12 @@ export function mediaPathsEqual(left: string, right: string): boolean {
 
 export function parsePlaybackSettingsInput(
   body: unknown,
-  context: { jellyfinIds: string[]; arrIds: string[]; nodeIds: string[] },
+  context: {
+    jellyfinIds: string[];
+    arrIds: string[];
+    nodeIds: string[];
+    current: PlaybackConnectionSettings[];
+  },
 ): { ok: true; connections: PlaybackConnectionSettings[] } | { ok: false; error: string } {
   const raw = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
   if (!raw) return { ok: false, error: "Playback settings must be a JSON object." };
@@ -79,6 +87,7 @@ export function parsePlaybackSettingsInput(
   const jellyfin = new Set(context.jellyfinIds);
   const arrs = new Set(context.arrIds);
   const nodes = new Set(context.nodeIds);
+  const previous = new Map(context.current.map((row) => [row.connectionId, row]));
   const seen = new Set<string>();
   const connections: PlaybackConnectionSettings[] = [];
   for (const entry of raw.connections) {
@@ -99,24 +108,41 @@ export function parsePlaybackSettingsInput(
     if ("protectReplacement" in row && typeof row.protectReplacement !== "boolean") {
       return { ok: false, error: "Protect replacement must be true or false." };
     }
-    const protectedNodeIds = parseIdList(row.protectedNodeIds, "protected node");
-    if (!protectedNodeIds.ok) return protectedNodeIds;
-    for (const id of protectedNodeIds.ids) {
-      if (!nodes.has(id)) return { ok: false, error: "That encode node is not registered." };
+    const stored = previous.get(row.connectionId) ?? {
+      connectionId: row.connectionId,
+      observePlayback: false,
+      retainHistory: true,
+      protectNodes: false,
+      protectedNodeIds: [] as string[],
+      protectReplacement: false,
+      coveredArrInstanceIds: context.arrIds,
+    };
+    let protectedNodeIds = stored.protectedNodeIds;
+    if ("protectedNodeIds" in row) {
+      const parsedNodes = parseIdList(row.protectedNodeIds, "protected node");
+      if (!parsedNodes.ok) return parsedNodes;
+      for (const id of parsedNodes.ids) {
+        if (!nodes.has(id)) return { ok: false, error: "That encode node is not registered." };
+      }
+      protectedNodeIds = parsedNodes.ids;
     }
-    const covered = parseIdList(row.coveredArrInstanceIds, "Arr instance");
-    if (!covered.ok) return covered;
-    for (const id of covered.ids) {
-      if (!arrs.has(id)) return { ok: false, error: "That Radarr or Sonarr connection does not exist." };
+    let coveredArrInstanceIds = stored.coveredArrInstanceIds;
+    if ("coveredArrInstanceIds" in row) {
+      const covered = parseIdList(row.coveredArrInstanceIds, "Arr instance");
+      if (!covered.ok) return covered;
+      for (const id of covered.ids) {
+        if (!arrs.has(id)) return { ok: false, error: "That Radarr or Sonarr connection does not exist." };
+      }
+      coveredArrInstanceIds = covered.ids;
     }
     connections.push({
       connectionId: row.connectionId,
-      observePlayback: row.observePlayback === true,
-      retainHistory: row.retainHistory === undefined ? true : row.retainHistory === true,
-      protectNodes: row.protectNodes === true,
-      protectedNodeIds: protectedNodeIds.ids,
-      protectReplacement: row.protectReplacement === true,
-      coveredArrInstanceIds: covered.ids,
+      observePlayback: "observePlayback" in row ? row.observePlayback === true : stored.observePlayback,
+      retainHistory: "retainHistory" in row ? row.retainHistory === true : stored.retainHistory,
+      protectNodes: "protectNodes" in row ? row.protectNodes === true : stored.protectNodes,
+      protectedNodeIds,
+      protectReplacement: "protectReplacement" in row ? row.protectReplacement === true : stored.protectReplacement,
+      coveredArrInstanceIds,
     });
   }
   return { ok: true, connections };
@@ -190,11 +216,13 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
     },
     coverage() {
       const settings = store.getPlaybackSettings();
-      const byId = new Map(settings.map((row) => [row.connectionId, row]));
-      const ids = new Set([...byId.keys(), ...live.keys()]);
       return {
-        connections: [...ids].map((id) => healthFor(id, byId.get(id))),
+        connections: settings.map((row) => healthFor(row.connectionId, row)),
       };
+    },
+    forgetConnection(connectionId: string) {
+      live.delete(connectionId);
+      playback.invalidateSourceCache(connectionId);
     },
   };
 }
@@ -212,16 +240,8 @@ async function pollAll(input: {
   for (const row of settings) {
     if (!row.observePlayback) {
       input.store.closeOpenPlaybackOccurrences(row.connectionId, input.now, true);
-      const current = input.live.get(row.connectionId);
-      input.live.set(row.connectionId, {
-        missCounts: new Map(),
-        health: {
-          ...(current?.health ?? unknownHealth(row.connectionId, false)),
-          observePlayback: false,
-          status: "off",
-          stale: false,
-        },
-      });
+      input.live.delete(row.connectionId);
+      input.playback.invalidateSourceCache(row.connectionId);
       continue;
     }
     const inst = input.store.getInstance(row.connectionId);
@@ -240,7 +260,7 @@ async function pollAll(input: {
     } catch {
       writeHealth(input.live, row, {
         status: "error",
-        lastError: "The saved Jellyfin token could not be read.",
+        lastError: "Polisharr could not read the saved Jellyfin token.",
         complete: false,
         stale: true,
       }, input.now, input.staleMs);
@@ -280,6 +300,12 @@ async function pollAll(input: {
       access,
     });
   }
+  const known = new Set(settings.map((row) => row.connectionId));
+  for (const id of [...input.live.keys()]) {
+    if (known.has(id)) continue;
+    input.live.delete(id);
+    input.playback.invalidateSourceCache(id);
+  }
 }
 
 async function ensureCredential(
@@ -289,11 +315,23 @@ async function ensureCredential(
   url: string,
   token: string,
 ): Promise<{ credentialKind: PlaybackCredentialKind; householdVisible: boolean }> {
-  const existing = live.get(settings.connectionId)?.health;
-  if (existing && existing.credentialKind !== "unknown") {
-    return { credentialKind: existing.credentialKind, householdVisible: existing.householdVisible };
+  const fingerprint = tokenFingerprint(token);
+  const existing = live.get(settings.connectionId);
+  if (
+    existing
+    && existing.tokenFingerprint === fingerprint
+    && existing.health.credentialKind !== "unknown"
+  ) {
+    return { credentialKind: existing.health.credentialKind, householdVisible: existing.health.householdVisible };
   }
   const access = await playback.testPlaybackAccess({ url, token, checkSessions: false });
+  const state = existing ?? {
+    health: unknownHealth(settings.connectionId, settings.observePlayback),
+    missCounts: new Map<string, number>(),
+    tokenFingerprint: fingerprint,
+  };
+  state.tokenFingerprint = fingerprint;
+  live.set(settings.connectionId, state);
   return { credentialKind: access.credentialKind, householdVisible: access.householdVisible };
 }
 
@@ -313,6 +351,7 @@ async function applySnapshot(input: {
   const state = input.live.get(input.settings.connectionId) ?? {
     health: unknownHealth(input.settings.connectionId, true),
     missCounts: new Map<string, number>(),
+    tokenFingerprint: null,
   };
   const playing = input.snapshot.sessions.filter(sessionHasCurrentItem);
   const seen = new Set<string>();
@@ -466,9 +505,7 @@ async function resolveMatch(input: {
     path = resolved.path;
   }
   const canonical = canonicalMediaPath(path);
-  const items = input.store.itemsForCanonicalPath(canonical).length
-    ? input.store.itemsForCanonicalPath(canonical)
-    : input.store.itemsForCanonicalPath(path);
+  const items = libraryItemsForPath(input.store, path);
   if (items.length === 0) return { ...unmatched, path: canonical || path };
   const revision = await input.statFile(items[0]!.path) ?? {
     canonicalPath: canonicalMediaPath(items[0]!.path),
@@ -490,9 +527,20 @@ async function revisionForPath(
   statFile: (path: string) => Promise<PlaybackFileRevision | null>,
 ): Promise<PlaybackFileRevision | null> {
   if (!path) return null;
-  const items = store.itemsForCanonicalPath(path);
+  const items = libraryItemsForPath(store, path);
   if (items[0]) return statFile(items[0].path);
   return statFile(path);
+}
+
+function libraryItemsForPath(store: Store, path: string): LibraryItem[] {
+  const exact = store.itemsForCanonicalPath(canonicalMediaPath(path));
+  const matched = exact.filter((item) => mediaPathsEqual(item.path, path));
+  if (matched.length) return matched;
+  if (path !== canonicalMediaPath(path)) {
+    const raw = store.itemsForCanonicalPath(path).filter((item) => mediaPathsEqual(item.path, path));
+    if (raw.length) return raw;
+  }
+  return store.listItems().filter((item) => mediaPathsEqual(item.path, path));
 }
 
 function titleForItems(store: Store, ids: string[], fallback: string): string {
@@ -554,7 +602,15 @@ function writeHealth(
   };
   health.stale = isStale(health, settings, now, staleMs);
   health.status = effectiveStatus(health, settings, now, staleMs);
-  live.set(settings.connectionId, { health, missCounts: current?.missCounts ?? new Map() });
+  live.set(settings.connectionId, {
+    health,
+    missCounts: current?.missCounts ?? new Map(),
+    tokenFingerprint: current?.tokenFingerprint ?? null,
+  });
+}
+
+function tokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function isStale(health: PlaybackConnectionHealth, settings: PlaybackConnectionSettings | undefined, now: number, staleMs: number): boolean {

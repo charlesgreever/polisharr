@@ -225,10 +225,14 @@ export function createJellyfinPlayback(opts: JellyfinPlaybackOptions): JellyfinP
     },
 
     async resolveMediaSource(input) {
+      const at = now();
+      for (const [cachedKey, entry] of cache) {
+        if (entry.expiresAt <= at) cache.delete(cachedKey);
+      }
       const key = `${input.connectionId}:${input.itemId}:${input.mediaSourceId}`;
       const revisionKey = input.revisionKey ?? "";
       const hit = cache.get(key);
-      if (hit && hit.expiresAt > now() && hit.revisionKey === revisionKey) return hit.value;
+      if (hit && hit.expiresAt > at && hit.revisionKey === revisionKey) return hit.value;
       const value = await limitFor(input.connectionId).run(() => resolveFromServer({
         fetch: httpFetch,
         url: input.url,
@@ -238,7 +242,7 @@ export function createJellyfinPlayback(opts: JellyfinPlaybackOptions): JellyfinP
         timeoutMs,
         maxBytes,
       }));
-      cache.set(key, { value, expiresAt: now() + cacheMs, revisionKey });
+      cache.set(key, { value, expiresAt: at + cacheMs, revisionKey });
       return value;
     },
 

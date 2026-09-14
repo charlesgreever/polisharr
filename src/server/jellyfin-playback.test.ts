@@ -229,6 +229,29 @@ describe("Jellyfin session snapshot", () => {
     expect(calls.some((call) => call.url.includes("POST"))).toBe(false);
   });
 
+  it("drops a cached source when the connection cache is invalidated", async () => {
+    let playbackInfo = 0;
+    const client = createJellyfinPlayback({
+      fetch: (async (url) => {
+        if (String(url).includes("/PlaybackInfo")) {
+          playbackInfo += 1;
+          return json({ MediaSources: [{ Id: "src-1080", Path: "/mnt/nas/movies/film-1080.mkv", Protocol: "File" }] });
+        }
+        return json({}, 404);
+      }) as typeof fetch,
+      clock: () => 1_000,
+    });
+    const input = {
+      url: "http://jellyfin:8096", token: "k", connectionId: "jf", itemId: "item-1", mediaSourceId: "src-1080",
+    };
+    await client.resolveMediaSource(input);
+    await client.resolveMediaSource(input);
+    expect(playbackInfo).toBe(1);
+    client.invalidateSourceCache("jf");
+    await client.resolveMediaSource(input);
+    expect(playbackInfo).toBe(2);
+  });
+
   it("invalidates a cached source when the local revision changes", async () => {
     let playbackInfo = 0;
     const client = createJellyfinPlayback({

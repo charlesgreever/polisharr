@@ -820,7 +820,8 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   const args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y"];
   if (req.backend === "cuda" || req.backend === "vaapi") {
     // ffmpeg 7 inserts software auto_scale after scale_cuda/scale_vaapi, which fails with ENOSYS.
-    args.push("-auto_conversion_filters", "0");
+    // jellyfin-ffmpeg treats this as a flag: `-auto_conversion_filters 0` opens an output named "0".
+    args.push("-noauto_conversion_filters");
   }
   if (req.backend === "vaapi") {
     const device = req.vaapiDevice || "/dev/dri/renderD128";

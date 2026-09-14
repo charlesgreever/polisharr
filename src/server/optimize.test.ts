@@ -562,15 +562,15 @@ describe("ffmpeg encode arguments", () => {
     expect(args[args.indexOf("-hwaccel") + 1]).toBe("cuda");
     expect(args[args.indexOf("-hwaccel_output_format") + 1]).toBe("cuda");
     expect(args.join(" ")).toContain("scale_cuda=format=p010");
-    expect(args).toContain("-auto_conversion_filters");
-    expect(args[args.indexOf("-auto_conversion_filters") + 1]).toBe("0");
+    expect(args).toContain("-noauto_conversion_filters");
+    expect(args).not.toContain("-auto_conversion_filters");
     expect(args).toContain("-reinit_filter:v");
     expect(args[args.indexOf("-reinit_filter:v") + 1]).toBe("0");
     expect(args).not.toContain("p010le");
     expect(args).not.toContain("yuv420p");
   });
 
-  it("stops ffmpeg from inserting a software scale after CUDA filters on an 8-bit H264 encode", () => {
+  it("disables ffmpeg 7 auto_scale with a flag so 0 is not an output filename", () => {
     const plan = planFromSuggestion({ ...suggestion, actions: ["transcode"] });
     const args = encodeArgs(source, "/tmp/out.mkv", {
       sourcePath: source,
@@ -605,7 +605,8 @@ describe("ffmpeg encode arguments", () => {
     });
     expect(args).toContain("av1_nvenc");
     expect(args.join(" ")).toContain("scale_cuda=format=nv12");
-    expect(args[args.indexOf("-auto_conversion_filters") + 1]).toBe("0");
+    expect(args).toContain("-noauto_conversion_filters");
+    expect(args).not.toContain("-auto_conversion_filters");
     expect(args[args.indexOf("-reinit_filter:v") + 1]).toBe("0");
   });
 

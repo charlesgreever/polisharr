@@ -9,16 +9,15 @@ export type ExternalLink = { label: string; href: string };
 export function radarrMovieHref(baseUrl: string, tmdbId?: number | null, titleSlug?: string | null): string | null {
   const base = trimUrl(baseUrl);
   if (!base) return null;
-  if (tmdbId && tmdbId > 0) return `${base}/movie/${tmdbId}`;
-  const slug = titleSlug?.trim();
-  if (slug) return `${base}/movie/${encodeURIComponent(slug)}`;
-  return null;
+  // Radarr 6 routes /movie/:titleSlug. The API slug is the TMDB id as a string.
+  const slug = titleSlug?.trim() || (tmdbId && tmdbId > 0 ? String(tmdbId) : "");
+  return slug ? `${base}/movie/${encodeURIComponent(slug)}` : null;
 }
 
 export function sonarrSeriesHref(baseUrl: string, tvdbId?: number | null, titleSlug?: string | null): string | null {
   const base = trimUrl(baseUrl);
   if (!base) return null;
-  if (tvdbId && tvdbId > 0) return `${base}/series/${tvdbId}`;
+  // Sonarr routes /series/:titleSlug using a name slug, not the TVDB id.
   const slug = titleSlug?.trim();
   if (slug) return `${base}/series/${encodeURIComponent(slug)}`;
   return null;

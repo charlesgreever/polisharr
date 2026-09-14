@@ -10,23 +10,25 @@ import {
 } from "./external-links.ts";
 
 describe("Arr web links", () => {
-  it("opens a Radarr movie by TMDB id and strips a trailing slash on the instance URL", () => {
+  it("opens a Radarr movie by title slug and strips a trailing slash on the instance URL", () => {
     expect(radarrMovieHref("http://192.168.1.10:7878/", 438631, "dune-part-two-438631")).toBe(
-      "http://192.168.1.10:7878/movie/438631",
+      "http://192.168.1.10:7878/movie/dune-part-two-438631",
+    );
+    expect(radarrMovieHref("http://192.168.1.10:7878/", 13187, "13187")).toBe(
+      "http://192.168.1.10:7878/movie/13187",
     );
   });
 
-  it("falls back to the title slug and omits a link when Radarr sent no ids", () => {
-    expect(radarrMovieHref("http://radarr:7878", null, "dune-part-two-438631")).toBe(
-      "http://radarr:7878/movie/dune-part-two-438631",
-    );
+  it("falls back to the TMDB id and omits a link when Radarr sent no slug", () => {
+    expect(radarrMovieHref("http://radarr:7878", 438631, "")).toBe("http://radarr:7878/movie/438631");
     expect(radarrMovieHref("http://radarr:7878", 0, "")).toBeNull();
   });
 
-  it("opens a Sonarr series by TVDB id", () => {
-    expect(sonarrSeriesHref("http://192.168.1.10:8989", 71470, "star-trek-the-next-generation-71470")).toBe(
-      "http://192.168.1.10:8989/series/71470",
+  it("opens a Sonarr series by name slug, not the TVDB id", () => {
+    expect(sonarrSeriesHref("http://192.168.1.10:8989", 71470, "star-trek-the-next-generation")).toBe(
+      "http://192.168.1.10:8989/series/star-trek-the-next-generation",
     );
+    expect(sonarrSeriesHref("http://192.168.1.10:8989", 71470, null)).toBeNull();
   });
 
   it("labels movie links Radarr and episode links Sonarr, and never uses the internal Arr id", () => {
@@ -41,7 +43,8 @@ describe("Arr web links", () => {
       instanceKind: "sonarr",
       instanceUrl: "http://sonarr:8989",
       tvdbId: 71470,
-    })).toEqual({ label: "Open in Sonarr", href: "http://sonarr:8989/series/71470" });
+      titleSlug: "star-trek-the-next-generation",
+    })).toEqual({ label: "Open in Sonarr", href: "http://sonarr:8989/series/star-trek-the-next-generation" });
     expect(arrLinkForLibraryItem({
       type: "movie",
       instanceKind: "radarr",

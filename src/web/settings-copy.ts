@@ -39,3 +39,43 @@ export function hardwareBackendLabel(backend: string): string {
 }
 
 export const FIELD_CONTROL = "h-10 w-full";
+
+export const PLAYBACK_PRIORITY_LABEL = "Let Jellyfin playback take priority";
+export const PLAYBACK_PRIORITY_HELP = "Mapped encode nodes skip new work while this Jellyfin server is playing video. Running jobs finish. Run now still waits for playback.";
+export const PLAYBACK_NODE_HELP = "Pick the encode nodes that share hardware with this Jellyfin server.";
+export const PLAYBACK_COVERAGE_LABEL = "Covered libraries";
+export const PLAYBACK_COVERAGE_HELP = "Replacement protection uses these Radarr and Sonarr libraries.";
+export const PLAYBACK_REPLACEMENT_LABEL = "Protect file replacement";
+export const PLAYBACK_HOUSEHOLD_UNAVAILABLE = "This Jellyfin login cannot see household playback. Use a server API key.";
+export const PLAYBACK_OBSERVE_HELP =
+  "When this is on, Polisharr records which Jellyfin player converted a file and why. It stores the device name and viewing time, not usernames or IP addresses.";
+
+export const PLAYBACK_HISTORY_CLEARED =
+  "Viewing history cleared. Live playback coverage is unchanged.";
+
+export const PLAYBACK_HISTORY_CONFIRM =
+  "Clear all viewing history and dismissed recommendations? Live playback coverage stays on.";
+
+export function playbackFamilyLabel(family: string): string {
+  if (family === "audio") return "Audio conversion";
+  if (family === "video") return "Video conversion";
+  if (family === "subtitle") return "Subtitle conversion";
+  if (family === "container") return "Container conversion";
+  if (family === "bitrate") return "Bitrate limit";
+  if (family === "unknown") return "Unknown reason";
+  if (family === "mixed") return "More than one reason";
+  if (family === "other") return "Other conversion";
+  return family;
+}
+
+export function playbackHealthLabel(status: string, stale = false): string {
+  if (status === "off") return "Observation is off";
+  if (stale || status === "stale") return "Last check is stale";
+  if (status === "playing") return "Jellyfin is playing";
+  if (status === "idle") return "Jellyfin is idle";
+  if (status === "unknown") return "Playback status is not known yet";
+  if (status === "error") return "Jellyfin could not be reached";
+  if (status === "incomplete") return "The last Jellyfin response was incomplete";
+  if (status === "unavailable") return "Jellyfin playback is unavailable";
+  return status;
+}

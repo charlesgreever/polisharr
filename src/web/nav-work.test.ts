@@ -34,6 +34,8 @@ describe("sidebar work counts", () => {
     expect(navBadgeCount("/suggestions", emptyWorkSnapshot())).toBeNull();
     expect(navBadgeCount("/errors", emptyWorkSnapshot())).toBeNull();
     expect(navBadgeCount("/", work)).toBeNull();
+    expect(navBadgeCount("/playback", work)).toBeNull();
+    expect(navBadgeCount("/playback", { ...work, errors: 7, suggestions: 5 })).toBeNull();
     expect((work.movieSuggestions ?? 0) + (work.seriesSuggestions ?? 0)).toBe(work.suggestions);
   });
 

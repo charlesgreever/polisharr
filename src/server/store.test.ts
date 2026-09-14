@@ -97,6 +97,7 @@ describe("store schema migration", () => {
         enabled: true,
         version: "0.0.0",
         currentJobId: null,
+        preview: null,
       },
     ]);
   });
@@ -444,6 +445,46 @@ describe("store schema migration", () => {
     expect(store.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["pin-a", "pin-b", "pool-a"]);
   });
 
+  it("does not count playback-blocked peers when spreading pool jobs", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-spread-play-")), "polisharr.db"));
+    stores.push(store);
+    const hardware = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    store.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: "mac", name: "MacBook Pro", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    const plan = {
+      origin: "bulk" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    for (const id of ["pool-a", "pool-b", "pool-c", "pool-d", "pool-e"]) {
+      store.insertJob({
+        id, itemId: id, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+        error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: null,
+      });
+    }
+    expect(store.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["pool-a"]);
+    const open = new Store(join(mkdtempSync(join(tmpdir(), "opt-spread-play-open-")), "polisharr.db"));
+    stores.push(open);
+    open.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    open.upsertNode({
+      id: "mac", name: "MacBook Pro", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    for (const id of ["pool-a", "pool-b", "pool-c", "pool-d", "pool-e"]) {
+      open.insertJob({
+        id, itemId: id, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+        error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: null,
+      });
+    }
+    expect(open.claimQueuedJobs("5090", 4, 1_000, 30_000, ["mac"]).map((job) => job.id)).toEqual([
+      "pool-a", "pool-b", "pool-c", "pool-d",
+    ]);
+  });
+
   it("counts assigned waiting jobs toward a node's load", () => {
     const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-busy-count-")), "polisharr.db"));
     stores.push(store);
@@ -462,6 +503,21 @@ describe("store schema migration", () => {
     });
     expect(store.runningCountOnNode("5090")).toBe(1);
     expect(store.busyCountOnNode("5090")).toBe(2);
+  });
+
+  it("counts running preview pairs toward node slots without changing Review or queue totals", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-preview-count-")), "polisharr.db"));
+    stores.push(store);
+    store.insertPreviewTask({
+      id: "prv-1",
+      reviewId: "rev-1",
+      request: { startMs: 0, durationMs: 15_000, originalAudioIndex: null, sidecarAudioIndex: null },
+      createdAt: 1,
+    });
+    store.updatePreviewTask("prv-1", { status: "running", nodeId: "5090", updatedAt: 2 });
+    expect(store.runningCountOnNode("5090")).toBe(1);
+    expect(store.runningPreviewCount()).toBe(1);
+    expect(store.workSummary()).toMatchObject({ queued: 0, review: 0 });
   });
 
   it("returns interrupted running jobs to the queue after restart", () => {
@@ -893,5 +949,105 @@ describe("store schema migration", () => {
     expect(store.seriesPage(0, 10).rows[0]?.audioMix).toBe("stereo");
     store.setSeriesAudioMix(sonarr, 42, null);
     expect(store.audioMixForItem(store.getItem(episodeId)!)).toBeNull();
+  });
+
+  it("defaults playback observation off and prunes history by age and count", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-playback-")), "polisharr.db"));
+    stores.push(store);
+    store.upsertInstance({ id: "jf", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin", enabled: true });
+    store.upsertInstance({ id: "radarr", kind: "radarr", name: "Radarr", url: "http://radarr", enabled: true });
+    const settings = store.getPlaybackSettings();
+    expect(settings).toEqual([expect.objectContaining({
+      connectionId: "jf",
+      observePlayback: false,
+      retainHistory: true,
+      protectNodes: false,
+      protectReplacement: false,
+      coveredArrInstanceIds: ["radarr"],
+    })]);
+    store.savePlaybackSettings([{ ...settings[0]!, observePlayback: true }]);
+    const reopened = new Store(store.db.name);
+    stores.push(reopened);
+    expect(reopened.getPlaybackSettings()[0]?.observePlayback).toBe(true);
+    const occurrence = (id: string, seen: number) => ({
+      id,
+      connectionId: "jf",
+      deviceId: "tv",
+      deviceLabel: "TV",
+      sessionId: id,
+      itemId: "item",
+      mediaSourceId: "src",
+      itemName: "Film",
+      playMethod: "DirectPlay",
+      mediaType: "Video",
+      isPaused: false,
+      reasons: [],
+      rawReasons: [],
+      reasonFamily: null,
+      selectedTracks: { audioStreamIndex: null, subtitleStreamIndex: null },
+      match: "unmatched" as const,
+      libraryItemIds: [],
+      path: null,
+      revision: null,
+      startedAt: seen,
+      lastSeenAt: seen,
+      endedAt: seen,
+      gap: false,
+    });
+    store.savePlaybackOccurrence(occurrence("old", 1));
+    store.savePlaybackOccurrence(occurrence("mid", 50));
+    store.savePlaybackOccurrence(occurrence("new", 100));
+    store.prunePlaybackHistory(100, { maxAgeMs: 80, maxRows: 10 });
+    expect(store.listPlaybackOccurrences().items.map((row) => row.id).sort()).toEqual(["mid", "new"]);
+    store.prunePlaybackHistory(100, { maxAgeMs: 1_000, maxRows: 1 });
+    expect(store.listPlaybackOccurrences().items.map((row) => row.id)).toEqual(["new"]);
+    store.clearPlaybackHistory();
+    expect(store.listPlaybackOccurrences().items).toEqual([]);
+    expect(store.getPlaybackSettings()[0]?.observePlayback).toBe(true);
+    store.savePlaybackDismissal({
+      id: "diag-1",
+      connectionId: "jf",
+      deviceId: "tv",
+      reasonFamily: "audio",
+      revision: null,
+      match: "unmatched",
+      libraryItemIds: [],
+      path: null,
+      jellyfinItemId: "item",
+      dismissedAt: 1,
+    });
+    expect(store.listPlaybackDismissals()).toHaveLength(1);
+    store.clearPlaybackHistory();
+    expect(store.listPlaybackDismissals()).toEqual([]);
+  });
+
+  it("looks up a library path by exact match and by case-insensitive SQL", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-path-lookup-")), "polisharr.db"));
+    stores.push(store);
+    const radarr = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
+    store.upsertItem({
+      id: "film-1",
+      instanceId: radarr,
+      arrId: 1,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Film",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: "/mnt/nas/Movies/Film.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    expect(store.itemsForCanonicalPath("/mnt/nas/Movies/Film.mkv").map((row) => row.id)).toEqual(["film-1"]);
+    expect(store.itemsForCanonicalPath("/mnt/nas/movies/film.mkv")).toEqual([]);
+    expect(store.itemsForPathIgnoreCase("/mnt/nas/movies/film.mkv").map((row) => row.id)).toEqual(["film-1"]);
   });
 });

@@ -12,7 +12,70 @@ export type JobPhase =
   | "transcoding"
   | "finishing"
   | "idle";
-export type ReviewStatus = "pending" | "keeping" | "discarding";
+export type ReviewStatus = "pending" | "waiting" | "keeping" | "discarding";
+export type PreviewTaskStatus = "queued" | "running" | "ready" | "failed" | "cancelled" | "expired";
+export type PreviewWaitReason = "node" | "playback" | "input_lock" | "cache_capacity";
+export type PreviewH264Encoder = "h264_nvenc" | "h264_vaapi" | "h264_videotoolbox";
+export type PreviewAdmissionKind = "optimize" | "preview";
+
+export type PreviewPreset = "start" | "middle" | "end" | "custom";
+
+export type PreviewRequest = {
+  startMs: number;
+  durationMs: number;
+  originalAudioIndex: number | null;
+  sidecarAudioIndex: number | null;
+  preset?: PreviewPreset | null;
+};
+
+export type PreviewTransformLabels = {
+  scale: string;
+  audio: string;
+  color: string;
+  warnings: string[];
+};
+
+export type PreviewArtifact = {
+  originalClipId: string;
+  finishedClipId: string;
+  originalFile: string;
+  finishedFile: string;
+  interval: { startMs: number; durationMs: number };
+  originalAudioIndex: number;
+  sidecarAudioIndex: number;
+  originalVideoIndex?: number;
+  sidecarVideoIndex?: number;
+  width: number;
+  height: number;
+  finishedWidth: number;
+  finishedHeight: number;
+  labels: PreviewTransformLabels;
+};
+
+export type PreviewTask = {
+  id: string;
+  reviewId: string;
+  status: PreviewTaskStatus;
+  waitReason: PreviewWaitReason | null;
+  nodeId: string | null;
+  leaseToken: string | null;
+  leaseUntil: number | null;
+  publicationAllowed: boolean;
+  error: string | null;
+  request: PreviewRequest;
+  sourceRevision: PlaybackFileRevision | null;
+  sidecarRevision: PlaybackFileRevision | null;
+  cacheKey: string | null;
+  bytes: number;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  artifact: PreviewArtifact | null;
+  createdAt: number;
+  startedAt: number | null;
+  updatedAt: number;
+};
+export type ReplacementOrigin = "keep" | "direct";
+export type PromotionDisposition = "started" | "waiting";
 export type SizeCategory = "movie1080p" | "movie4kSdr" | "movie4kHdr" | "tv1080p" | "tv4k" | "tv4kHdr";
 export type SuggestionAction = "transcode" | "remux" | "tracks" | "add_stereo" | "search_language" | "search_release";
 export type VideoTarget = "hevc" | "av1";
@@ -275,6 +338,22 @@ export type Job = {
   startedAt: number | null;
   assignedNodeName?: string | null;
   waitingForNode?: boolean;
+  dispatchedWriteMode?: WriteMode | null;
+  sourceRevision?: PlaybackFileRevision | null;
+};
+
+export type ReviewAudioTrack = {
+  index: number;
+  language: string;
+  channels: number;
+  codec: string;
+  default?: boolean;
+};
+
+export type ReviewCompareFrame = SuggestionNowAfter & {
+  durationSec: number;
+  tracks: string;
+  audio?: ReviewAudioTrack[];
 };
 
 export type ReviewItem = {
@@ -287,13 +366,20 @@ export type ReviewItem = {
   flagReason: string | null;
   sourcePath: string;
   sidecarPath: string;
-  source: SuggestionNowAfter & { durationSec: number; tracks: string };
-  sidecar: SuggestionNowAfter & { durationSec: number; tracks: string };
+  source: ReviewCompareFrame;
+  sidecar: ReviewCompareFrame;
   error: string | null;
   nodeName?: string | null;
   encodeApi?: string | null;
   gpuName?: string | null;
   encodeMs?: number | null;
+  intentOrigin?: ReplacementOrigin | null;
+  intentRequestedAt?: number | null;
+  waitReason?: string | null;
+  sourceRevision?: PlaybackFileRevision | null;
+  sidecarRevision?: PlaybackFileRevision | null;
+  mutationStarted?: boolean;
+  cancellable?: boolean;
 };
 
 export type HistoryRow = {
@@ -447,3 +533,173 @@ export type PlanFieldError = { field: string; message: string };
 export type CustomPlanOk = { ok: true; plan: ExecutablePlan };
 export type CustomPlanFail = { ok: false; errors: PlanFieldError[] };
 export type CustomPlanResult = CustomPlanOk | CustomPlanFail;
+
+export const PLAYBACK_HISTORY_DAYS = 30;
+export const PLAYBACK_DIAGNOSTIC_DAYS = 7;
+export const PLAYBACK_HISTORY_MAX = 50_000;
+export const PLAYBACK_POLL_MS = 10_000;
+export const PLAYBACK_REQUEST_TIMEOUT_MS = 5_000;
+export const PLAYBACK_STALE_MS = 30_000;
+export const PLAYBACK_IDLE_COOLDOWN_MS = 30_000;
+export const PLAYBACK_IDLE_OBSERVATIONS = 2;
+export const PLAYBACK_REPLACEMENT_PREFLIGHT_MS = 5_000;
+export const PLAYBACK_SOURCE_CACHE_MS = 60_000;
+export const PLAYBACK_MAX_SESSIONS = 1_000;
+export const PLAYBACK_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const PLAYBACK_SOURCE_CONCURRENCY = 2;
+export const PLAYBACK_OCCURRENCE_MISS_POLLS = 2;
+export const PLAYBACK_REASON_MAX_CHARS = 240;
+export const PLAYBACK_TEXT_MAX_CHARS = 240;
+
+export type PlaybackHealthStatus =
+  | "off"
+  | "unknown"
+  | "idle"
+  | "playing"
+  | "stale"
+  | "error"
+  | "incomplete"
+  | "unavailable";
+
+export type PlaybackCredentialKind = "apiKey" | "userToken" | "unknown";
+
+export type PlaybackMatchOutcome = "matched" | "unmatched" | "ambiguous" | "remote";
+
+export type PlaybackConnectionSettings = {
+  connectionId: string;
+  observePlayback: boolean;
+  retainHistory: boolean;
+  protectNodes: boolean;
+  protectedNodeIds: string[];
+  protectReplacement: boolean;
+  coveredArrInstanceIds: string[];
+};
+
+export type PlaybackFileRevision = {
+  canonicalPath: string;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+  fileId: string | null;
+};
+
+export type PlaybackSelectedTracks = {
+  audioStreamIndex: number | null;
+  subtitleStreamIndex: number | null;
+};
+
+export type PlaybackOccurrence = {
+  id: string;
+  connectionId: string;
+  deviceId: string;
+  deviceLabel: string;
+  sessionId: string;
+  itemId: string;
+  mediaSourceId: string;
+  itemName: string;
+  playMethod: string | null;
+  mediaType: string | null;
+  isPaused: boolean | null;
+  reasons: string[];
+  rawReasons: string[];
+  reasonFamily: string | null;
+  selectedTracks: PlaybackSelectedTracks;
+  match: PlaybackMatchOutcome;
+  libraryItemIds: string[];
+  path: string | null;
+  revision: PlaybackFileRevision | null;
+  startedAt: number;
+  lastSeenAt: number;
+  endedAt: number | null;
+  gap: boolean;
+};
+
+export type PlaybackConnectionHealth = {
+  connectionId: string;
+  observePlayback: boolean;
+  status: PlaybackHealthStatus;
+  lastSuccessAt: number | null;
+  lastError: string | null;
+  complete: boolean;
+  credentialKind: PlaybackCredentialKind;
+  householdVisible: boolean;
+  stale: boolean;
+};
+
+export const PLAYBACK_REASON_FAMILIES = [
+  "audio",
+  "video",
+  "subtitle",
+  "container",
+  "bitrate",
+  "other",
+  "unknown",
+  "mixed",
+] as const;
+export type PlaybackReasonFamily = (typeof PLAYBACK_REASON_FAMILIES)[number];
+
+export type PlaybackRecommendationKind =
+  | "add_stereo"
+  | "try_existing_stereo"
+  | "subtitle_guidance"
+  | "video_constraint"
+  | "bitrate_suggestion"
+  | "container_guidance"
+  | "none";
+
+export type PlaybackRecommendation = {
+  kind: PlaybackRecommendationKind;
+  explanation: string;
+  canRepair: boolean;
+  openEditor: boolean;
+  draft: CustomPlanDraft | null;
+  suggestionId: string | null;
+};
+
+export type PlaybackAfterKeepStatus = "observed_direct" | "not_yet_observed" | "context_changed" | "none";
+
+export type PlaybackAfterKeep = {
+  status: PlaybackAfterKeepStatus;
+  sentence: string | null;
+};
+
+export type PlaybackDismissal = {
+  id: string;
+  connectionId: string;
+  deviceId: string;
+  reasonFamily: string | null;
+  revision: PlaybackFileRevision | null;
+  match: PlaybackMatchOutcome;
+  libraryItemIds: string[];
+  path: string | null;
+  jellyfinItemId: string;
+  dismissedAt: number;
+};
+
+export type PlaybackDiagnostic = {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  deviceId: string;
+  deviceLabel: string;
+  itemName: string;
+  libraryItemIds: string[];
+  itemId: string | null;
+  href: string | null;
+  jellyfinItemId: string;
+  reasonFamily: PlaybackReasonFamily;
+  summary: string;
+  rawReasons: string[];
+  playMethod: string | null;
+  match: PlaybackMatchOutcome;
+  occurrenceCount: number;
+  lastSeenAt: number;
+  startedAt: number;
+  revision: PlaybackFileRevision | null;
+  path: string | null;
+  selectedTracks: PlaybackSelectedTracks;
+  recommendation: PlaybackRecommendation;
+  afterKeep: PlaybackAfterKeep;
+};
+
+export const AFTER_KEEP_OBSERVED = "Direct playback observed on this device after Keep.";
+export const AFTER_KEEP_NOT_YET = "Not yet observed.";

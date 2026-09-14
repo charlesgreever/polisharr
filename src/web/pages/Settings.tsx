@@ -1,10 +1,25 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type SettingsPayload } from "../api";
+import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type PlaybackSettingsPayload, type SettingsPayload } from "../api";
 import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
-import { FIELD_CONTROL, hardwareBackendLabel, SIZE_CAP_GRID } from "../settings-copy";
+import {
+  FIELD_CONTROL,
+  hardwareBackendLabel,
+  PLAYBACK_COVERAGE_HELP,
+  PLAYBACK_COVERAGE_LABEL,
+  PLAYBACK_HISTORY_CLEARED,
+  PLAYBACK_HISTORY_CONFIRM,
+  PLAYBACK_HOUSEHOLD_UNAVAILABLE,
+  PLAYBACK_NODE_HELP,
+  PLAYBACK_OBSERVE_HELP,
+  PLAYBACK_PRIORITY_HELP,
+  PLAYBACK_PRIORITY_LABEL,
+  PLAYBACK_REPLACEMENT_LABEL,
+  SIZE_CAP_GRID,
+  playbackHealthLabel,
+} from "../settings-copy";
 import { ANY_OPEN_NODE_ID } from "../encode-node";
 
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
@@ -25,11 +40,15 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [playback, setPlayback] = useState<PlaybackSettingsPayload | null>(null);
 
-  const load = () => void api.settings().then((payload) => {
-    setData(payload);
-    setUsername(payload.username ?? "");
-  });
+  const load = () => {
+    void api.settings().then((payload) => {
+      setData(payload);
+      setUsername(payload.username ?? "");
+    });
+    void api.playbackSettings().then(setPlayback).catch(() => undefined);
+  };
   useEffect(() => {
     load();
     void api.hardware().then(setHw);
@@ -48,6 +67,31 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       setUsername(payload.username ?? "");
       setMsg("Settings saved.");
       onChange();
+    }).catch((error: Error) => setMsg(error.message));
+  };
+
+  const savePlaybackConnection = (connectionId: string, patch: {
+    observePlayback?: boolean;
+    retainHistory?: boolean;
+    protectNodes?: boolean;
+    protectedNodeIds?: string[];
+    protectReplacement?: boolean;
+    coveredArrInstanceIds?: string[];
+  }, savedMsg = "Playback settings saved.") => {
+    if (!playback) return Promise.resolve();
+    return api.savePlaybackSettings({
+      connections: playback.connections.map((row) => row.connectionId === connectionId ? { ...row, ...patch } : {
+        connectionId: row.connectionId,
+        observePlayback: row.observePlayback,
+        retainHistory: row.retainHistory,
+        protectNodes: row.protectNodes,
+        protectedNodeIds: row.protectedNodeIds,
+        protectReplacement: row.protectReplacement,
+        coveredArrInstanceIds: row.coveredArrInstanceIds,
+      }),
+    }).then((payload) => {
+      setPlayback(payload);
+      setMsg(savedMsg);
     }).catch((error: Error) => setMsg(error.message));
   };
 
@@ -424,6 +468,134 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         </ul>
         <RefreshLibrary />
       </div>
+      {playback && playback.connections.length > 0 && (
+        <div className="glass space-y-4 p-5">
+          <h2 className="font-semibold">Jellyfin playback</h2>
+          <p className="help m-0">{PLAYBACK_OBSERVE_HELP}</p>
+          <p className="help m-0">{PLAYBACK_PRIORITY_HELP}</p>
+          {playback.connections.map((row) => {
+            const arrs = data.instances.filter((inst) => inst.kind === "radarr" || inst.kind === "sonarr");
+            return (
+              <div key={row.connectionId} className="space-y-3 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
+                <div className="font-medium text-ink">{row.name || "Jellyfin"}</div>
+                <div className="text-muted">{playbackHealthLabel(row.health.status, row.health.stale)}</div>
+                <label className="flex min-h-11 items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={row.observePlayback}
+                    onChange={(event) => void savePlaybackConnection(
+                      row.connectionId,
+                      { observePlayback: event.target.checked },
+                      event.target.checked ? "Playback observation is on for this connection." : "Playback observation is off for this connection.",
+                    )}
+                  />
+                  Observe playback
+                </label>
+                <label className="flex min-h-11 items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={row.retainHistory}
+                    onChange={(event) => void savePlaybackConnection(
+                      row.connectionId,
+                      { retainHistory: event.target.checked },
+                      event.target.checked ? "Viewing history is kept for this connection." : "New viewing history will not be stored. Live coverage can stay on.",
+                    )}
+                  />
+                  Keep viewing history
+                </label>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => void api.testPlaybackAccess(row.connectionId).then((result) => {
+                    setMsg(result.ok
+                      ? `${row.name} can see household playback.`
+                      : result.playback?.message || "Playback access failed.");
+                  }).catch((error: Error) => setMsg(error.message))}
+                >
+                  Test playback access
+                </button>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={row.protectNodes}
+                    onChange={(event) => void savePlaybackConnection(row.connectionId, { protectNodes: event.target.checked })}
+                  />
+                  {PLAYBACK_PRIORITY_LABEL}
+                </label>
+                <p className="help m-0">{PLAYBACK_NODE_HELP}</p>
+                <div className="flex flex-wrap gap-3 text-sm">
+                  {nodes.map((node) => (
+                    <label key={node.id} className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={row.protectedNodeIds.includes(node.id)}
+                        disabled={!row.protectNodes}
+                        onChange={(event) => {
+                          const protectedNodeIds = event.target.checked
+                            ? [...row.protectedNodeIds, node.id]
+                            : row.protectedNodeIds.filter((id) => id !== node.id);
+                          void savePlaybackConnection(row.connectionId, { protectedNodeIds });
+                        }}
+                      />
+                      {node.name}
+                    </label>
+                  ))}
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={row.protectReplacement}
+                    onChange={(event) => void savePlaybackConnection(row.connectionId, { protectReplacement: event.target.checked })}
+                  />
+                  {PLAYBACK_REPLACEMENT_LABEL}
+                </label>
+                <div>
+                  <div className="text-sm font-medium text-muted">{PLAYBACK_COVERAGE_LABEL}</div>
+                  <p className="help m-0">{PLAYBACK_COVERAGE_HELP}</p>
+                  <div className="mt-2 flex flex-wrap gap-3 text-sm">
+                    {arrs.map((inst) => (
+                      <label key={inst.id} className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={row.coveredArrInstanceIds.includes(inst.id)}
+                          onChange={(event) => {
+                            const coveredArrInstanceIds = event.target.checked
+                              ? [...row.coveredArrInstanceIds, inst.id]
+                              : row.coveredArrInstanceIds.filter((id) => id !== inst.id);
+                            void savePlaybackConnection(row.connectionId, { coveredArrInstanceIds });
+                          }}
+                        />
+                        {inst.name}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                {row.health.status === "unavailable" && (
+                  <p className="help m-0">{row.health.lastError || PLAYBACK_HOUSEHOLD_UNAVAILABLE}</p>
+                )}
+                {row.health.stale && row.health.status !== "unavailable" && (
+                  <p className="help m-0">
+                    Playback status is stale
+                    {row.health.lastSuccessAt != null ? ` (last check ${new Date(row.health.lastSuccessAt).toLocaleString()})` : "."}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          <button
+            className="btn-secondary"
+            type="button"
+            onClick={() => {
+              if (!window.confirm(PLAYBACK_HISTORY_CONFIRM)) return;
+              void api.clearPlaybackHistory().then(() => {
+                setMsg(PLAYBACK_HISTORY_CLEARED);
+              }).catch((error: Error) => setMsg(error.message));
+            }}
+          >
+            Clear viewing history
+          </button>
+        </div>
+      )}
       <div className="glass space-y-4 p-5">
         <h2 className="font-semibold">Radarr and Sonarr webhooks</h2>
         <p className="help">

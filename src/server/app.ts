@@ -4,16 +4,17 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import argon2 from "argon2";
 import { readAppVersion, type Env } from "./env.ts";
 import { Store } from "./store.ts";
 import { decryptSecret, encryptSecret, loadOrCreateSecret } from "./secrets.ts";
-import { detectHardware, type HardwareProbe } from "./hardware.ts";
+import { createPreviewCapabilityProbe, detectHardware, type HardwareProbe, type PreviewSmokeCheck } from "./hardware.ts";
 import { isLocalAddress, requestAddress } from "./net.ts";
 import {
   testRadarr,
@@ -35,6 +36,31 @@ import {
 } from "./language-id.ts";
 import { applySubtitleLanguageToReport, detectSubtitleLanguageSample } from "./subtitle-language-id.ts";
 import { testJellyfin, testPlex } from "./notify.ts";
+import { createJellyfinPlayback } from "./jellyfin-playback.ts";
+import {
+  createPlaybackMonitor,
+  parsePlaybackSettingsInput,
+  type PlaybackMonitor,
+} from "./playback-monitor.ts";
+import {
+  createPlaybackPolicy,
+  playbackHoldDetail,
+  playbackHoldSentence,
+  playbackMonitoringEnabled,
+  type PlaybackDecision,
+} from "./playback-policy.ts";
+import {
+  createPlaybackDiagnostics,
+  parsePlaybackListQuery,
+} from "./playback-diagnostics.ts";
+import {
+  PLAYBACK_DIAGNOSTIC_DAYS,
+  PLAYBACK_HISTORY_DAYS,
+  PLAYBACK_HISTORY_MAX,
+  PLAYBACK_POLL_MS,
+  PLAYBACK_REQUEST_TIMEOUT_MS,
+  PLAYBACK_STALE_MS,
+} from "./types.ts";
 import { profilePreviews, syncProfiles } from "./arr-profiles.ts";
 import { validateCustomPlan } from "./custom-plan.ts";
 import type { ArrKind, CustomPlanDraft, HardwareInfo, PlayerKind, Settings, Suggestion } from "./types.ts";
@@ -64,12 +90,27 @@ import {
   parseClusterClaim,
   parseClusterHeartbeat,
   parseClusterHello,
+  parsePreviewComplete,
+  parsePreviewFail,
+  parsePreviewProgress,
   parseRemoteComplete,
   parseRemoteFail,
   parseRemoteProgress,
+  PREVIEW_LEASE_MS,
   type ClusterNode,
 } from "./cluster.ts";
 import { WorkerLoop } from "./worker-loop.ts";
+import {
+  PreviewService,
+  publicPreviewStatus,
+  type PreviewRenderer,
+} from "./review-previews.ts";
+import {
+  createPreviewRenderer,
+  parseByteRange,
+  probePreviewMedia,
+  type PreviewMediaInfo,
+} from "./preview-render.ts";
 
 const execFileAsync = promisify(execFile);
 const SESSION_TTL = 14 * 24 * 60 * 60 * 1000;
@@ -109,6 +150,14 @@ export type AppOptions = {
   extractSubtitleSup?: (args: string[]) => Promise<void>;
   runPgsOcr?: (supPath: string) => Promise<string>;
   version?: string;
+  playbackPollMs?: number;
+  playbackTimeoutMs?: number;
+  playbackStaleMs?: number;
+  previewCapability?: () => Promise<import("./cluster.ts").PreviewCapability | null>;
+  previewRenderer?: PreviewRenderer;
+  previewSmoke?: PreviewSmokeCheck;
+  previewCacheFits?: () => boolean;
+  previewProbe?: (path: string) => Promise<PreviewMediaInfo>;
 };
 
 export function createApp(opts: AppOptions) {
@@ -127,6 +176,12 @@ export function createApp(opts: AppOptions) {
     recomputeSuggestion: afterInspect,
   });
   const optimizer = opts.optimizer ?? ffmpegOptimizer();
+  const playbackPolicy = createPlaybackPolicy({
+    clock: opts.clock,
+    staleMs: opts.playbackStaleMs ?? PLAYBACK_STALE_MS,
+    connectionName: (id) => store.getInstance(id)?.name ?? id,
+  });
+  const playbackRefresh: { run: () => void } = { run: () => undefined };
   const jobs = new JobService({
     store,
     optimizer,
@@ -138,9 +193,83 @@ export function createApp(opts: AppOptions) {
     reinspectChangedItem: inspections.reinspectChangedItem,
     inspectOne: inspections.inspectOne,
     localNodeId: () => store.localNodeId(),
+    playback: {
+      nodeAdmission: (nodeId) => playbackPolicy.nodeAdmission(nodeId, store.getPlaybackSettings()),
+      blockedNodeIds: () => playbackPolicy.blockedNodeIds(store.getPlaybackSettings()),
+      fileReplacement: (file) => playbackPolicy.fileReplacement(file, store.getPlaybackSettings()),
+      refreshReplacementPreflight: () => playbackRefresh.run(),
+    },
   });
+  const previewCapabilityFn = opts.previewCapability
+    ?? (opts.hardware && !opts.previewSmoke
+      ? async () => null
+      : createPreviewCapabilityProbe({
+          ffmpeg: opts.env.ffmpeg,
+          ffprobe: opts.env.ffprobe,
+          hardware,
+          smoke: opts.previewSmoke,
+        }));
+  async function resolvePreviewCapability() {
+    return previewCapabilityFn();
+  }
+  const previewRenderer = opts.previewRenderer ?? createPreviewRenderer({
+    ffmpeg: opts.env.ffmpeg,
+    ffprobe: opts.env.ffprobe,
+    encoder: async () => (await resolvePreviewCapability())?.h264Encoder ?? null,
+    vaapiDevice: async () => (await hardware()).vaapiDevice,
+  });
+  const previews = new PreviewService({
+    store,
+    clock: opts.clock,
+    playback: {
+      nodeAdmission: (nodeId) => playbackPolicy.nodeAdmission(nodeId, store.getPlaybackSettings()),
+      blockedNodeIds: () => playbackPolicy.blockedNodeIds(store.getPlaybackSettings()),
+    },
+    isMutating: (path) => jobs.isPathMutating(path),
+    cacheFits: opts.previewCacheFits,
+    renderer: previewRenderer,
+    localNodeId: () => store.localNodeId(),
+    probeMedia: opts.previewProbe ?? ((path) => probePreviewMedia(opts.env.ffprobe, path)),
+    reviewPath: () => store.getSettings().reviewPath,
+  });
+  jobs.attachPreviews(previews);
   const isWorker = opts.env.role === "worker";
-  if (!isWorker) jobs.start();
+  if (!isWorker) {
+    jobs.start();
+    previews.start();
+  }
+  const jellyfinPlayback = createJellyfinPlayback({
+    fetch: httpFetch,
+    clock: opts.clock,
+    timeoutMs: opts.playbackTimeoutMs ?? PLAYBACK_REQUEST_TIMEOUT_MS,
+  });
+  const playbackMonitor: PlaybackMonitor = createPlaybackMonitor({
+    store,
+    fetch: httpFetch,
+    decrypt: (packed) => decryptSecret(secret, packed),
+    clock: opts.clock,
+    pollMs: opts.playbackPollMs ?? PLAYBACK_POLL_MS,
+    staleMs: opts.playbackStaleMs ?? PLAYBACK_STALE_MS,
+    playback: jellyfinPlayback,
+    policy: playbackPolicy,
+  });
+  playbackRefresh.run = () => {
+    void playbackMonitor.refresh();
+  };
+  if (!isWorker) playbackMonitor.start();
+  function itemExcluded(item: { path: string; profile: string; tags: string[]; title: string; showTitle: string | null }): boolean {
+    return store.listExclusions().some((rule) => {
+      if (rule.kind === "path") return item.path.startsWith(rule.value);
+      if (rule.kind === "profile") return item.profile === rule.value;
+      if (rule.kind === "tag") return item.tags.includes(rule.value);
+      return item.title === rule.value || item.showTitle === rule.value;
+    });
+  }
+  const playbackDiagnostics = createPlaybackDiagnostics({
+    store,
+    clock: opts.clock,
+    isExcluded: (item) => itemExcluded(item),
+  });
   const sync = new LibrarySync({
     store,
     fetch: httpFetch,
@@ -160,6 +289,8 @@ export function createApp(opts: AppOptions) {
     fetch: httpFetch,
     optimizer,
     tools: { ffmpeg: opts.env.ffmpeg, ffprobe: opts.env.ffprobe, mkvmerge: opts.env.mkvmerge },
+    previewCapability: resolvePreviewCapability,
+    previewRenderer,
   });
 
   const app = new Hono();
@@ -310,6 +441,8 @@ export function createApp(opts: AppOptions) {
   app.use("/api/nodes/*", authed);
   app.use("/api/auth/password", authed);
   app.use("/api/queue", authed);
+  app.use("/api/playback", authed);
+  app.use("/api/playback/*", authed);
 
   function gateOptimize(): string | null {
     const state = firstRunState();
@@ -359,7 +492,7 @@ export function createApp(opts: AppOptions) {
     const node = store.getNode(id);
     if (!node) return c.json({ error: "That encode node is not registered." }, 404);
     const jobs = store.listJobs().filter((job) => job.assignedNodeId === id || job.nodeId === id);
-    if (jobs.some((job) => job.status === "running")) {
+    if (jobs.some((job) => job.status === "running") || store.runningPreviewCountOnNode(id) > 0) {
       return c.json({ error: "Stop the running job on this node first." }, 409);
     }
     if (jobs.some((job) => job.status === "queued" || job.status === "held")) {
@@ -408,6 +541,7 @@ export function createApp(opts: AppOptions) {
       enabled: existing?.enabled ?? true,
       version: parsed.hello.version,
       currentJobId: null,
+      preview: parsed.hello.preview,
     });
     if (clusterAv1() !== av1Before) recomputeAllSuggestions();
     const node = store.getNode(parsed.hello.nodeId);
@@ -428,12 +562,15 @@ export function createApp(opts: AppOptions) {
       hardware: parsed.beat.hardware,
       currentJobId: parsed.beat.currentJobId,
       version: existing.version,
+      preview: parsed.beat.preview,
     });
     store.renewNodeLeases(parsed.beat.nodeId, parsed.beat.runningJobIds, now + LEASE_MS);
+    store.renewPreviewLeases(parsed.beat.nodeId, parsed.beat.runningPreviewIds, now + PREVIEW_LEASE_MS);
     const node = store.getNode(parsed.beat.nodeId);
     return c.json({
       ok: true,
       cancelJobIds: store.cancelledIdsForNode(parsed.beat.nodeId),
+      cancelPreviewIds: store.cancelledPreviewIdsForNode(parsed.beat.nodeId),
       concurrency: node?.concurrency ?? existing.concurrency,
     });
   });
@@ -476,6 +613,49 @@ export function createApp(opts: AppOptions) {
     const parsed = parseRemoteFail(await readJson(c));
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     const result = jobs.failRemote(c.req.param("id"), parsed.leaseToken, parsed.error);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/previews/claim", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseClusterClaim(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    if (!store.getNode(parsed.nodeId)) return c.json({ error: CLUSTER_UNKNOWN_NODE }, 404);
+    const claimed = previews.claimForNode(parsed.nodeId, parsed.freeSlots);
+    return c.json({ previews: claimed });
+  });
+
+  app.post("/api/cluster/previews/:id/progress", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parsePreviewProgress(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = previews.progress(c.req.param("id"), parsed.leaseToken, parsed.progress);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/previews/:id/complete", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parsePreviewComplete(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = previews.complete(c.req.param("id"), parsed.leaseToken);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/previews/:id/fail", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parsePreviewFail(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = previews.fail(c.req.param("id"), parsed.leaseToken, parsed.error);
     if ("cancelled" in result) return c.json({ cancelled: true }, 409);
     if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
     return c.json({ ok: true });
@@ -581,11 +761,15 @@ export function createApp(opts: AppOptions) {
       secret: secretPlain ? encryptSecret(secret, secretPlain) : undefined,
       enabled: body.enabled ?? true,
     });
+    if (body.kind === "jellyfin") playbackMonitor.forgetConnection(id);
     return c.json({ ok: true, id, instances: publicInstances() });
   });
 
   app.delete("/api/integrations/:id", (c) => {
-    store.deleteInstance(c.req.param("id"));
+    const id = c.req.param("id");
+    const inst = store.getInstance(id);
+    store.deleteInstance(id);
+    if (inst?.kind === "jellyfin") playbackMonitor.forgetConnection(id);
     return c.json({ ok: true, instances: publicInstances() });
   });
 
@@ -608,6 +792,135 @@ export function createApp(opts: AppOptions) {
     const result = await testJellyfin(inst.url, key, httpFetch);
     return c.json(result, result.ok ? 200 : 400);
   });
+
+  app.get("/api/playback/settings", (c) => c.json(playbackSettingsPayload()));
+
+  app.put("/api/playback/settings", async (c) => {
+    const body: unknown = await readJson(c);
+    const jellyfinIds = store.listInstances().filter((row) => row.kind === "jellyfin").map((row) => row.id);
+    const arrIds = store.listInstances().filter((row) => row.kind === "radarr" || row.kind === "sonarr").map((row) => row.id);
+    const nodeIds = [...store.listNodes().map((row) => row.id), store.localNodeId()];
+    const parsed = parsePlaybackSettingsInput(body, {
+      jellyfinIds,
+      arrIds,
+      nodeIds,
+      current: store.getPlaybackSettings(),
+    });
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const overlay = new Map(parsed.connections.map((row) => [row.connectionId, row]));
+    const next = store.getPlaybackSettings().map((row) => overlay.get(row.connectionId) ?? row);
+    store.savePlaybackSettings(next);
+    await playbackMonitor.refresh();
+    return c.json({ ok: true, ...playbackSettingsPayload() });
+  });
+
+  app.post("/api/playback/connections/:id/test", async (c) => {
+    const inst = store.getInstance(c.req.param("id"));
+    if (!inst || inst.kind !== "jellyfin") return c.json({ error: "That Jellyfin connection does not exist." }, 404);
+    const key = inst.secret ? decryptSecret(secret, inst.secret) : "";
+    const connection = await testJellyfin(inst.url, key, httpFetch, opts.playbackTimeoutMs ?? PLAYBACK_REQUEST_TIMEOUT_MS);
+    if (!connection.ok) {
+      return c.json({
+        ok: false,
+        connection,
+        playback: {
+          ok: false,
+          credentialKind: "unknown",
+          householdVisible: false,
+          kind: "connect",
+          message: connection.message,
+        },
+      }, 400);
+    }
+    const playback = await jellyfinPlayback.testPlaybackAccess({ url: inst.url, token: key });
+    return c.json({
+      ok: playback.ok,
+      connection,
+      playback,
+    }, playback.ok ? 200 : 400);
+  });
+
+  app.get("/api/playback/observations", (c) => {
+    const parsed = parsePlaybackListQuery(playbackQuery(c), { days: PLAYBACK_HISTORY_DAYS });
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const listed = playbackDiagnostics.listObservations(parsed.value);
+    const coverage = playbackMonitor.coverage();
+    const stale = new Set(coverage.connections.filter((row) => row.stale).map((row) => row.connectionId));
+    return c.json({
+      items: listed.items.map((row) => ({
+        ...row,
+        stale: stale.has(row.connectionId),
+      })),
+      total: listed.total,
+      nextOffset: listed.nextOffset,
+      windowDays: listed.windowDays,
+      windowStartAt: listed.windowStartAt,
+      connections: coverage.connections,
+    });
+  });
+
+  app.get("/api/playback/diagnostics", (c) => {
+    const parsed = parsePlaybackListQuery(playbackQuery(c), { days: PLAYBACK_DIAGNOSTIC_DAYS });
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const listed = playbackDiagnostics.listDiagnostics(parsed.value);
+    const coverage = playbackMonitor.coverage();
+    const stale = new Set(coverage.connections.filter((row) => row.stale).map((row) => row.connectionId));
+    return c.json({
+      items: listed.items.map((row) => ({
+        ...row,
+        stale: stale.has(row.connectionId),
+      })),
+      total: listed.total,
+      nextOffset: listed.nextOffset,
+      windowDays: listed.windowDays,
+      windowStartAt: listed.windowStartAt,
+      connections: coverage.connections,
+    });
+  });
+
+  app.post("/api/playback/diagnostics/:id/dismiss", (c) => {
+    const result = playbackDiagnostics.dismiss(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/playback/diagnostics/:id/repair-draft", async (c) => {
+    const result = await playbackDiagnostics.repairDraft(c.req.param("id"));
+    if (!("ok" in result)) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, ...result.repair, queued: false });
+  });
+
+  app.delete("/api/playback/history", (c) => {
+    store.clearPlaybackHistory();
+    return c.json({ ok: true, coverage: playbackMonitor.coverage() });
+  });
+
+  function playbackSettingsPayload() {
+    const coverage = new Map(playbackMonitor.coverage().connections.map((row) => [row.connectionId, row]));
+    return {
+      connections: store.getPlaybackSettings().map((row) => {
+        const inst = store.getInstance(row.connectionId);
+        return {
+          ...row,
+          name: inst?.name ?? "",
+          url: inst?.url ?? "",
+          health: coverage.get(row.connectionId) ?? {
+            connectionId: row.connectionId,
+            observePlayback: row.observePlayback,
+            status: playbackMonitoringEnabled(row) ? "unknown" : "off",
+            lastSuccessAt: null,
+            lastError: null,
+            complete: false,
+            credentialKind: "unknown",
+            householdVisible: false,
+            stale: playbackMonitoringEnabled(row),
+          },
+        };
+      }),
+      historyDays: PLAYBACK_HISTORY_DAYS,
+      historyMaxOccurrences: PLAYBACK_HISTORY_MAX,
+    };
+  }
 
   app.post("/api/library/refresh", async (c) => {
     const result = await sync.refresh();
@@ -673,12 +986,7 @@ export function createApp(opts: AppOptions) {
 
   function isExcluded(item: ReturnType<Store["getItem"]>): boolean {
     if (!item) return false;
-    return store.listExclusions().some((rule) => {
-      if (rule.kind === "path") return item.path.startsWith(rule.value);
-      if (rule.kind === "profile") return item.profile === rule.value;
-      if (rule.kind === "tag") return item.tags.includes(rule.value);
-      return item.title === rule.value || item.showTitle === rule.value;
-    });
+    return itemExcluded(item);
   }
 
   app.get("/api/library/movies", (c) => {
@@ -842,6 +1150,7 @@ export function createApp(opts: AppOptions) {
       },
       languageId: { available: Boolean(opts.runLanguageLid || opts.env.whisperLid) },
       pgsOcr: { available: Boolean(opts.runPgsOcr || opts.env.pgsOcr) },
+      playback: playbackDiagnostics.titleSummary(item.id),
     });
   });
 
@@ -870,7 +1179,14 @@ export function createApp(opts: AppOptions) {
     if (!item) return c.json({ error: "That title is not in the library." }, 404);
     const report = store.getInspection(item.id);
     if (!report) return c.json({ error: "This file has not been inspected yet, or the path is unreadable." }, 400);
-    const body = await c.req.json<{ draft?: CustomPlanDraft; runNow?: boolean; assignedNodeId?: string }>();
+    const body = await c.req.json<{ draft?: CustomPlanDraft; runNow?: boolean; assignedNodeId?: string; playbackDiagnosticId?: string }>();
+    if (typeof body.playbackDiagnosticId === "string" && body.playbackDiagnosticId) {
+      const evidence = await playbackDiagnostics.revalidate(body.playbackDiagnosticId);
+      if (!("ok" in evidence)) return c.json({ error: evidence.error }, evidence.status);
+      if (evidence.item.id !== item.id) {
+        return c.json({ error: "That repair draft belongs to a different title." }, 409);
+      }
+    }
     const result = validateCustomPlan({
       item,
       report,
@@ -1333,21 +1649,29 @@ export function createApp(opts: AppOptions) {
     if (blocked) return c.json({ error: blocked }, 403);
     const result = await jobs.keep(c.req.param("id"));
     if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
-    return c.json({ ok: true }, 202);
+    return c.json({ ok: true, accepted: true, disposition: result.disposition }, 202);
+  });
+
+  app.post("/api/review/:id/cancel-keep", async (c) => {
+    const result = await jobs.cancelKeep(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
+    return c.json({ ok: true });
   });
 
   app.post("/api/review/keep-selected", async (c) => {
     const blocked = gateOptimize();
     if (blocked) return c.json({ error: blocked }, 403);
     const body = await c.req.json<{ ids?: string[] }>();
-    let accepted = 0;
+    let started = 0;
+    let waiting = 0;
     let skipped = 0;
     for (const id of body.ids ?? []) {
       const result = await jobs.keep(id);
-      if ("accepted" in result) accepted += 1;
-      else skipped += 1;
+      if ("error" in result) skipped += 1;
+      else if (result.disposition === "waiting") waiting += 1;
+      else started += 1;
     }
-    return c.json({ accepted, skipped }, 202);
+    return c.json({ accepted: started + waiting, skipped, started, waiting }, 202);
   });
 
   app.post("/api/review/keep-all", async (c) => {
@@ -1362,6 +1686,85 @@ export function createApp(opts: AppOptions) {
     if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
     return c.json({ ok: true }, 202);
   });
+
+  app.post("/api/review/:id/previews", async (c) => {
+    const blocked = gateOptimize();
+    if (blocked) return c.json({ error: blocked }, 403);
+    const result = await previews.request(c.req.param("id"), await readJson(c));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
+    const node = result.task.nodeId ? store.getNode(result.task.nodeId) : undefined;
+    const body = publicPreviewStatus(result.task, node?.name ?? null);
+    return c.json(body, result.task.status === "ready" ? 200 : 202);
+  });
+
+  app.get("/api/review/:id/previews/:taskId", (c) => {
+    const review = store.getReview(c.req.param("id"));
+    if (!review) return c.json({ error: "That review item is gone." }, 404);
+    const task = previews.status(c.req.param("taskId"));
+    if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
+    return c.json(publicPreviewStatus(task, task.nodeName));
+  });
+
+  app.delete("/api/review/:id/previews/:previewId", (c) => {
+    const review = store.getReview(c.req.param("id"));
+    if (!review) return c.json({ error: "That review item is gone." }, 404);
+    const task = store.getPreviewTask(c.req.param("previewId"));
+    if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
+    const result = task.status === "ready" ? previews.evict(task.id) : previews.cancel(task.id);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/review/:id/previews/:taskId/cancel", (c) => {
+    const review = store.getReview(c.req.param("id"));
+    if (!review) return c.json({ error: "That review item is gone." }, 404);
+    const task = store.getPreviewTask(c.req.param("taskId"));
+    if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
+    const result = previews.cancel(task.id);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  const servePreviewClip = async (c: Context) => {
+    const user = await currentUser(c);
+    if (!user) return c.json({ error: "Sign in to continue." }, 401);
+    const handle = previews.openClip(c.req.param("id") ?? "", c.req.param("previewId") ?? "", c.req.param("side") ?? "");
+    if ("error" in handle) return c.json({ error: handle.error }, handle.status as 404 | 409 | 429);
+    const range = parseByteRange(c.req.header("range"), handle.size);
+    if (!range.ok) {
+      handle.release();
+      return c.body(null, 416, {
+        "Content-Range": `bytes */${handle.size}`,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+      });
+    }
+    const length = range.end - range.start + 1;
+    const headers: Record<string, string> = {
+      "Content-Type": "video/mp4",
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, no-store",
+      "Content-Length": String(length),
+    };
+    const partial = Boolean(c.req.header("range"));
+    if (partial) headers["Content-Range"] = `bytes ${range.start}-${range.end}/${handle.size}`;
+    if (c.req.method === "HEAD") {
+      handle.release();
+      return c.body(null, partial ? 206 : 200, headers);
+    }
+    const file = createReadStream(handle.path, { start: range.start, end: range.end });
+    const release = () => handle.release();
+    file.on("close", release);
+    file.on("error", release);
+    c.req.raw.signal?.addEventListener("abort", () => {
+      file.destroy();
+      release();
+    });
+    return new Response(Readable.toWeb(file) as ReadableStream, { status: partial ? 206 : 200, headers });
+  };
+
+  app.get("/api/review/:id/previews/:previewId/clips/:side", (c) => servePreviewClip(c));
+  app.on("HEAD", "/api/review/:id/previews/:previewId/clips/:side", (c) => servePreviewClip(c));
 
   app.post("/api/review/:id/requeue", async (c) => {
     const blocked = gateOptimize();
@@ -1544,6 +1947,7 @@ export function createApp(opts: AppOptions) {
   function publicNode(node: ClusterNode, thisNodeId: string, activity?: ReturnType<Store["nodeActivity"]>[number]) {
     const now = opts.clock?.() ?? Date.now();
     const load = activity ?? store.nodeActivity().find((row) => row.id === node.id);
+    const playback = publicPlaybackHold(playbackPolicy.nodeAdmission(node.id, store.getPlaybackSettings()));
     return {
       ...node,
       thisNode: node.id === thisNodeId,
@@ -1553,6 +1957,7 @@ export function createApp(opts: AppOptions) {
       runningCount: load?.running ?? 0,
       waitingCount: load?.waiting ?? 0,
       runningTitles: load?.jobs.map((job) => job.title) ?? [],
+      playbackHold: playback,
     };
   }
 
@@ -1596,6 +2001,7 @@ export function createApp(opts: AppOptions) {
       enabled: existing?.enabled ?? true,
       version,
       currentJobId: running?.id ?? null,
+      preview: await resolvePreviewCapability(),
     };
     store.upsertNode(node);
     return node;
@@ -1616,11 +2022,41 @@ export function createApp(opts: AppOptions) {
     const online = assigned ? nodeIsOnline(assigned.lastSeen, now) : true;
     const busy = Boolean(load && load.running >= load.concurrency);
     const waiting = (job.status === "queued" || job.status === "held") && Boolean(assigned) && (!online || busy);
+    const playbackHold = (job.status === "queued" || job.status === "held" || job.status === "paused")
+      ? publicPlaybackHold(jobPlaybackDecision(job.assignedNodeId ?? null))
+      : null;
+    const playbackReason = playbackHold?.reason === "playing" ? "playback" as const
+      : playbackHold ? "playback-status" as const
+      : null;
     return {
       ...job,
       assignedNodeName: node?.name ?? null,
       waitingForNode: waiting,
-      waitingReason: waiting ? (online ? "busy" as const : "offline" as const) : null,
+      waitingReason: playbackReason ?? (waiting ? (online ? "busy" as const : "offline" as const) : null),
+      playbackHold,
+    };
+  }
+
+  function jobPlaybackDecision(assignedNodeId: string | null): PlaybackDecision {
+    const connections = store.getPlaybackSettings();
+    if (assignedNodeId) return playbackPolicy.nodeAdmission(assignedNodeId, connections);
+    const blocked = new Set(playbackPolicy.blockedNodeIds(connections));
+    const now = opts.clock?.() ?? Date.now();
+    const online = store.listNodes().filter((node) => node.enabled && nodeIsOnline(node.lastSeen, now));
+    if (online.length === 0) return playbackPolicy.nodeAdmission(store.localNodeId(), connections);
+    if (online.some((node) => !blocked.has(node.id))) return { allowed: true, reason: null, connectionIds: [], connectionNames: [], observedAt: null };
+    return playbackPolicy.nodeAdmission(online[0]!.id, connections);
+  }
+
+  function publicPlaybackHold(decision: PlaybackDecision) {
+    if (decision.allowed) return null;
+    return {
+      reason: decision.reason,
+      sentence: playbackHoldSentence(decision),
+      detail: playbackHoldDetail(decision),
+      observedAt: decision.observedAt,
+      connectionIds: decision.connectionIds,
+      connectionNames: decision.connectionNames,
     };
   }
 
@@ -1657,7 +2093,7 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
-  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop };
+  return { app, store, jobs, previews, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy };
 }
 
 async function readJson(c: Context): Promise<unknown> {
@@ -1691,6 +2127,21 @@ function suggestionSettingsChanged(current: Settings, next: Settings): boolean {
     JSON.stringify(current.sizeCaps) !== JSON.stringify(next.sizeCaps) ||
     JSON.stringify(current.suggestionDefaults) !== JSON.stringify(next.suggestionDefaults)
   );
+}
+
+function playbackQuery(c: Context): Record<string, string | undefined> {
+  return {
+    days: c.req.query("days"),
+    offset: c.req.query("offset"),
+    limit: c.req.query("limit"),
+    connectionId: c.req.query("connectionId"),
+    deviceId: c.req.query("deviceId"),
+    client: c.req.query("client"),
+    reasonFamily: c.req.query("reasonFamily"),
+    title: c.req.query("title"),
+    itemId: c.req.query("itemId"),
+    unmatched: c.req.query("unmatched"),
+  };
 }
 
 function pageRequest(rawOffset: string | undefined, rawLimit: string | undefined): { offset: number; limit: number } {

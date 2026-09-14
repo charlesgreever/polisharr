@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.ts";
 import { loadEnv } from "./env.ts";
 import { isoListedFfmpeg } from "./fixtures/index.ts";
+import { PREVIEW_PROTOCOL_VERSION, PREVIEW_SDR_1080P_PROFILE } from "./cluster.ts";
 import type { HardwareInfo } from "./types.ts";
 
 function cookie(res: Response): string {
@@ -64,11 +65,13 @@ async function setup() {
 }
 
 describe("public HTTP behavior", () => {
-  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; workerLoop?: { stop: () => void } } }> = [];
-  afterEach(() => {
+  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; previews?: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
+  afterEach(async () => {
     for (const a of apps) {
       a.app.jobs.stop();
+      a.app.previews?.stop();
       a.app.workerLoop?.stop();
+      await a.app.playbackMonitor?.stop();
       a.store.close();
     }
     apps.length = 0;
@@ -2415,6 +2418,169 @@ describe("public HTTP behavior", () => {
     expect(saved.status).toBe(200);
     const settings = (await (await created.app.request("/api/settings", { headers })).json()) as { defaultEncodeNodeId: string };
     expect(settings.defaultEncodeNodeId).toBe("worker-1");
+  });
+
+  it("returns 202 for a Review preview task and leases it on a capable worker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-preview-http-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "none", cuda: false, vaapi: false, av1: false, reason: "No GPU." };
+    const created = createApp({
+      env,
+      hardware: async () => hw,
+      previewCapability: async () => null,
+      previewProbe: async () => ({
+        durationMs: 60_000,
+        width: 1920,
+        height: 1080,
+        sarNum: 1,
+        sarDen: 1,
+        hdr: "none",
+        videoIndex: 0,
+        audio: [{ index: 1, language: "eng", channels: 6, codec: "ac3", default: true }],
+        hasVideo: true,
+      }),
+    });
+    created.jobs.stop();
+    created.previews.stop();
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ languageConfirmed: true, preferredLanguage: "eng", reviewPath: join(dir, "review") }),
+    });
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    const instanceId = created.store.listInstances()[0]!.id;
+    const sourcePath = join(dir, "movie.mkv");
+    const sidecarPath = join(dir, "sidecar.mkv");
+    writeFileSync(sourcePath, "ORIGINAL!");
+    writeFileSync(sidecarPath, "SIDECAR!!!");
+    const itemId = `${instanceId}:movie:10`;
+    created.store.upsertItem({
+      id: itemId, instanceId, arrId: 10, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+      title: "Film", showTitle: null, season: null, episode: null, episodeTitle: null, path: sourcePath,
+      sizeBytes: 9, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+    });
+    created.store.insertJob({
+      id: "job-1", itemId, suggestionId: null, status: "succeeded", phase: "idle", progress: 1,
+      error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar",
+      plan: { origin: "custom", video: { kind: "copy" }, audio: [], subtitles: [], container: "mkv", writeMode: "sidecar", warning: null, reasons: [], estimatedOutputBytes: 3, category: "movie1080p" },
+    });
+    created.store.insertReview({
+      id: "rev-1", jobId: "job-1", itemId, displayTitle: "Film", status: "pending", flagged: false, flagReason: null,
+      sourcePath, sidecarPath,
+      source: { codec: "hevc", quality: "HD", sizeBytes: 9, sizePerHourGb: 1, durationSec: 60, tracks: "1 audio / 0 subtitles" },
+      sidecar: { codec: "hevc", quality: "HD", sizeBytes: 10, sizePerHourGb: 0.5, durationSec: 60, tracks: "1 audio / 0 subtitles" },
+      error: null,
+    });
+    const previewCap = {
+      protocolVersion: PREVIEW_PROTOCOL_VERSION,
+      h264Encoder: "h264_nvenc",
+      profiles: [PREVIEW_SDR_1080P_PROFILE],
+    };
+    const hello = await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({
+        nodeId: "worker-1",
+        name: "5090",
+        version: "0.2.37",
+        hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+        concurrency: 1,
+        preview: previewCap,
+      }),
+    });
+    expect(hello.status).toBe(200);
+    const queued = await created.app.request("/api/review/rev-1/previews", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ startMs: 1000 }),
+    });
+    expect(queued.status).toBe(202);
+    const queuedBody = await queued.json() as { id: string; status: string };
+    expect(queuedBody.status).toBe("queued");
+    expect(queuedBody.id).not.toBe("job-1");
+    const oldClaim = await created.app.request("/api/cluster/previews/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "missing", freeSlots: 1 }),
+    });
+    expect(oldClaim.status).toBe(404);
+    const claimed = await created.app.request("/api/cluster/previews/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", freeSlots: 1 }),
+    });
+    const claimedBody = await claimed.json() as { previews: Array<{ id: string; kind: string; leaseToken: string }> };
+    expect(claimedBody.previews).toHaveLength(1);
+    expect(claimedBody.previews[0]?.kind).toBe("preview");
+    expect(claimedBody.previews[0]?.id).toBe(queuedBody.id);
+    const jobClaim = await created.app.request("/api/cluster/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", freeSlots: 1 }),
+    });
+    expect(((await jobClaim.json()) as { jobs: unknown[] }).jobs).toHaveLength(0);
+    const done = await created.app.request(`/api/cluster/previews/${queuedBody.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ leaseToken: claimedBody.previews[0]?.leaseToken, sidecarPath: "/nope.mkv", output: {} }),
+    });
+    expect(done.status).toBe(400);
+    const pairDir = join(dir, "review", ".previews", queuedBody.id);
+    mkdirSync(pairDir, { recursive: true });
+    writeFileSync(join(pairDir, "original.mp4"), "ORIGCLIP!!");
+    writeFileSync(join(pairDir, "finished.mp4"), "FINCLIP!!!");
+    writeFileSync(join(pairDir, ".published"), "");
+    const ready = await created.app.request(`/api/cluster/previews/${queuedBody.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ leaseToken: claimedBody.previews[0]?.leaseToken }),
+    });
+    expect(ready.status).toBe(200);
+    const status = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}`, { headers });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ status: "ready", nodeId: "worker-1", nodeName: "5090" });
+    const clip = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, { headers });
+    expect(clip.status).toBe(200);
+    expect(clip.headers.get("content-type")).toBe("video/mp4");
+    expect(clip.headers.get("cache-control")).toBe("private, no-store");
+    expect(await clip.text()).toBe("ORIGCLIP!!");
+    const ranged = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, {
+      headers: { ...headers, Range: "bytes=0-3" },
+    });
+    expect(ranged.status).toBe(206);
+    expect(await ranged.text()).toBe("ORIG");
+    const head = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/finished`, {
+      method: "HEAD",
+      headers,
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String("FINCLIP!!!".length));
+    expect(await head.text()).toBe("");
+    const badRange = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, {
+      headers: { ...headers, Range: "bytes=500-600" },
+    });
+    expect(badRange.status).toBe(416);
+    const anon = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`);
+    expect(anon.status).toBe(401);
+    const traversal = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/secret`, { headers });
+    expect(traversal.status).toBe(404);
+    const loggedOut = await created.app.request("/api/auth/logout", { method: "POST", headers });
+    expect(loggedOut.status).toBe(200);
+    const afterLogout = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, { headers });
+    expect(afterLogout.status).toBe(401);
   });
 
   it("removes a dead worker and refuses to remove this computer or a node with waiting work", async () => {

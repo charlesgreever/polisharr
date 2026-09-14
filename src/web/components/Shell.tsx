@@ -14,6 +14,7 @@ const NAV = [
   { to: "/suggestions", label: "Suggestions", icon: Icons.suggestions },
   { to: "/queue", label: "Queue", icon: Icons.queue },
   { to: "/review", label: "Review", icon: Icons.review },
+  { to: "/playback", label: "Playback", icon: Icons.playback },
   { to: "/errors", label: "Errors", icon: Icons.errors },
   { to: "/history", label: "History", icon: Icons.history },
   { to: "/settings", label: "Settings", icon: Icons.settings },

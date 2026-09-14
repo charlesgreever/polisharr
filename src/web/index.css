@@ -739,6 +739,42 @@ tr:last-child td {
   width: min(28rem, 100%);
 }
 
+.modal-card.compare-modal {
+  width: min(72rem, 100%);
+  max-height: min(90vh, 56rem);
+  overflow: auto;
+}
+
+.compare-players {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  position: relative;
+}
+
+.compare-players.ab {
+  grid-template-columns: 1fr;
+}
+
+.compare-player {
+  min-width: 0;
+}
+
+.compare-player video {
+  display: block;
+  width: 100%;
+  background: #000;
+  border-radius: 0.5rem;
+}
+
+.compare-players.ab [data-side]:not([data-active="true"]) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
 @media (max-width: 640px) {
   .page-heading {
     align-items: stretch;

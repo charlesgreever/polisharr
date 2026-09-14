@@ -94,6 +94,46 @@ export function usePagedList<T>(options: {
     return () => window.clearInterval(interval);
   }, [options.pollMs, run]);
 
+  const refresh = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    const generation = generationRef.current;
+    setLoading(true);
+    setError("");
+    try {
+      const want = Math.max(itemsRef.current.length, pageSize);
+      let collected: T[] = [];
+      let next: number | null = 0;
+      let total = 0;
+      let pendingCount = 0;
+      let finishedCount = 0;
+      while (next != null && collected.length < want) {
+        const result = await loaderRef.current(next, pageSize);
+        if (!mountedRef.current || generation !== generationRef.current) return;
+        const previous: number | null = next;
+        collected = mergeByKey(collected, result.items, keyRef.current);
+        next = result.nextOffset;
+        total = result.total;
+        if (typeof result.pendingCount === "number") pendingCount = result.pendingCount;
+        if (typeof result.finishedCount === "number") finishedCount = result.finishedCount;
+        if (result.items.length === 0 || next === previous) break;
+      }
+      itemsRef.current = collected;
+      setItems(collected);
+      setNextOffset(next);
+      setTotal(total);
+      setPendingCount(pendingCount);
+      setFinishedCount(finishedCount);
+    } catch (cause) {
+      if (mountedRef.current && generation === generationRef.current) {
+        setError(cause instanceof Error ? cause.message : "This list could not be loaded.");
+      }
+    } finally {
+      inFlightRef.current = false;
+      if (mountedRef.current) setLoading(false);
+    }
+  }, [pageSize]);
+
   return {
     items,
     nextOffset,
@@ -104,6 +144,7 @@ export function usePagedList<T>(options: {
     error,
     loadMore: () => (nextOffset == null ? Promise.resolve() : run(nextOffset, "append")),
     reload: () => run(0, "reset"),
+    refresh,
   };
 }
 

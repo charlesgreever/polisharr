@@ -11,6 +11,7 @@ import { ReviewPage } from "./pages/Review";
 import { ErrorsPage } from "./pages/Errors";
 import { HistoryPage } from "./pages/History";
 import { SettingsPage } from "./pages/Settings";
+import { PlaybackPage } from "./pages/Playback";
 import { TitlePage } from "./pages/Title";
 import { LoginPage } from "./pages/Login";
 import { SetupPage } from "./pages/Setup";
@@ -55,6 +56,7 @@ export function App() {
         <Route path="/suggestions" element={<SuggestionsPage />} />
         <Route path="/queue" element={<QueuePage />} />
         <Route path="/review" element={<ReviewPage />} />
+        <Route path="/playback" element={<PlaybackPage />} />
         <Route path="/errors" element={<ErrorsPage />} />
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/settings" element={<SettingsPage firstRun={auth.firstRun} onChange={() => void api.status().then(setAuth)} />} />

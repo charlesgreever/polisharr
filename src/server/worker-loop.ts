@@ -3,11 +3,19 @@ import {
   CLUSTER_UNKNOWN_NODE,
   CLUSTER_WRONG_TOKEN,
   HEARTBEAT_MS,
+  PREVIEW_LEASE_MS,
+  PREVIEW_LEASE_RENEW_MIN_MS,
+  PREVIEW_TIMEOUT_MS,
+  nodeCanPreview,
+  parseRemotePreviewDocument,
   type ClusterHello,
+  type PreviewCapability,
   type RemoteJobDocument,
+  type RemotePreviewDocument,
 } from "./cluster.ts";
 import type { HardwareInfo, InspectionReport } from "./types.ts";
-import { CancelledError, isExecutablePlan, removeReviewArtifact, resolvePlan, type Optimizer } from "./optimize.ts";
+import { CancelledError, isExecutablePlan, removePreviewPairDir, removeReviewArtifact, resolvePlan, type Optimizer } from "./optimize.ts";
+import type { PreviewRenderer } from "./review-previews.ts";
 
 export type WorkerJoinStatus = "misconfigured" | "connecting" | "connected" | "unreachable" | "rejected";
 
@@ -31,6 +39,10 @@ export type WorkerLoopOptions = {
   intervalMs?: number;
   optimizer?: Optimizer;
   tools?: { ffmpeg: string; ffprobe: string; mkvmerge: string };
+  previewCapability?: () => Promise<PreviewCapability | null>;
+  previewRenderer?: PreviewRenderer;
+  monotonic?: () => number;
+  watchdogMs?: number;
 };
 
 type Inflight = {
@@ -39,14 +51,27 @@ type Inflight = {
   leaseToken: string;
 };
 
+type PreviewInflight = {
+  cancelled: boolean;
+  leaseToken: string;
+  deadline: number;
+  lastRenew: number;
+  started: number;
+  children: Array<{ kill: (signal?: NodeJS.Signals | number) => boolean | void }>;
+  disconnected: boolean;
+};
+
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | undefined;
+  private watchdog: ReturnType<typeof setInterval> | undefined;
   private ticking = false;
   private registered = false;
   private status: WorkerJoinStatus = "connecting";
   private detail = "";
   private inflight = new Map<string, Inflight>();
+  private previewInflight = new Map<string, PreviewInflight>();
   private slots: number | null = null;
+  private previewCap: PreviewCapability | null = null;
 
   constructor(private readonly opts: WorkerLoopOptions) {
     if (!opts.masterUrl || !opts.token) {
@@ -74,11 +99,19 @@ export class WorkerLoop {
     const intervalMs = this.opts.intervalMs ?? HEARTBEAT_MS;
     this.timer = setInterval(() => void this.tick(), intervalMs);
     this.timer.unref?.();
+    const watchdogMs = this.opts.watchdogMs ?? 1_000;
+    this.watchdog = setInterval(() => void this.watchPreviewLeases(), watchdogMs);
+    this.watchdog.unref?.();
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.watchdog) clearInterval(this.watchdog);
     for (const job of this.inflight.values()) job.cancelled = true;
+    for (const preview of this.previewInflight.values()) {
+      preview.cancelled = true;
+      this.killPreviewChildren(preview);
+    }
   }
 
   async tick(): Promise<void> {
@@ -86,6 +119,7 @@ export class WorkerLoop {
     this.ticking = true;
     try {
       await this.tickOnce();
+      await this.watchPreviewLeases();
     } finally {
       this.ticking = false;
     }
@@ -95,12 +129,15 @@ export class WorkerLoop {
     if (!this.opts.masterUrl || !this.opts.token) return;
     if (this.registered) {
       const runningJobIds = [...this.inflight.keys()];
-      const beat = await this.postJson<{ cancelJobIds?: unknown; concurrency?: unknown }>("/api/cluster/heartbeat", {
+      const preview = await this.currentPreviewCapability();
+      const beat = await this.postJson<{ cancelJobIds?: unknown; cancelPreviewIds?: unknown; concurrency?: unknown }>("/api/cluster/heartbeat", {
         nodeId: this.opts.nodeId,
         hardware: await this.opts.hardware(),
         concurrency: this.opts.concurrency(),
         currentJobId: runningJobIds[0] ?? null,
         runningJobIds,
+        preview,
+        runningPreviewIds: [...this.previewInflight.keys()],
       });
       if (beat.ok) {
         this.status = "connected";
@@ -110,6 +147,10 @@ export class WorkerLoop {
           ? beat.data.cancelJobIds.filter((id): id is string => typeof id === "string")
           : [];
         for (const id of cancelIds) this.markCancelled(id);
+        const cancelPreviewIds = Array.isArray(beat.data.cancelPreviewIds)
+          ? beat.data.cancelPreviewIds.filter((id): id is string => typeof id === "string")
+          : [];
+        for (const id of cancelPreviewIds) this.markPreviewCancelled(id);
         await this.claimWork();
         return;
       }
@@ -124,6 +165,7 @@ export class WorkerLoop {
       } else {
         this.status = "unreachable";
         this.detail = `Cannot reach the master at ${this.opts.masterUrl}. Encodes stay idle until it is reachable.`;
+        this.markPreviewsDisconnected();
         return;
       }
     }
@@ -149,11 +191,15 @@ export class WorkerLoop {
     }
     this.status = "unreachable";
     this.detail = `Cannot reach the master at ${this.opts.masterUrl}. Encodes stay idle until it is reachable.`;
+    this.markPreviewsDisconnected();
   }
 
   private async claimWork(): Promise<void> {
+    if (this.advertisesPreview()) {
+      await this.claimPreviews();
+    }
     if (!this.opts.optimizer || !this.opts.tools) return;
-    const freeSlots = Math.max(0, (this.slots ?? this.opts.concurrency()) - this.inflight.size);
+    const freeSlots = this.freeSlots();
     if (freeSlots <= 0) return;
     const claimed = await this.postJson<{ jobs?: unknown }>("/api/cluster/claim", {
       nodeId: this.opts.nodeId,
@@ -163,9 +209,40 @@ export class WorkerLoop {
     for (const raw of claimed.data.jobs) {
       const job = raw as RemoteJobDocument;
       if (!job || typeof job.id !== "string" || typeof job.leaseToken !== "string") continue;
-      if (this.inflight.has(job.id)) continue;
+      if ((job as { kind?: unknown }).kind === "preview") continue;
+      if (this.inflight.has(job.id) || this.previewInflight.has(job.id)) continue;
       this.inflight.set(job.id, { cancelled: false, sidecarPath: null, leaseToken: job.leaseToken });
       void this.runJob(job);
+    }
+  }
+
+  private async claimPreviews(): Promise<void> {
+    if (!this.opts.previewRenderer) return;
+    const freeSlots = this.freeSlots();
+    if (freeSlots <= 0) return;
+    const fetchStarted = this.monotonic();
+    const claimed = await this.postJson<{ previews?: unknown }>("/api/cluster/previews/claim", {
+      nodeId: this.opts.nodeId,
+      freeSlots,
+    });
+    const elapsed = this.monotonic() - fetchStarted;
+    if (!claimed.ok || !Array.isArray(claimed.data.previews)) return;
+    for (const raw of claimed.data.previews) {
+      const parsed = parseRemotePreviewDocument(raw);
+      if (!parsed.ok) continue;
+      const preview = parsed.preview;
+      if (this.previewInflight.has(preview.id) || this.inflight.has(preview.id)) continue;
+      const remaining = Math.max(0, PREVIEW_LEASE_MS - elapsed);
+      this.previewInflight.set(preview.id, {
+        cancelled: false,
+        leaseToken: preview.leaseToken,
+        deadline: this.monotonic() + remaining,
+        lastRenew: this.monotonic(),
+        started: this.monotonic(),
+        children: [],
+        disconnected: false,
+      });
+      void this.runPreview(preview);
     }
   }
 
@@ -243,6 +320,125 @@ export class WorkerLoop {
     if (slot) slot.cancelled = true;
   }
 
+  private markPreviewCancelled(id: string): void {
+    const slot = this.previewInflight.get(id);
+    if (!slot) return;
+    slot.cancelled = true;
+    this.killPreviewChildren(slot);
+  }
+
+  private markPreviewsDisconnected(): void {
+    for (const slot of this.previewInflight.values()) slot.disconnected = true;
+  }
+
+  private killPreviewChildren(slot: PreviewInflight): void {
+    for (const child of slot.children) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Child may already have exited.
+      }
+    }
+  }
+
+  private freeSlots(): number {
+    return Math.max(0, (this.slots ?? this.opts.concurrency()) - this.inflight.size - this.previewInflight.size);
+  }
+
+  private monotonic(): number {
+    return this.opts.monotonic?.() ?? performance.now();
+  }
+
+  private advertisesPreview(): boolean {
+    return nodeCanPreview({ preview: this.previewCap });
+  }
+
+  private async currentPreviewCapability(): Promise<PreviewCapability | null> {
+    if (!this.opts.previewCapability) return null;
+    this.previewCap = await this.opts.previewCapability();
+    return this.previewCap;
+  }
+
+  private async runPreview(preview: RemotePreviewDocument): Promise<void> {
+    const renderer = this.opts.previewRenderer;
+    const slot = this.previewInflight.get(preview.id);
+    if (!renderer || !slot) return;
+    try {
+      const result = await renderer(preview, {
+        isCancelled: () => Boolean(this.previewInflight.get(preview.id)?.cancelled),
+        onProgress: (progress) => {
+          void this.renewPreview(preview.id, progress);
+        },
+        registerChild: (child) => {
+          this.previewInflight.get(preview.id)?.children.push(child);
+        },
+      });
+      const latest = this.previewInflight.get(preview.id);
+      if (!latest || latest.cancelled || latest.disconnected) {
+        if (preview.cacheDir) await removePreviewPairDir(preview.cacheDir);
+        return;
+      }
+      if (result.ok) {
+        await this.postJson(`/api/cluster/previews/${preview.id}/complete`, { leaseToken: latest.leaseToken });
+      } else {
+        await this.postJson(`/api/cluster/previews/${preview.id}/fail`, { leaseToken: latest.leaseToken, error: result.error });
+      }
+    } catch (error) {
+      const latest = this.previewInflight.get(preview.id);
+      if (!latest || latest.cancelled) return;
+      const message = error instanceof Error ? error.message : "The preview failed.";
+      await this.postJson(`/api/cluster/previews/${preview.id}/fail`, { leaseToken: latest.leaseToken, error: message });
+    } finally {
+      this.previewInflight.delete(preview.id);
+    }
+  }
+
+  private async renewPreview(id: string, progress: number | null): Promise<void> {
+    const slot = this.previewInflight.get(id);
+    if (!slot || slot.cancelled) return;
+    const now = this.monotonic();
+    if (progress == null && now - slot.lastRenew < PREVIEW_LEASE_RENEW_MIN_MS) return;
+    const fetchStarted = this.monotonic();
+    const done = await this.postJson<{ ok?: unknown; cancelled?: unknown }>(`/api/cluster/previews/${id}/progress`, {
+      leaseToken: slot.leaseToken,
+      progress,
+    });
+    const elapsed = this.monotonic() - fetchStarted;
+    if (!done.ok) {
+      if (done.status === 409) slot.cancelled = true;
+      else slot.disconnected = true;
+      if (slot.cancelled) this.killPreviewChildren(slot);
+      return;
+    }
+    if (now - slot.lastRenew >= PREVIEW_LEASE_RENEW_MIN_MS) {
+      slot.lastRenew = this.monotonic();
+      slot.deadline = this.monotonic() + Math.max(0, PREVIEW_LEASE_MS - elapsed);
+    }
+  }
+
+  private async watchPreviewLeases(): Promise<void> {
+    const now = this.monotonic();
+    for (const [id, slot] of this.previewInflight) {
+      if (slot.cancelled) {
+        this.killPreviewChildren(slot);
+        continue;
+      }
+      if (now - slot.started > PREVIEW_TIMEOUT_MS) {
+        slot.cancelled = true;
+        this.killPreviewChildren(slot);
+        continue;
+      }
+      if (slot.disconnected && now >= slot.deadline) {
+        slot.cancelled = true;
+        this.killPreviewChildren(slot);
+        continue;
+      }
+      if (!slot.disconnected && now - slot.lastRenew >= PREVIEW_LEASE_RENEW_MIN_MS) {
+        await this.renewPreview(id, null);
+      }
+    }
+  }
+
   private async helloBody(): Promise<ClusterHello> {
     return {
       nodeId: this.opts.nodeId,
@@ -250,6 +446,7 @@ export class WorkerLoop {
       version: this.opts.version,
       hardware: await this.opts.hardware(),
       concurrency: this.opts.concurrency(),
+      preview: await this.currentPreviewCapability(),
     };
   }
 

@@ -41,6 +41,7 @@ export const api = {
     settings: { writeMode: string; videoTarget: string; preferredLanguage?: string };
     languageId?: { available?: boolean };
     pgsOcr?: { available?: boolean };
+    playback?: PlaybackTitleSummary;
   }>(`/api/library/items/${id}`),
   previewPlan: async (id: string, draft: Record<string, unknown>) => {
     const res = await fetch(`/api/library/items/${id}/plan`, {
@@ -50,8 +51,8 @@ export const api = {
     });
     return (await res.json()) as { ok?: boolean; plan?: ExecutablePlan; errors?: Array<{ field: string; message: string }>; error?: string };
   },
-  queueCustom: (id: string, draft: Record<string, unknown>, runNow = false, assignedNodeId?: string) =>
-    req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow, assignedNodeId }) }),
+  queueCustom: (id: string, draft: Record<string, unknown>, runNow = false, assignedNodeId?: string, playbackDiagnosticId?: string) =>
+    req(`/api/library/items/${id}/queue`, { method: "POST", body: JSON.stringify({ draft, runNow, assignedNodeId, playbackDiagnosticId }) }),
   searchPreferred: (id: string) =>
     req(`/api/library/items/${id}/search-preferred`, { method: "POST", body: JSON.stringify({ confirm: true }) }),
   replaceSearch: (id: string) =>
@@ -126,11 +127,18 @@ export const api = {
   reorderJobs: (ids: string[]) => req("/api/jobs/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
   jobLogs: (id: string) => req<{ log: string }>(`/api/jobs/${id}/logs`),
   review: (offset = 0, limit = 50) => req<LibraryPage<ReviewRow>>(`/api/review?offset=${offset}&limit=${limit}`),
-  keep: (id: string) => req(`/api/review/${id}/keep`, { method: "POST" }),
-  keepSelected: (ids: string[]) => req<{ accepted: number; skipped: number }>("/api/review/keep-selected", { method: "POST", body: JSON.stringify({ ids }) }),
-  keepAll: () => req<{ accepted: number; skipped: number }>("/api/review/keep-all", { method: "POST" }),
+  keep: (id: string) => req<{ ok: true; accepted: true; disposition: "started" | "waiting" }>(`/api/review/${id}/keep`, { method: "POST" }),
+  cancelKeep: (id: string) => req(`/api/review/${id}/cancel-keep`, { method: "POST" }),
+  keepSelected: (ids: string[]) => req<{ accepted: number; skipped: number; started?: number; waiting?: number }>("/api/review/keep-selected", { method: "POST", body: JSON.stringify({ ids }) }),
+  keepAll: () => req<{ accepted: number; skipped: number; started?: number; waiting?: number }>("/api/review/keep-all", { method: "POST" }),
   discard: (id: string) => req(`/api/review/${id}/discard`, { method: "POST" }),
   requeueFlagged: (id: string) => req<{ ok: true; id: string }>(`/api/review/${id}/requeue`, { method: "POST" }),
+  requestReviewPreview: (reviewId: string, body: PreviewRequestBody) =>
+    req<PreviewStatus>(`/api/review/${encodeURIComponent(reviewId)}/previews`, { method: "POST", body: JSON.stringify(body) }),
+  reviewPreviewStatus: (reviewId: string, taskId: string, init?: RequestInit) =>
+    req<PreviewStatus>(`/api/review/${encodeURIComponent(reviewId)}/previews/${encodeURIComponent(taskId)}`, init),
+  cancelReviewPreview: (reviewId: string, taskId: string) =>
+    req<{ ok: true }>(`/api/review/${encodeURIComponent(reviewId)}/previews/${encodeURIComponent(taskId)}/cancel`, { method: "POST" }),
   history: (offset = 0, limit = 50) => req<LibraryPage<HistoryRow>>(`/api/history?offset=${offset}&limit=${limit}`),
   home: () => req<HomePayload>("/api/home"),
   search: (q: string) => req<{ items: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`),
@@ -167,13 +175,48 @@ export const api = {
   addExclusion: (kind: Exclusion["kind"], value: string) =>
     req<{ exclusions: Exclusion[] }>("/api/exclusions", { method: "POST", body: JSON.stringify({ kind, value }) }),
   deleteExclusion: (id: string) => req<{ exclusions: Exclusion[] }>(`/api/exclusions/${id}`, { method: "DELETE" }),
+  playbackSettings: () => req<PlaybackSettingsPayload>("/api/playback/settings"),
+  savePlaybackSettings: (body: { connections: PlaybackConnectionUpdate[] }) =>
+    req<PlaybackSettingsPayload>("/api/playback/settings", { method: "PUT", body: JSON.stringify(body) }),
+  testPlaybackAccess: (id: string) =>
+    req<{ ok: boolean; playback?: { householdVisible?: boolean; message?: string | null; kind?: string } }>(
+      `/api/playback/connections/${encodeURIComponent(id)}/test`,
+      { method: "POST" },
+    ),
+  playbackDiagnostics: (query: PlaybackListParams = {}) =>
+    req<PlaybackListPage<PlaybackDiagnostic>>(`/api/playback/diagnostics?${playbackQuery(query)}`),
+  playbackObservations: (query: PlaybackListParams = {}) =>
+    req<PlaybackListPage<PlaybackObservation>>(`/api/playback/observations?${playbackQuery(query)}`),
+  dismissPlaybackDiagnostic: (id: string) =>
+    req<{ ok: true }>(`/api/playback/diagnostics/${encodeURIComponent(id)}/dismiss`, { method: "POST" }),
+  playbackRepairDraft: (id: string) =>
+    req<PlaybackRepairDraft>(`/api/playback/diagnostics/${encodeURIComponent(id)}/repair-draft`, { method: "POST" }),
+  clearPlaybackHistory: () =>
+    req<{ ok: true }>(`/api/playback/history`, { method: "DELETE" }),
 };
+
+function playbackQuery(query: PlaybackListParams): string {
+  const params = new URLSearchParams();
+  if (query.offset != null) params.set("offset", String(query.offset));
+  if (query.limit != null) params.set("limit", String(query.limit));
+  if (query.days != null) params.set("days", String(query.days));
+  if (query.connectionId) params.set("connectionId", query.connectionId);
+  if (query.deviceId) params.set("deviceId", query.deviceId);
+  if (query.client) params.set("client", query.client);
+  if (query.reasonFamily) params.set("reasonFamily", query.reasonFamily);
+  if (query.title) params.set("title", query.title);
+  if (query.itemId) params.set("itemId", query.itemId);
+  if (query.unmatched) params.set("unmatched", "1");
+  return params.toString();
+}
 
 export type LibraryPage<T> = {
   items: T[];
   nextOffset: number | null;
   total: number;
   pendingCount?: number;
+  waitingCount?: number;
+  keepingCount?: number;
   finishedCount?: number;
   healthyCount?: number;
   suggestionCount?: number;
@@ -223,6 +266,7 @@ export type ClusterNode = {
   runningCount?: number;
   waitingCount?: number;
   runningTitles?: string[];
+  playbackHold?: PlaybackHold | null;
 };
 export type WorkNodeJob = {
   id: string;
@@ -380,21 +424,100 @@ export type JobRow = {
   assignedNodeId?: string | null;
   assignedNodeName?: string | null;
   waitingForNode?: boolean;
-  waitingReason?: "offline" | "busy" | null;
+  waitingReason?: "offline" | "busy" | "playback" | "playback-status" | null;
+  playbackHold?: PlaybackHold | null;
+};
+export type PlaybackHold = {
+  reason: "playing" | "unknown" | "cooldown" | null;
+  sentence: string | null;
+  detail: string | null;
+  observedAt: number | null;
+  connectionIds: string[];
+  connectionNames: string[];
+};
+export type PlaybackConnectionUpdate = {
+  connectionId: string;
+  observePlayback?: boolean;
+  retainHistory?: boolean;
+  protectNodes?: boolean;
+  protectedNodeIds?: string[];
+  protectReplacement?: boolean;
+  coveredArrInstanceIds?: string[];
+};
+export type PlaybackSettingsPayload = {
+  connections: Array<{
+    connectionId: string;
+    name: string;
+    url: string;
+    observePlayback: boolean;
+    retainHistory: boolean;
+    protectNodes: boolean;
+    protectedNodeIds: string[];
+    protectReplacement: boolean;
+    coveredArrInstanceIds: string[];
+    health: {
+      status: string;
+      stale: boolean;
+      lastSuccessAt: number | null;
+      lastError: string | null;
+    };
+  }>;
+  historyDays: number;
+  historyMaxOccurrences: number;
+};
+export type ReviewAudioTrack = {
+  index: number;
+  language: string;
+  channels: number;
+  codec: string;
+  default?: boolean;
+};
+export type ReviewCompareFrame = {
+  codec: string | null;
+  sizeBytes: number | null;
+  sizePerHourGb: number | null;
+  durationSec: number;
+  tracks: string;
+  audio?: ReviewAudioTrack[];
 };
 export type ReviewRow = {
   id: string;
   displayTitle: string;
-  status: "pending" | "keeping" | "discarding";
+  status: "pending" | "waiting" | "keeping" | "discarding";
   flagged: boolean;
   flagReason: string | null;
-  source: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
-  sidecar: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
+  source: ReviewCompareFrame;
+  sidecar: ReviewCompareFrame;
   error: string | null;
   nodeName?: string | null;
   encodeApi?: string | null;
   gpuName?: string | null;
   encodeMs?: number | null;
+  intentOrigin?: "keep" | "direct" | null;
+  waitReason?: string | null;
+  cancellable?: boolean;
+};
+export type PreviewTaskStatus = "queued" | "running" | "ready" | "failed" | "cancelled" | "expired";
+export type PreviewWaitReason = "node" | "playback" | "input_lock" | "cache_capacity";
+export type PreviewRequestBody = {
+  startMs?: number;
+  durationMs?: number;
+  originalAudioIndex?: number | null;
+  sidecarAudioIndex?: number | null;
+  preset?: "start" | "middle" | "end" | "custom" | null;
+};
+export type PreviewStatus = {
+  id: string;
+  reviewId: string;
+  status: PreviewTaskStatus;
+  waitReason: PreviewWaitReason | null;
+  nodeId: string | null;
+  nodeName: string | null;
+  error: string | null;
+  interval: { startMs: number; durationMs: number } | null;
+  tracks: { originalAudioIndex: number | null; sidecarAudioIndex: number | null };
+  clips: { original: string; finished: string } | null;
+  transform: { scale: string; audio: string; color: string; warnings: string[] } | null;
 };
 export type HistoryRow = { id: string; displayTitle: string; outcome: "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched"; bytesSaved: number; createdAt: number };
 export type HomePayload = {
@@ -444,6 +567,84 @@ export type ExecutablePlan = {
   warning: string | null;
   estimatedOutputBytes: number | null;
   video: { kind: "copy" | "size" | "quality" };
+};
+export type PlaybackListParams = {
+  offset?: number;
+  limit?: number;
+  days?: 7 | 30;
+  connectionId?: string;
+  deviceId?: string;
+  client?: string;
+  reasonFamily?: string;
+  title?: string;
+  itemId?: string;
+  unmatched?: boolean;
+};
+export type PlaybackListPage<T> = LibraryPage<T> & {
+  windowDays: number;
+  windowStartAt: number;
+  connections: Array<{ connectionId: string; status: string; stale?: boolean; observePlayback?: boolean }>;
+};
+export type PlaybackRecommendation = {
+  kind: string;
+  explanation: string;
+  canRepair: boolean;
+  openEditor: boolean;
+  draft: Record<string, unknown> | null;
+  suggestionId: string | null;
+};
+export type PlaybackAfterKeep = { status: string; sentence: string | null };
+export type PlaybackDiagnostic = {
+  id: string;
+  connectionId: string;
+  connectionName: string;
+  deviceId: string;
+  deviceLabel: string;
+  itemName: string;
+  libraryItemIds: string[];
+  itemId: string | null;
+  href: string | null;
+  reasonFamily: string;
+  summary: string;
+  rawReasons: string[];
+  playMethod: string | null;
+  match: string;
+  occurrenceCount: number;
+  lastSeenAt: number;
+  recommendation: PlaybackRecommendation;
+  afterKeep: PlaybackAfterKeep;
+  stale: boolean;
+};
+export type PlaybackObservation = {
+  id: string;
+  connectionId: string;
+  deviceId: string;
+  deviceLabel: string;
+  itemName: string;
+  libraryItemIds: string[];
+  summary: string;
+  playMethod: string | null;
+  reasonFamily: string | null;
+  rawReasons: string[];
+  match: string;
+  lastSeenAt: number;
+  stale: boolean;
+};
+export type PlaybackRepairDraft = {
+  ok: true;
+  diagnosticId: string;
+  itemId: string;
+  href: string;
+  explanation: string;
+  kind: string;
+  draft: Record<string, unknown>;
+  queued: boolean;
+};
+export type PlaybackTitleSummary = {
+  windowDays: number;
+  observations: PlaybackObservation[];
+  afterKeep: PlaybackAfterKeep;
+  problemCount: number;
 };
 
 export function formatSize(bytes: number | null | undefined): string {

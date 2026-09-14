@@ -92,8 +92,8 @@ describe("job promotion follow-up", () => {
       const queued = jobs.enqueueCustom(itemId, plan);
       expect("id" in queued).toBe(true);
       if (!("id" in queued)) return;
-      await vi.waitFor(() => expect(store.getJob(queued.id)?.status).toBe("succeeded"));
-      expect(readFileSync(sourcePath, "utf8")).toBe("NEW");
+      await vi.waitFor(() => expect(readFileSync(sourcePath, "utf8")).toBe("NEW"));
+      expect(store.getJob(queued.id)?.status).toBe("succeeded");
       expect(store.getJob(queued.id)?.promoteError).toMatch(/Could not list quality profiles/);
     } finally {
       jobs.stop();
@@ -189,9 +189,9 @@ describe("job promotion follow-up", () => {
       const queued = jobs.enqueueCustom(itemId, plan);
       expect("id" in queued).toBe(true);
       if (!("id" in queued)) return;
-      await vi.waitFor(() => expect(store.getJob(queued.id)?.status).toBe("succeeded"));
+      await vi.waitFor(() => expect(store.getItem(itemId)?.keptSizeBytes).toBe(3));
+      expect(store.getJob(queued.id)?.status).toBe("succeeded");
       expect(reinspected).toEqual([{ path: join(dir, "movie.mkv"), sizeBytes: 3 }]);
-      expect(store.getItem(itemId)?.keptSizeBytes).toBe(3);
     } finally {
       jobs.stop();
       store.close();
@@ -456,15 +456,15 @@ describe("job promotion follow-up", () => {
       const queued = jobs.enqueueCustom(itemId, plan);
       expect("id" in queued).toBe(true);
       if (!("id" in queued)) return;
-      await vi.waitFor(() => expect(store.getJob(queued.id)?.status).toBe("succeeded"));
-      expect(readFileSync(sourcePath, "utf8")).toBe("NEW");
+      await vi.waitFor(() => expect(readFileSync(sourcePath, "utf8")).toBe("NEW"));
+      expect(store.getJob(queued.id)?.status).toBe("succeeded");
     } finally {
       jobs.stop();
       store.close();
     }
   });
 
-  it("deletes the review-path sidecar when a direct write replace fails", async () => {
+  it("keeps the sidecar in Review when a direct write replace fails", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-direct-fail-"));
     const store = new Store(join(dir, "polisharr.db"));
     const instanceId = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
@@ -505,10 +505,11 @@ describe("job promotion follow-up", () => {
       const queued = jobs.enqueueCustom(itemId, plan);
       expect("id" in queued).toBe(true);
       if (!("id" in queued)) return;
-      await vi.waitFor(() => expect(store.getJob(queued.id)?.status).toBe("failed"));
+      await vi.waitFor(() => expect(store.listReviews()[0]?.error).toBe("disk full"));
+      expect(store.getJob(queued.id)?.status).toBe("succeeded");
       expect(readFileSync(sourcePath, "utf8")).toBe("ORIGINAL");
-      expect(existsSync(sidecarPath)).toBe(false);
-      expect(store.getJob(queued.id)?.error).toBe("disk full");
+      expect(existsSync(sidecarPath)).toBe(true);
+      expect(store.listReviews()[0]?.status).toBe("pending");
     } finally {
       jobs.stop();
       store.close();
@@ -605,8 +606,8 @@ describe("job promotion follow-up", () => {
     jobs.start();
     try {
       if (!("id" in queued)) return;
-      await vi.waitFor(() => expect(store.getJob(queued.id)?.status).toBe("succeeded"));
-      expect(readFileSync(sourcePath, "utf8")).toBe("NEW");
+      await vi.waitFor(() => expect(readFileSync(sourcePath, "utf8")).toBe("NEW"));
+      expect(store.getJob(queued.id)?.status).toBe("succeeded");
       expect(store.listReviews()).toHaveLength(0);
     } finally {
       jobs.stop();
@@ -722,10 +723,10 @@ describe("remote worker complete", () => {
       sizeBytes: 3,
     });
     expect(done).toEqual({ ok: true });
-    expect(readFileSync(sourcePath, "utf8")).toBe("NEW");
+    expect(store.getJob(queued.id)?.status).toBe("succeeded");
+    await vi.waitFor(() => expect(readFileSync(sourcePath, "utf8")).toBe("NEW"));
     expect(existsSync(`${sourcePath}.opt-old`)).toBe(false);
     expect(store.listReviews()).toHaveLength(0);
-    expect(store.getJob(queued.id)?.status).toBe("succeeded");
     expect(arrCalls.some((url) => url.includes("/command") || url.includes("/refresh") || url.includes("/movie"))).toBe(true);
     store.close();
   });

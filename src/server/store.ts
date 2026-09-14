@@ -11,21 +11,55 @@ import type {
   JobPhase,
   JobStatus,
   LibraryItem,
+  PlaybackConnectionSettings,
+  PlaybackDismissal,
+  PlaybackFileRevision,
+  PlaybackMatchOutcome,
+  PlaybackOccurrence,
+  PreviewAdmissionKind,
+  PreviewArtifact,
+  PreviewRequest,
+  PreviewTask,
+  PreviewTaskStatus,
+  PreviewWaitReason,
+  ReplacementOrigin,
   ReviewItem,
   ReviewStatus,
   Settings,
   Suggestion,
   VideoTarget,
 } from "./types.ts";
+import { PLAYBACK_HISTORY_DAYS, PLAYBACK_HISTORY_MAX } from "./types.ts";
+import { parseFileRevision } from "./file-revision.ts";
 import { parseAudioMix, parseVideoTarget, type AudioMix } from "./types.ts";
 import { normalizeInspection } from "./inspect.ts";
 import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
 import { parseStoredSettings } from "./settings.ts";
 import type { SuggestionFilters } from "./suggestion-filters.ts";
 import { suggestionTrackComparison } from "./tracks.ts";
-import { encodeNeedFromPlan, nodeCanEncode, nodeIsOnline, parseHardwareInfo, parseNodeRole, poolSpreadLimit, type ClusterNode, type EncodeNeed } from "./cluster.ts";
+import {
+  encodeNeedFromPlan,
+  nodeCanEncode,
+  nodeIsOnline,
+  parseHardwareInfo,
+  parseNodeRole,
+  parsePreviewCapability,
+  parsePreviewRequest,
+  poolSpreadLimit,
+  PREVIEW_LEASE_SAFETY_MARGIN_MS,
+  type ClusterNode,
+  type EncodeNeed,
+} from "./cluster.ts";
 
-export type Page<T> = { items: T[]; nextOffset: number | null; total: number; pendingCount?: number; finishedCount?: number };
+export type Page<T> = {
+  items: T[];
+  nextOffset: number | null;
+  total: number;
+  pendingCount?: number;
+  waitingCount?: number;
+  keepingCount?: number;
+  finishedCount?: number;
+};
 
 export type LibrarySnapshot = {
   item: LibraryItem;
@@ -200,6 +234,58 @@ export class Store {
         version TEXT NOT NULL DEFAULT '',
         current_job_id TEXT
       );
+      CREATE TABLE IF NOT EXISTS playback_settings (
+        connection_id TEXT PRIMARY KEY,
+        observe INTEGER NOT NULL DEFAULT 0,
+        retain_history INTEGER NOT NULL DEFAULT 1,
+        protect_nodes INTEGER NOT NULL DEFAULT 0,
+        protected_node_ids TEXT NOT NULL DEFAULT '[]',
+        protect_replacement INTEGER NOT NULL DEFAULT 0,
+        covered_arr_ids TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE TABLE IF NOT EXISTS playback_occurrences (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        device_label TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        media_source_id TEXT NOT NULL,
+        item_name TEXT NOT NULL,
+        play_method TEXT,
+        media_type TEXT,
+        is_paused INTEGER,
+        reasons TEXT NOT NULL,
+        raw_reasons TEXT NOT NULL,
+        reason_family TEXT,
+        audio_stream_index INTEGER,
+        subtitle_stream_index INTEGER,
+        match_outcome TEXT NOT NULL,
+        library_item_ids TEXT NOT NULL,
+        path TEXT,
+        revision TEXT,
+        started_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        gap INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS playback_occurrences_seen ON playback_occurrences (last_seen_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS playback_occurrences_connection ON playback_occurrences (connection_id, last_seen_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS playback_occurrences_open
+        ON playback_occurrences (connection_id, session_id, item_id, media_source_id)
+        WHERE ended_at IS NULL;
+      CREATE TABLE IF NOT EXISTS playback_dismissals (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        reason_family TEXT,
+        revision TEXT,
+        match_outcome TEXT NOT NULL,
+        library_item_ids TEXT NOT NULL,
+        path TEXT,
+        jellyfin_item_id TEXT NOT NULL,
+        dismissed_at INTEGER NOT NULL
+      );
     `);
     this.ensureColumn("jobs", "position", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("jobs", "phase", "TEXT NOT NULL DEFAULT 'queued'");
@@ -219,6 +305,70 @@ export class Store {
     this.ensureColumn("jobs", "lease_until", "INTEGER");
     this.ensureColumn("jobs", "lease_token", "TEXT");
     this.ensureColumn("jobs", "started_at", "INTEGER");
+    this.ensureColumn("jobs", "dispatched_write_mode", "TEXT");
+    this.ensureColumn("jobs", "source_revision", "TEXT");
+    this.ensureColumn("reviews", "intent_origin", "TEXT");
+    this.ensureColumn("reviews", "intent_requested_at", "INTEGER");
+    this.ensureColumn("reviews", "source_revision", "TEXT");
+    this.ensureColumn("reviews", "sidecar_revision", "TEXT");
+    this.ensureColumn("reviews", "wait_reason", "TEXT");
+    this.ensureColumn("reviews", "mutation_started", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("nodes", "preview", "TEXT");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS preview_tasks (
+        id TEXT PRIMARY KEY,
+        review_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        wait_reason TEXT,
+        node_id TEXT,
+        lease_token TEXT,
+        lease_until INTEGER,
+        publication_allowed INTEGER NOT NULL DEFAULT 1,
+        error TEXT,
+        request TEXT NOT NULL,
+        source_revision TEXT,
+        sidecar_revision TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        cache_key TEXT,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER,
+        last_used_at INTEGER,
+        artifact TEXT
+      );
+      CREATE INDEX IF NOT EXISTS preview_tasks_review ON preview_tasks (review_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS preview_tasks_status ON preview_tasks (status);
+      CREATE TABLE IF NOT EXISTS preview_reservations (
+        task_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        PRIMARY KEY (task_id, kind)
+      );
+      CREATE INDEX IF NOT EXISTS preview_reservations_path ON preview_reservations (path);
+      CREATE TABLE IF NOT EXISTS node_admission (
+        node_id TEXT PRIMARY KEY,
+        last_kind TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS kept_events (
+        sidecar_path TEXT PRIMARY KEY,
+        review_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        bytes_saved INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS reviews_active_sidecar
+        ON reviews (sidecar_path) WHERE status IN ('waiting', 'keeping');
+    `);
+    this.ensureColumn("preview_tasks", "cache_key", "TEXT");
+    this.ensureColumn("preview_tasks", "bytes", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("preview_tasks", "expires_at", "INTEGER");
+    this.ensureColumn("preview_tasks", "last_used_at", "INTEGER");
+    this.ensureColumn("preview_tasks", "artifact", "TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS preview_tasks_cache ON preview_tasks (cache_key, status)");
     this.ensureColumn("library_items", "arr_series_id", "INTEGER");
     this.ensureColumn("library_items", "arr_episode_file_id", "INTEGER");
     this.ensureColumn("library_items", "first_seen_at", "INTEGER NOT NULL DEFAULT 0");
@@ -355,6 +505,9 @@ export class Store {
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM library_roots WHERE instance_id = ?").run(id);
       this.db.prepare("DELETE FROM series_preferences WHERE instance_id = ?").run(id);
+      this.db.prepare("DELETE FROM playback_settings WHERE connection_id = ?").run(id);
+      this.db.prepare("DELETE FROM playback_occurrences WHERE connection_id = ?").run(id);
+      this.db.prepare("DELETE FROM playback_dismissals WHERE connection_id = ?").run(id);
       this.db.prepare("DELETE FROM instances WHERE id = ?").run(id);
     })();
   }
@@ -423,6 +576,26 @@ export class Store {
        WHERE i.path = ? AND i.instance_id = ?
        ORDER BY i.season, i.episode, i.id`,
     ).all(path, instanceId) as Record<string, unknown>[];
+    return rows.map(mapItem);
+  }
+
+  itemsForCanonicalPath(path: string): LibraryItem[] {
+    if (!path) return [];
+    const rows = this.db.prepare(
+      `SELECT i.*, inst.name AS instance_name FROM library_items i JOIN instances inst ON inst.id = i.instance_id
+       WHERE i.path = ?
+       ORDER BY i.season, i.episode, i.id`,
+    ).all(path) as Record<string, unknown>[];
+    return rows.map(mapItem);
+  }
+
+  itemsForPathIgnoreCase(path: string): LibraryItem[] {
+    if (!path) return [];
+    const rows = this.db.prepare(
+      `SELECT i.*, inst.name AS instance_name FROM library_items i JOIN instances inst ON inst.id = i.instance_id
+       WHERE LOWER(i.path) = LOWER(?)
+       ORDER BY i.season, i.episode, i.id`,
+    ).all(path) as Record<string, unknown>[];
     return rows.map(mapItem);
   }
 
@@ -941,12 +1114,20 @@ export class Store {
     writeMode: "sidecar" | "direct";
     nodeId: string | null;
     startedAt: number | null;
+    dispatchedWriteMode: "sidecar" | "direct" | null;
+    sourceRevision: PlaybackFileRevision | null;
   }>): void {
     const current = this.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!current) return;
+    const dispatched = patch.dispatchedWriteMode === undefined
+      ? current.dispatched_write_mode
+      : patch.dispatchedWriteMode;
+    const sourceRevision = patch.sourceRevision === undefined
+      ? current.source_revision
+      : patch.sourceRevision == null ? null : JSON.stringify(patch.sourceRevision);
     this.db
       .prepare(
-        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=? WHERE id=?",
+        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=?, dispatched_write_mode=?, source_revision=? WHERE id=?",
       )
       .run(
         patch.status ?? current.status,
@@ -959,8 +1140,14 @@ export class Store {
         patch.promoteError === undefined ? current.promote_error : patch.promoteError,
         patch.nodeId === undefined ? current.node_id : patch.nodeId,
         patch.startedAt === undefined ? current.started_at : patch.startedAt,
+        dispatched ?? null,
+        sourceRevision ?? null,
         id,
       );
+  }
+
+  releaseJobLease(id: string): void {
+    this.db.prepare("UPDATE jobs SET lease_until = NULL, lease_token = NULL WHERE id = ?").run(id);
   }
 
   appendJobLog(id: string, chunk: string): void {
@@ -1068,7 +1255,7 @@ export class Store {
     ).run(now).changes;
   }
 
-  claimQueuedJobs(nodeId: string, limit: number, now: number, leaseMs: number): Array<(Job & { plan: JobPlan; leaseToken: string })> {
+  claimQueuedJobs(nodeId: string, limit: number, now: number, leaseMs: number, excludePeerNodeIds: Iterable<string> = []): Array<(Job & { plan: JobPlan; leaseToken: string })> {
     const node = this.getNode(nodeId);
     if (!node?.enabled) return [];
     const slots = Math.max(0, node.concurrency - this.runningCountOnNode(nodeId));
@@ -1112,7 +1299,7 @@ export class Store {
         if (!nodeCanEncode(node, need)) continue;
         capable.push({ id: row.id, need });
       }
-      const budget = this.poolSpreadBudget(nodeId, remaining, now, capable.map((row) => row.need));
+      const budget = this.poolSpreadBudget(nodeId, remaining, now, capable.map((row) => row.need), excludePeerNodeIds);
       const beforePool = claimed.length;
       for (const row of capable) {
         if (claimed.length - beforePool >= budget) break;
@@ -1153,10 +1340,33 @@ export class Store {
     ).all(nodeId) as Array<{ id: string }>).map((row) => row.id);
   }
 
-  runningCountOnNode(nodeId: string): number {
+  runningJobCountOnNode(nodeId: string): number {
     return Number((this.db.prepare(
       "SELECT COUNT(*) AS n FROM jobs WHERE node_id = ? AND status = 'running'",
     ).get(nodeId) as { n: number }).n);
+  }
+
+  runningPreviewCountOnNode(nodeId: string): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM preview_tasks WHERE node_id = ? AND status = 'running'",
+    ).get(nodeId) as { n: number }).n);
+  }
+
+  runningPreviewCount(): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM preview_tasks WHERE status = 'running'",
+    ).get() as { n: number }).n);
+  }
+
+  queuedPreviewCount(): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM preview_tasks WHERE status = 'queued'",
+    ).get() as { n: number }).n);
+  }
+
+  runningCountOnNode(nodeId: string): number {
+    // A preview pair consumes one ordinary encode slot.
+    return this.runningJobCountOnNode(nodeId) + this.runningPreviewCountOnNode(nodeId);
   }
 
   busyCountOnNode(nodeId: string): number {
@@ -1164,18 +1374,19 @@ export class Store {
       `SELECT COUNT(*) AS n FROM jobs WHERE
          (status = 'running' AND node_id = ?)
          OR (status IN ('queued', 'held', 'paused') AND assigned_node_id = ?)`,
-    ).get(nodeId, nodeId) as { n: number }).n);
+    ).get(nodeId, nodeId) as { n: number }).n) + this.runningPreviewCountOnNode(nodeId);
   }
 
-  poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[]): number {
-    return poolSpreadLimit(freeSlots, needs.length, this.peerCapableFreeSlots(nodeId, needs, now));
+  poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[], excludePeerNodeIds: Iterable<string> = []): number {
+    return poolSpreadLimit(freeSlots, needs.length, this.peerCapableFreeSlots(nodeId, needs, now, excludePeerNodeIds));
   }
 
-  peerCapableFreeSlots(claimantId: string, needs: EncodeNeed[], now: number): number {
+  peerCapableFreeSlots(claimantId: string, needs: EncodeNeed[], now: number, excludePeerNodeIds: Iterable<string> = []): number {
     if (needs.length === 0) return 0;
+    const excluded = new Set(excludePeerNodeIds);
     let total = 0;
     for (const peer of this.listNodes()) {
-      if (peer.id === claimantId || !peer.enabled || !nodeIsOnline(peer.lastSeen, now)) continue;
+      if (peer.id === claimantId || excluded.has(peer.id) || !peer.enabled || !nodeIsOnline(peer.lastSeen, now)) continue;
       const free = Math.max(0, peer.concurrency - this.runningCountOnNode(peer.id));
       if (free <= 0) continue;
       if (!needs.some((need) => nodeCanEncode(peer, need))) continue;
@@ -1207,8 +1418,10 @@ export class Store {
   insertReview(row: ReviewItem): void {
     this.db
       .prepare(
-        `INSERT INTO reviews (id, job_id, item_id, status, flagged, flag_reason, source_path, sidecar_path, compare, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO reviews (
+           id, job_id, item_id, status, flagged, flag_reason, source_path, sidecar_path, compare, error,
+           intent_origin, intent_requested_at, source_revision, sidecar_revision, wait_reason, mutation_started
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1228,6 +1441,12 @@ export class Store {
           encodeMs: row.encodeMs ?? null,
         }),
         row.error,
+        row.intentOrigin ?? null,
+        row.intentRequestedAt ?? null,
+        row.sourceRevision ? JSON.stringify(row.sourceRevision) : null,
+        row.sidecarRevision ? JSON.stringify(row.sidecarRevision) : null,
+        row.waitReason ?? null,
+        row.mutationStarted ? 1 : 0,
       );
   }
 
@@ -1246,6 +1465,8 @@ export class Store {
     return {
       ...page(rows.map((row) => ({ ...mapReview(row), displayTitle: this.fileDisplayTitle(String(row.item_id)) ?? joinedDisplayTitle(row, String(row.item_id)) })), total, offset, limit),
       pendingCount: this.pendingReviewCount(),
+      waitingCount: this.reviewCountByStatus("waiting"),
+      keepingCount: this.reviewCountByStatus("keeping"),
     };
   }
 
@@ -1253,12 +1474,27 @@ export class Store {
     return (this.db.prepare("SELECT id FROM reviews WHERE status = 'pending'").all() as Array<{ id: string }>).map((row) => row.id);
   }
 
+  waitingReviewIds(): string[] {
+    return (this.db.prepare(
+      "SELECT id FROM reviews WHERE status = 'waiting' ORDER BY COALESCE(intent_requested_at, 0) ASC, id",
+    ).all() as Array<{ id: string }>).map((row) => row.id);
+  }
+
   pendingReviewCount(): number {
-    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM reviews WHERE status = 'pending'").get() as { n: number }).n);
+    return this.reviewCountByStatus("pending");
+  }
+
+  reviewCountByStatus(status: ReviewStatus): number {
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM reviews WHERE status = ?").get(status) as { n: number }).n);
   }
 
   getReview(id: string): ReviewItem | undefined {
     const row = this.db.prepare("SELECT * FROM reviews WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapReview(row) : undefined;
+  }
+
+  getReviewForJob(jobId: string): ReviewItem | undefined {
+    const row = this.db.prepare("SELECT * FROM reviews WHERE job_id = ?").get(jobId) as Record<string, unknown> | undefined;
     return row ? mapReview(row) : undefined;
   }
 
@@ -1281,16 +1517,97 @@ export class Store {
     return (this.db.prepare("SELECT * FROM reviews WHERE sidecar_path = ?").all(sidecarPath) as Record<string, unknown>[]).map(mapReview);
   }
 
-  updateReview(id: string, patch: Partial<{ status: ReviewStatus; error: string | null }>): void {
+  updateReview(id: string, patch: Partial<{
+    status: ReviewStatus;
+    error: string | null;
+    intentOrigin: ReplacementOrigin | null;
+    intentRequestedAt: number | null;
+    waitReason: string | null;
+    sourceRevision: PlaybackFileRevision | null;
+    sidecarRevision: PlaybackFileRevision | null;
+    mutationStarted: boolean;
+  }>): void {
     const current = this.getReview(id);
     if (!current) return;
+    const origin = patch.intentOrigin === undefined ? current.intentOrigin ?? null : patch.intentOrigin;
+    const requestedAt = patch.intentRequestedAt === undefined ? current.intentRequestedAt ?? null : patch.intentRequestedAt;
+    const waitReason = patch.waitReason === undefined ? current.waitReason ?? null : patch.waitReason;
+    const sourceRevision = patch.sourceRevision === undefined
+      ? current.sourceRevision ?? null
+      : patch.sourceRevision;
+    const sidecarRevision = patch.sidecarRevision === undefined
+      ? current.sidecarRevision ?? null
+      : patch.sidecarRevision;
     this.db
-      .prepare("UPDATE reviews SET status=?, error=? WHERE id=?")
-      .run(patch.status ?? current.status, patch.error === undefined ? current.error : patch.error, id);
+      .prepare(
+        `UPDATE reviews SET status=?, error=?, intent_origin=?, intent_requested_at=?, wait_reason=?,
+           source_revision=?, sidecar_revision=?, mutation_started=? WHERE id=?`,
+      )
+      .run(
+        patch.status ?? current.status,
+        patch.error === undefined ? current.error : patch.error,
+        origin,
+        requestedAt,
+        waitReason,
+        sourceRevision ? JSON.stringify(sourceRevision) : null,
+        sidecarRevision ? JSON.stringify(sidecarRevision) : null,
+        (patch.mutationStarted ?? current.mutationStarted) ? 1 : 0,
+        id,
+      );
+  }
+
+  clearReplacementIntent(id: string): void {
+    this.updateReview(id, {
+      status: "pending",
+      intentOrigin: null,
+      intentRequestedAt: null,
+      waitReason: null,
+      mutationStarted: false,
+    });
+  }
+
+  clearWaitingIntent(id: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE reviews SET status = 'pending', intent_origin = NULL, intent_requested_at = NULL,
+         wait_reason = NULL, mutation_started = 0, error = NULL
+       WHERE id = ? AND status = 'waiting' AND mutation_started = 0`,
+    ).run(id);
+    return result.changes === 1;
+  }
+
+  claimReplacementMutation(id: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE reviews SET status = 'keeping', mutation_started = 1, error = NULL
+       WHERE id = ? AND mutation_started = 0 AND status IN ('waiting', 'keeping')`,
+    ).run(id);
+    return result.changes === 1;
+  }
+
+  claimReviewDiscard(id: string): ReviewItem | undefined {
+    return this.db.transaction(() => {
+      const current = this.getReview(id);
+      if (!current) return undefined;
+      const result = this.db.prepare(
+        `UPDATE reviews SET status = 'discarding', intent_origin = NULL, intent_requested_at = NULL,
+           wait_reason = NULL, mutation_started = 0
+         WHERE id = ? AND mutation_started = 0 AND status IN ('pending', 'waiting')`,
+      ).run(id);
+      if (result.changes !== 1) return undefined;
+      return current;
+    })();
   }
 
   deleteReview(id: string): void {
     this.db.prepare("DELETE FROM reviews WHERE id = ?").run(id);
+  }
+
+  recordKeptEvent(sidecarPath: string, reviewId: string, itemId: string, bytesSaved: number, now: number): boolean {
+    const result = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO kept_events (sidecar_path, review_id, item_id, bytes_saved, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(sidecarPath, reviewId, itemId, bytesSaved, now);
+    return result.changes === 1;
   }
 
   addHistory(itemId: string, outcome: ActivityOutcome, bytesSaved: number, now = Date.now()): void {
@@ -1467,8 +1784,8 @@ export class Store {
 
   upsertNode(node: ClusterNode): void {
     this.db.prepare(
-      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id, preview)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          role = excluded.role,
@@ -1477,7 +1794,8 @@ export class Store {
          concurrency = excluded.concurrency,
          enabled = excluded.enabled,
          version = excluded.version,
-         current_job_id = excluded.current_job_id`,
+         current_job_id = excluded.current_job_id,
+         preview = excluded.preview`,
     ).run(
       node.id,
       node.name,
@@ -1488,6 +1806,7 @@ export class Store {
       node.enabled ? 1 : 0,
       node.version,
       node.currentJobId,
+      node.preview == null ? null : JSON.stringify(node.preview),
     );
   }
 
@@ -1504,8 +1823,523 @@ export class Store {
     this.db.prepare("DELETE FROM nodes WHERE id = ?").run(id);
   }
 
+  lastAdmissionKind(nodeId: string): PreviewAdmissionKind | null {
+    const row = this.db.prepare("SELECT last_kind FROM node_admission WHERE node_id = ?").get(nodeId) as
+      | { last_kind: string }
+      | undefined;
+    if (row?.last_kind === "optimize" || row?.last_kind === "preview") return row.last_kind;
+    return null;
+  }
+
+  recordAdmissionKind(nodeId: string, kind: PreviewAdmissionKind, now: number): void {
+    this.db.prepare(
+      `INSERT INTO node_admission (node_id, last_kind, at) VALUES (?, ?, ?)
+       ON CONFLICT(node_id) DO UPDATE SET last_kind = excluded.last_kind, at = excluded.at`,
+    ).run(nodeId, kind, now);
+  }
+
+  insertPreviewTask(row: {
+    id: string;
+    reviewId: string;
+    status?: PreviewTaskStatus;
+    waitReason?: PreviewWaitReason | null;
+    error?: string | null;
+    request: PreviewRequest;
+    sourceRevision?: PlaybackFileRevision | null;
+    sidecarRevision?: PlaybackFileRevision | null;
+    cacheKey?: string | null;
+    artifact?: PreviewArtifact | null;
+    bytes?: number;
+    expiresAt?: number | null;
+    lastUsedAt?: number | null;
+    createdAt: number;
+  }): void {
+    this.db.prepare(
+      `INSERT INTO preview_tasks (
+         id, review_id, status, wait_reason, node_id, lease_token, lease_until, publication_allowed,
+         error, request, source_revision, sidecar_revision, created_at, started_at, updated_at,
+         cache_key, bytes, expires_at, last_used_at, artifact
+       ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.id,
+      row.reviewId,
+      row.status ?? "queued",
+      row.waitReason ?? null,
+      row.error ?? null,
+      JSON.stringify(row.request),
+      row.sourceRevision ? JSON.stringify(row.sourceRevision) : null,
+      row.sidecarRevision ? JSON.stringify(row.sidecarRevision) : null,
+      row.createdAt,
+      row.createdAt,
+      row.cacheKey ?? null,
+      row.bytes ?? 0,
+      row.expiresAt ?? null,
+      row.lastUsedAt ?? null,
+      row.artifact ? JSON.stringify(row.artifact) : null,
+    );
+  }
+
+  getPreviewTask(id: string): PreviewTask | undefined {
+    const row = this.db.prepare("SELECT * FROM preview_tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapPreviewTask(row) : undefined;
+  }
+
+  listPreviewTasks(reviewId?: string): PreviewTask[] {
+    const rows = reviewId
+      ? this.db.prepare("SELECT * FROM preview_tasks WHERE review_id = ? ORDER BY created_at ASC").all(reviewId)
+      : this.db.prepare("SELECT * FROM preview_tasks ORDER BY created_at ASC").all();
+    return (rows as Record<string, unknown>[]).map(mapPreviewTask);
+  }
+
+  queuedPreviewTasks(): PreviewTask[] {
+    return (this.db.prepare(
+      "SELECT * FROM preview_tasks WHERE status = 'queued' ORDER BY created_at ASC, id ASC",
+    ).all() as Record<string, unknown>[]).map(mapPreviewTask);
+  }
+
+  updatePreviewTask(id: string, patch: Partial<{
+    status: PreviewTaskStatus;
+    waitReason: PreviewWaitReason | null;
+    nodeId: string | null;
+    leaseToken: string | null;
+    leaseUntil: number | null;
+    publicationAllowed: boolean;
+    error: string | null;
+    startedAt: number | null;
+    updatedAt: number;
+    cacheKey: string | null;
+    bytes: number;
+    expiresAt: number | null;
+    lastUsedAt: number | null;
+    artifact: PreviewArtifact | null;
+  }>): void {
+    const current = this.getPreviewTask(id);
+    if (!current) return;
+    this.db.prepare(
+      `UPDATE preview_tasks SET status=?, wait_reason=?, node_id=?, lease_token=?, lease_until=?,
+         publication_allowed=?, error=?, started_at=?, updated_at=?, cache_key=?, bytes=?, expires_at=?,
+         last_used_at=?, artifact=? WHERE id=?`,
+    ).run(
+      patch.status ?? current.status,
+      patch.waitReason === undefined ? current.waitReason : patch.waitReason,
+      patch.nodeId === undefined ? current.nodeId : patch.nodeId,
+      patch.leaseToken === undefined ? current.leaseToken : patch.leaseToken,
+      patch.leaseUntil === undefined ? current.leaseUntil : patch.leaseUntil,
+      (patch.publicationAllowed ?? current.publicationAllowed) ? 1 : 0,
+      patch.error === undefined ? current.error : patch.error,
+      patch.startedAt === undefined ? current.startedAt : patch.startedAt,
+      patch.updatedAt ?? current.updatedAt,
+      patch.cacheKey === undefined ? current.cacheKey : patch.cacheKey,
+      patch.bytes === undefined ? current.bytes : patch.bytes,
+      patch.expiresAt === undefined ? current.expiresAt : patch.expiresAt,
+      patch.lastUsedAt === undefined ? current.lastUsedAt : patch.lastUsedAt,
+      (patch.artifact === undefined ? current.artifact : patch.artifact)
+        ? JSON.stringify(patch.artifact === undefined ? current.artifact : patch.artifact)
+        : null,
+      id,
+    );
+  }
+
+  findReusablePreview(reviewId: string, cacheKey: string): PreviewTask | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM preview_tasks
+       WHERE review_id = ? AND cache_key = ? AND status IN ('queued', 'running', 'ready')
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    ).get(reviewId, cacheKey) as Record<string, unknown> | undefined;
+    return row ? mapPreviewTask(row) : undefined;
+  }
+
+  readyPreviewTasks(): PreviewTask[] {
+    return (this.db.prepare(
+      "SELECT * FROM preview_tasks WHERE status = 'ready' ORDER BY last_used_at ASC, created_at ASC, id ASC",
+    ).all() as Record<string, unknown>[]).map(mapPreviewTask);
+  }
+
+  previewCacheBytes(): number {
+    return Number((this.db.prepare(
+      "SELECT COALESCE(SUM(bytes), 0) AS n FROM preview_tasks WHERE bytes > 0",
+    ).get() as { n: number }).n);
+  }
+
+  recoverInterruptedPreviews(): string[] {
+    const rows = this.db.prepare(
+      "SELECT id FROM preview_tasks WHERE status = 'running'",
+    ).all() as Array<{ id: string }>;
+    this.db.prepare(
+      `UPDATE preview_tasks SET status = 'queued', wait_reason = NULL, node_id = NULL, lease_token = NULL,
+         lease_until = NULL, error = NULL, expires_at = NULL
+       WHERE status = 'running'`,
+    ).run();
+    const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
+    const tx = this.db.transaction(() => {
+      for (const row of rows) release.run(row.id);
+    });
+    tx();
+    return rows.map((row) => row.id);
+  }
+
+  previewLeaseMatches(id: string, token: string): boolean {
+    const task = this.getPreviewTask(id);
+    return Boolean(task?.leaseToken && token && task.leaseToken === token);
+  }
+
+  renewPreviewLeases(nodeId: string, taskIds: string[], until: number): void {
+    if (taskIds.length === 0) return;
+    const stmt = this.db.prepare(
+      "UPDATE preview_tasks SET lease_until = ?, updated_at = ? WHERE id = ? AND node_id = ? AND status = 'running'",
+    );
+    const tx = this.db.transaction(() => {
+      for (const id of taskIds) stmt.run(until, until, id, nodeId);
+    });
+    tx();
+  }
+
+  cancelledPreviewIdsForNode(nodeId: string): string[] {
+    return (this.db.prepare(
+      "SELECT id FROM preview_tasks WHERE node_id = ? AND status = 'cancelled'",
+    ).all(nodeId) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  expirePreviewLeases(now: number): string[] {
+    const expired = this.db.prepare(
+      "SELECT id FROM preview_tasks WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?",
+    ).all(now) as Array<{ id: string }>;
+    // Free the slot and drop the token, but keep lease_until and reservations until the master margin.
+    const fail = this.db.prepare(
+      `UPDATE preview_tasks SET status = 'failed', error = 'The preview node stopped.',
+         lease_token = NULL, wait_reason = NULL, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    );
+    const stale = this.db.prepare(
+      `SELECT DISTINCT r.task_id AS id
+       FROM preview_reservations r
+       JOIN preview_tasks t ON t.id = r.task_id
+       WHERE t.lease_until IS NOT NULL AND t.lease_until < ?`,
+    ).all(now - PREVIEW_LEASE_SAFETY_MARGIN_MS) as Array<{ id: string }>;
+    const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
+    const tx = this.db.transaction(() => {
+      for (const row of expired) fail.run(now, row.id);
+      for (const row of stale) release.run(row.id);
+    });
+    tx();
+    return expired.map((row) => row.id);
+  }
+
+  claimQueuedPreview(
+    nodeId: string,
+    now: number,
+    leaseMs: number,
+    paths: { sourcePath: string; sidecarPath: string },
+  ): (PreviewTask & { leaseToken: string }) | null {
+    const claim = this.db.transaction(() => {
+      const row = this.db.prepare(
+        "SELECT id FROM preview_tasks WHERE status = 'queued' ORDER BY created_at ASC, id ASC LIMIT 1",
+      ).get() as { id: string } | undefined;
+      if (!row) return null;
+      const token = randomUUID();
+      const result = this.db.prepare(
+        `UPDATE preview_tasks SET status = 'running', wait_reason = NULL, node_id = ?, lease_token = ?,
+           lease_until = ?, started_at = COALESCE(started_at, ?), updated_at = ?, error = NULL
+         WHERE id = ? AND status = 'queued'`,
+      ).run(nodeId, token, now + leaseMs, now, now, row.id);
+      if (result.changes !== 1) return null;
+      this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?").run(row.id);
+      this.db.prepare(
+        "INSERT INTO preview_reservations (task_id, path, kind) VALUES (?, ?, 'source')",
+      ).run(row.id, paths.sourcePath);
+      this.db.prepare(
+        "INSERT INTO preview_reservations (task_id, path, kind) VALUES (?, ?, 'sidecar')",
+      ).run(row.id, paths.sidecarPath);
+      const task = this.getPreviewTask(row.id);
+      return task ? { ...task, leaseToken: token } : null;
+    });
+    return claim();
+  }
+
+  releasePreviewReservations(taskId: string): void {
+    this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?").run(taskId);
+  }
+
+  reservationsForReview(reviewId: string): Array<{ taskId: string; path: string; kind: string }> {
+    return this.db.prepare(
+      `SELECT r.task_id AS taskId, r.path AS path, r.kind AS kind
+       FROM preview_reservations r JOIN preview_tasks t ON t.id = r.task_id
+       WHERE t.review_id = ?`,
+    ).all(reviewId) as Array<{ taskId: string; path: string; kind: string }>;
+  }
+
+  reservationsForPath(path: string): Array<{ taskId: string; reviewId: string }> {
+    return this.db.prepare(
+      `SELECT r.task_id AS taskId, t.review_id AS reviewId
+       FROM preview_reservations r JOIN preview_tasks t ON t.id = r.task_id
+       WHERE r.path = ?`,
+    ).all(path) as Array<{ taskId: string; reviewId: string }>;
+  }
+
+  revokePreviewPublication(reviewId: string, now: number): void {
+    this.db.prepare(
+      "UPDATE preview_tasks SET publication_allowed = 0, updated_at = ? WHERE review_id = ?",
+    ).run(now, reviewId);
+  }
+
+  cancelPreviewTasksForReview(reviewId: string, now: number): string[] {
+    const rows = this.db.prepare(
+      "SELECT id, status FROM preview_tasks WHERE review_id = ? AND status IN ('queued', 'running')",
+    ).all(reviewId) as Array<{ id: string; status: string }>;
+    const cancelQueued = this.db.prepare(
+      `UPDATE preview_tasks SET status = 'cancelled', wait_reason = NULL, lease_token = NULL, lease_until = NULL,
+         updated_at = ? WHERE id = ? AND status = 'queued'`,
+    );
+    const cancelRunning = this.db.prepare(
+      "UPDATE preview_tasks SET status = 'cancelled', wait_reason = NULL, updated_at = ? WHERE id = ? AND status = 'running'",
+    );
+    const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
+    const tx = this.db.transaction(() => {
+      for (const row of rows) {
+        if (row.status === "queued") {
+          cancelQueued.run(now, row.id);
+          release.run(row.id);
+        } else {
+          cancelRunning.run(now, row.id);
+        }
+      }
+    });
+    tx();
+    return rows.map((row) => row.id);
+  }
+
+  deletePreviewTasksForReview(reviewId: string): void {
+    const ids = (this.db.prepare("SELECT id FROM preview_tasks WHERE review_id = ?").all(reviewId) as Array<{ id: string }>)
+      .map((row) => row.id);
+    const tx = this.db.transaction(() => {
+      for (const id of ids) this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?").run(id);
+      this.db.prepare("DELETE FROM preview_tasks WHERE review_id = ?").run(reviewId);
+    });
+    tx();
+  }
+
+  readerWaitDeadline(reviewId: string, now: number, safetyMarginMs: number): number {
+    const rows = this.db.prepare(
+      `SELECT t.lease_until AS lease_until
+       FROM preview_tasks t
+       WHERE t.review_id = ? AND t.lease_until IS NOT NULL
+         AND EXISTS (SELECT 1 FROM preview_reservations r WHERE r.task_id = t.id)`,
+    ).all(reviewId) as Array<{ lease_until: number }>;
+    if (rows.length === 0) return now;
+    return Math.max(...rows.map((row) => row.lease_until + safetyMarginMs));
+  }
+
   close(): void {
     this.db.close();
+  }
+
+  defaultPlaybackConnectionSettings(connectionId: string): PlaybackConnectionSettings {
+    const arrIds = this.listInstances()
+      .filter((row) => row.kind === "radarr" || row.kind === "sonarr")
+      .map((row) => row.id);
+    return {
+      connectionId,
+      observePlayback: false,
+      retainHistory: true,
+      protectNodes: false,
+      protectedNodeIds: [],
+      protectReplacement: false,
+      coveredArrInstanceIds: arrIds,
+    };
+  }
+
+  getPlaybackSettings(): PlaybackConnectionSettings[] {
+    const saved = new Map(
+      (this.db.prepare("SELECT * FROM playback_settings").all() as Record<string, unknown>[]).map((row) => {
+        const mapped = mapPlaybackSettings(row);
+        return [mapped.connectionId, mapped] as const;
+      }),
+    );
+    return this.listInstances()
+      .filter((row) => row.kind === "jellyfin")
+      .map((row) => saved.get(row.id) ?? this.defaultPlaybackConnectionSettings(row.id));
+  }
+
+  getPlaybackConnectionSettings(connectionId: string): PlaybackConnectionSettings | undefined {
+    return this.getPlaybackSettings().find((row) => row.connectionId === connectionId);
+  }
+
+  savePlaybackSettings(connections: PlaybackConnectionSettings[]): void {
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM playback_settings").run();
+      const insert = this.db.prepare(
+        `INSERT INTO playback_settings (
+           connection_id, observe, retain_history, protect_nodes, protected_node_ids, protect_replacement, covered_arr_ids
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of connections) {
+        insert.run(
+          row.connectionId,
+          row.observePlayback ? 1 : 0,
+          row.retainHistory ? 1 : 0,
+          row.protectNodes ? 1 : 0,
+          JSON.stringify(row.protectedNodeIds),
+          row.protectReplacement ? 1 : 0,
+          JSON.stringify(row.coveredArrInstanceIds),
+        );
+      }
+    })();
+  }
+
+  listPlaybackOccurrences(opts: PlaybackOccurrenceQuery = {}): Page<PlaybackOccurrence> {
+    const offset = opts.offset ?? 0;
+    const limit = opts.limit ?? 50;
+    const { clause, params } = playbackOccurrenceWhere(opts);
+    const total = (this.db.prepare(`SELECT COUNT(*) AS n FROM playback_occurrences WHERE ${clause}`).get(...params) as { n: number }).n;
+    const rows = this.db.prepare(
+      `SELECT * FROM playback_occurrences WHERE ${clause} ORDER BY last_seen_at DESC, id DESC LIMIT ? OFFSET ?`,
+    ).all(...params, limit, offset) as Record<string, unknown>[];
+    return page(rows.map(mapPlaybackOccurrence), total, offset, limit);
+  }
+
+  queryPlaybackOccurrences(opts: PlaybackOccurrenceQuery = {}): PlaybackOccurrence[] {
+    const { clause, params } = playbackOccurrenceWhere(opts);
+    const limit = Math.min(opts.limit ?? PLAYBACK_HISTORY_MAX, PLAYBACK_HISTORY_MAX);
+    const rows = this.db.prepare(
+      `SELECT * FROM playback_occurrences WHERE ${clause} ORDER BY last_seen_at DESC, id DESC LIMIT ?`,
+    ).all(...params, limit) as Record<string, unknown>[];
+    return rows.map(mapPlaybackOccurrence);
+  }
+
+  getPlaybackOccurrence(id: string): PlaybackOccurrence | undefined {
+    const row = this.db.prepare("SELECT * FROM playback_occurrences WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapPlaybackOccurrence(row) : undefined;
+  }
+
+  openPlaybackOccurrence(connectionId: string, sessionId: string, itemId: string, mediaSourceId: string): PlaybackOccurrence | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM playback_occurrences
+       WHERE connection_id = ? AND session_id = ? AND item_id = ? AND media_source_id = ? AND ended_at IS NULL`,
+    ).get(connectionId, sessionId, itemId, mediaSourceId) as Record<string, unknown> | undefined;
+    return row ? mapPlaybackOccurrence(row) : undefined;
+  }
+
+  listOpenPlaybackOccurrences(connectionId?: string): PlaybackOccurrence[] {
+    const rows = connectionId
+      ? this.db.prepare("SELECT * FROM playback_occurrences WHERE ended_at IS NULL AND connection_id = ?").all(connectionId)
+      : this.db.prepare("SELECT * FROM playback_occurrences WHERE ended_at IS NULL").all();
+    return (rows as Record<string, unknown>[]).map(mapPlaybackOccurrence);
+  }
+
+  savePlaybackOccurrence(row: PlaybackOccurrence): void {
+    this.db.prepare(
+      `INSERT INTO playback_occurrences (
+         id, connection_id, device_id, device_label, session_id, item_id, media_source_id, item_name, play_method,
+         media_type, is_paused, reasons, raw_reasons, reason_family, audio_stream_index, subtitle_stream_index,
+         match_outcome, library_item_ids, path, revision, started_at, last_seen_at, ended_at, gap
+       ) VALUES (
+         @id, @connectionId, @deviceId, @deviceLabel, @sessionId, @itemId, @mediaSourceId, @itemName, @playMethod,
+         @mediaType, @isPaused, @reasons, @rawReasons, @reasonFamily, @audioStreamIndex, @subtitleStreamIndex,
+         @match, @libraryItemIds, @path, @revision, @startedAt, @lastSeenAt, @endedAt, @gap
+       )
+       ON CONFLICT(id) DO UPDATE SET
+         device_id = excluded.device_id,
+         device_label = excluded.device_label,
+         item_name = excluded.item_name,
+         play_method = excluded.play_method,
+         media_type = excluded.media_type,
+         is_paused = excluded.is_paused,
+         reasons = excluded.reasons,
+         raw_reasons = excluded.raw_reasons,
+         reason_family = excluded.reason_family,
+         audio_stream_index = excluded.audio_stream_index,
+         subtitle_stream_index = excluded.subtitle_stream_index,
+         match_outcome = excluded.match_outcome,
+         library_item_ids = excluded.library_item_ids,
+         path = excluded.path,
+         revision = excluded.revision,
+         last_seen_at = excluded.last_seen_at,
+         ended_at = excluded.ended_at,
+         gap = excluded.gap`,
+    ).run({
+      ...row,
+      playMethod: row.playMethod,
+      mediaType: row.mediaType,
+      isPaused: row.isPaused == null ? null : row.isPaused ? 1 : 0,
+      reasons: JSON.stringify(row.reasons),
+      rawReasons: JSON.stringify(row.rawReasons),
+      audioStreamIndex: row.selectedTracks.audioStreamIndex,
+      subtitleStreamIndex: row.selectedTracks.subtitleStreamIndex,
+      libraryItemIds: JSON.stringify(row.libraryItemIds),
+      revision: row.revision ? JSON.stringify(row.revision) : null,
+      gap: row.gap ? 1 : 0,
+    });
+  }
+
+  closePlaybackOccurrence(id: string, endedAt: number, gap: boolean): void {
+    this.db.prepare("UPDATE playback_occurrences SET ended_at = ?, gap = ? WHERE id = ? AND ended_at IS NULL").run(
+      endedAt,
+      gap ? 1 : 0,
+      id,
+    );
+  }
+
+  closeOpenPlaybackOccurrences(connectionId: string | null, endedAt: number, gap: boolean): void {
+    if (connectionId) {
+      this.db.prepare("UPDATE playback_occurrences SET ended_at = ?, gap = ? WHERE connection_id = ? AND ended_at IS NULL").run(
+        endedAt,
+        gap ? 1 : 0,
+        connectionId,
+      );
+      return;
+    }
+    this.db.prepare("UPDATE playback_occurrences SET ended_at = ?, gap = ? WHERE ended_at IS NULL").run(endedAt, gap ? 1 : 0);
+  }
+
+  clearPlaybackHistory(): void {
+    this.db.prepare("DELETE FROM playback_occurrences").run();
+    this.db.prepare("DELETE FROM playback_dismissals").run();
+  }
+
+  lastKeptAtForItems(itemIds: string[]): number | null {
+    if (itemIds.length === 0) return null;
+    const placeholders = itemIds.map(() => "?").join(",");
+    const row = this.db.prepare(
+      `SELECT MAX(created_at) AS n FROM history WHERE outcome = 'kept' AND item_id IN (${placeholders})`,
+    ).get(...itemIds) as { n: number | null };
+    return row.n == null ? null : Number(row.n);
+  }
+
+  savePlaybackDismissal(row: PlaybackDismissal): void {
+    this.db.prepare(
+      `INSERT INTO playback_dismissals (
+         id, connection_id, device_id, reason_family, revision, match_outcome, library_item_ids, path, jellyfin_item_id, dismissed_at
+       ) VALUES (
+         @id, @connectionId, @deviceId, @reasonFamily, @revision, @match, @libraryItemIds, @path, @jellyfinItemId, @dismissedAt
+       )
+       ON CONFLICT(id) DO UPDATE SET dismissed_at = excluded.dismissed_at`,
+    ).run({
+      ...row,
+      revision: row.revision ? JSON.stringify(row.revision) : null,
+      libraryItemIds: JSON.stringify(row.libraryItemIds),
+    });
+  }
+
+  getPlaybackDismissal(id: string): PlaybackDismissal | undefined {
+    const row = this.db.prepare("SELECT * FROM playback_dismissals WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapPlaybackDismissal(row) : undefined;
+  }
+
+  listPlaybackDismissals(): PlaybackDismissal[] {
+    return (this.db.prepare("SELECT * FROM playback_dismissals").all() as Record<string, unknown>[]).map(mapPlaybackDismissal);
+  }
+
+  prunePlaybackHistory(now: number, limits: { maxAgeMs?: number; maxRows?: number } = {}): void {
+    const maxAgeMs = limits.maxAgeMs ?? PLAYBACK_HISTORY_DAYS * 24 * 60 * 60 * 1000;
+    const maxRows = limits.maxRows ?? PLAYBACK_HISTORY_MAX;
+    this.db.prepare("DELETE FROM playback_occurrences WHERE last_seen_at < ?").run(now - maxAgeMs);
+    const count = (this.db.prepare("SELECT COUNT(*) AS n FROM playback_occurrences").get() as { n: number }).n;
+    if (count <= maxRows) return;
+    this.db.prepare(
+      `DELETE FROM playback_occurrences WHERE id IN (
+         SELECT id FROM playback_occurrences ORDER BY last_seen_at ASC, id ASC LIMIT ?
+       )`,
+    ).run(count - maxRows);
   }
 }
 
@@ -1573,6 +2407,10 @@ function mapJob(row: Record<string, unknown>): Job & { plan: JobPlan } {
     assignedNodeId: row.assigned_node_id == null || row.assigned_node_id === "" ? null : String(row.assigned_node_id),
     nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
     startedAt: row.started_at == null ? null : Number(row.started_at),
+    dispatchedWriteMode: row.dispatched_write_mode === "direct" || row.dispatched_write_mode === "sidecar"
+      ? row.dispatched_write_mode
+      : null,
+    sourceRevision: parseFileRevision(row.source_revision),
     plan: JSON.parse(String(row.plan)) as JobPlan,
   };
 }
@@ -1603,6 +2441,13 @@ function mapReview(row: Record<string, unknown>): ReviewItem {
     encodeApi: typeof compare.encodeApi === "string" ? compare.encodeApi : null,
     gpuName: typeof compare.gpuName === "string" ? compare.gpuName : null,
     encodeMs: typeof compare.encodeMs === "number" && Number.isFinite(compare.encodeMs) ? compare.encodeMs : null,
+    intentOrigin: row.intent_origin === "keep" || row.intent_origin === "direct" ? row.intent_origin : null,
+    intentRequestedAt: row.intent_requested_at == null ? null : Number(row.intent_requested_at),
+    waitReason: row.wait_reason == null ? null : String(row.wait_reason),
+    sourceRevision: parseFileRevision(row.source_revision),
+    sidecarRevision: parseFileRevision(row.sidecar_revision),
+    mutationStarted: Number(row.mutation_started) === 1,
+    cancellable: reviewStatus(row.status) === "waiting" && Number(row.mutation_started) !== 1,
   };
 }
 
@@ -1623,6 +2468,98 @@ function mapNode(row: Record<string, unknown>): ClusterNode {
     enabled: Number(row.enabled) === 1,
     version: String(row.version ?? ""),
     currentJobId: row.current_job_id == null ? null : String(row.current_job_id),
+    preview: parsePreviewCapability(parseJson(row.preview)),
+  };
+}
+
+function parseJson(value: unknown): unknown {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function previewStatus(value: unknown): PreviewTaskStatus {
+  if (
+    value === "queued" || value === "running" || value === "ready"
+    || value === "failed" || value === "cancelled" || value === "expired"
+  ) {
+    return value;
+  }
+  return "failed";
+}
+
+function previewWaitReason(value: unknown): PreviewWaitReason | null {
+  if (value === "node" || value === "playback" || value === "input_lock" || value === "cache_capacity") return value;
+  return null;
+}
+
+function mapPreviewTask(row: Record<string, unknown>): PreviewTask {
+  return {
+    id: String(row.id),
+    reviewId: String(row.review_id),
+    status: previewStatus(row.status),
+    waitReason: previewWaitReason(row.wait_reason),
+    nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
+    leaseToken: row.lease_token == null || row.lease_token === "" ? null : String(row.lease_token),
+    leaseUntil: row.lease_until == null ? null : Number(row.lease_until),
+    publicationAllowed: Number(row.publication_allowed) === 1,
+    error: row.error == null ? null : String(row.error),
+    request: parsePreviewRequest(parseJson(row.request)),
+    sourceRevision: parseFileRevision(row.source_revision),
+    sidecarRevision: parseFileRevision(row.sidecar_revision),
+    cacheKey: row.cache_key == null || row.cache_key === "" ? null : String(row.cache_key),
+    bytes: Number(row.bytes ?? 0),
+    expiresAt: row.expires_at == null ? null : Number(row.expires_at),
+    lastUsedAt: row.last_used_at == null ? null : Number(row.last_used_at),
+    artifact: parsePreviewArtifact(parseJson(row.artifact)),
+    createdAt: Number(row.created_at),
+    startedAt: row.started_at == null ? null : Number(row.started_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function parsePreviewArtifact(value: unknown): PreviewArtifact | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const originalClipId = typeof raw.originalClipId === "string" ? raw.originalClipId : "";
+  const finishedClipId = typeof raw.finishedClipId === "string" ? raw.finishedClipId : "";
+  const originalFile = typeof raw.originalFile === "string" ? raw.originalFile : "";
+  const finishedFile = typeof raw.finishedFile === "string" ? raw.finishedFile : "";
+  const intervalRaw = raw.interval && typeof raw.interval === "object" && !Array.isArray(raw.interval)
+    ? raw.interval as Record<string, unknown>
+    : {};
+  const startMs = typeof intervalRaw.startMs === "number" ? intervalRaw.startMs : 0;
+  const durationMs = typeof intervalRaw.durationMs === "number" ? intervalRaw.durationMs : 0;
+  const labelsRaw = raw.labels && typeof raw.labels === "object" && !Array.isArray(raw.labels)
+    ? raw.labels as Record<string, unknown>
+    : {};
+  if (!originalClipId || !finishedClipId || !originalFile || !finishedFile) return null;
+  return {
+    originalClipId,
+    finishedClipId,
+    originalFile,
+    finishedFile,
+    interval: { startMs, durationMs },
+    originalAudioIndex: typeof raw.originalAudioIndex === "number" ? raw.originalAudioIndex : 0,
+    sidecarAudioIndex: typeof raw.sidecarAudioIndex === "number" ? raw.sidecarAudioIndex : 0,
+    originalVideoIndex: typeof raw.originalVideoIndex === "number" ? raw.originalVideoIndex : undefined,
+    sidecarVideoIndex: typeof raw.sidecarVideoIndex === "number" ? raw.sidecarVideoIndex : undefined,
+    width: typeof raw.width === "number" ? raw.width : 0,
+    height: typeof raw.height === "number" ? raw.height : 0,
+    finishedWidth: typeof raw.finishedWidth === "number" ? raw.finishedWidth : 0,
+    finishedHeight: typeof raw.finishedHeight === "number" ? raw.finishedHeight : 0,
+    labels: {
+      scale: typeof labelsRaw.scale === "string" ? labelsRaw.scale : "",
+      audio: typeof labelsRaw.audio === "string" ? labelsRaw.audio : "",
+      color: typeof labelsRaw.color === "string" ? labelsRaw.color : "",
+      warnings: Array.isArray(labelsRaw.warnings)
+        ? labelsRaw.warnings.filter((row): row is string => typeof row === "string")
+        : [],
+    },
   };
 }
 
@@ -1641,6 +2578,139 @@ function mapInstance(row: Record<string, unknown>): StoredInstance {
   };
 }
 
+function mapPlaybackSettings(row: Record<string, unknown>): PlaybackConnectionSettings {
+  return {
+    connectionId: String(row.connection_id),
+    observePlayback: Number(row.observe) === 1,
+    retainHistory: Number(row.retain_history) === 1,
+    protectNodes: Number(row.protect_nodes) === 1,
+    protectedNodeIds: stringList(JSON.parse(String(row.protected_node_ids ?? "[]"))),
+    protectReplacement: Number(row.protect_replacement) === 1,
+    coveredArrInstanceIds: stringList(JSON.parse(String(row.covered_arr_ids ?? "[]"))),
+  };
+}
+
+export type PlaybackOccurrenceQuery = {
+  offset?: number;
+  limit?: number;
+  connectionId?: string;
+  deviceId?: string;
+  reasonFamily?: string;
+  unmatched?: boolean;
+  libraryItemId?: string;
+  since?: number;
+  until?: number;
+  itemNameContains?: string;
+};
+
+function playbackOccurrenceWhere(opts: PlaybackOccurrenceQuery): { clause: string; params: unknown[] } {
+  const where = ["1 = 1"];
+  const params: unknown[] = [];
+  if (opts.connectionId) {
+    where.push("connection_id = ?");
+    params.push(opts.connectionId);
+  }
+  if (opts.deviceId) {
+    where.push("device_id = ?");
+    params.push(opts.deviceId);
+  }
+  if (opts.reasonFamily === "unknown") {
+    where.push("(reason_family IS NULL OR reason_family = 'unknown') AND IFNULL(play_method, '') <> 'DirectPlay'");
+  } else if (opts.reasonFamily) {
+    where.push("reason_family = ?");
+    params.push(opts.reasonFamily);
+  }
+  if (opts.unmatched) where.push("match_outcome <> 'matched'");
+  if (opts.libraryItemId) {
+    where.push("EXISTS (SELECT 1 FROM json_each(library_item_ids) WHERE value = ?)");
+    params.push(opts.libraryItemId);
+  }
+  if (opts.since != null) {
+    where.push("last_seen_at >= ?");
+    params.push(opts.since);
+  }
+  if (opts.until != null) {
+    where.push("last_seen_at <= ?");
+    params.push(opts.until);
+  }
+  if (opts.itemNameContains) {
+    where.push("item_name LIKE ?");
+    params.push(`%${opts.itemNameContains}%`);
+  }
+  return { clause: where.join(" AND "), params };
+}
+
+function mapPlaybackDismissal(row: Record<string, unknown>): PlaybackDismissal {
+  let revision: PlaybackFileRevision | null = null;
+  if (row.revision != null) {
+    const raw = JSON.parse(String(row.revision)) as Record<string, unknown>;
+    revision = {
+      canonicalPath: String(raw.canonicalPath ?? ""),
+      sizeBytes: typeof raw.sizeBytes === "number" ? raw.sizeBytes : null,
+      mtimeMs: typeof raw.mtimeMs === "number" ? raw.mtimeMs : null,
+      fileId: typeof raw.fileId === "string" ? raw.fileId : null,
+    };
+  }
+  return {
+    id: String(row.id),
+    connectionId: String(row.connection_id),
+    deviceId: String(row.device_id),
+    reasonFamily: row.reason_family == null ? null : String(row.reason_family),
+    revision,
+    match: playbackMatch(row.match_outcome),
+    libraryItemIds: stringList(JSON.parse(String(row.library_item_ids ?? "[]"))),
+    path: row.path == null ? null : String(row.path),
+    jellyfinItemId: String(row.jellyfin_item_id ?? ""),
+    dismissedAt: Number(row.dismissed_at),
+  };
+}
+
+function mapPlaybackOccurrence(row: Record<string, unknown>): PlaybackOccurrence {
+  let revision: PlaybackFileRevision | null = null;
+  if (row.revision != null) {
+    const raw = JSON.parse(String(row.revision)) as Record<string, unknown>;
+    revision = {
+      canonicalPath: String(raw.canonicalPath ?? ""),
+      sizeBytes: typeof raw.sizeBytes === "number" ? raw.sizeBytes : null,
+      mtimeMs: typeof raw.mtimeMs === "number" ? raw.mtimeMs : null,
+      fileId: typeof raw.fileId === "string" ? raw.fileId : null,
+    };
+  }
+  return {
+    id: String(row.id),
+    connectionId: String(row.connection_id),
+    deviceId: String(row.device_id),
+    deviceLabel: String(row.device_label),
+    sessionId: String(row.session_id),
+    itemId: String(row.item_id),
+    mediaSourceId: String(row.media_source_id),
+    itemName: String(row.item_name),
+    playMethod: row.play_method == null ? null : String(row.play_method),
+    mediaType: row.media_type == null ? null : String(row.media_type),
+    isPaused: row.is_paused == null ? null : Number(row.is_paused) === 1,
+    reasons: stringList(JSON.parse(String(row.reasons ?? "[]"))),
+    rawReasons: stringList(JSON.parse(String(row.raw_reasons ?? "[]"))),
+    reasonFamily: row.reason_family == null ? null : String(row.reason_family),
+    selectedTracks: {
+      audioStreamIndex: row.audio_stream_index == null ? null : Number(row.audio_stream_index),
+      subtitleStreamIndex: row.subtitle_stream_index == null ? null : Number(row.subtitle_stream_index),
+    },
+    match: playbackMatch(row.match_outcome),
+    libraryItemIds: stringList(JSON.parse(String(row.library_item_ids ?? "[]"))),
+    path: row.path == null ? null : String(row.path),
+    revision,
+    startedAt: Number(row.started_at),
+    lastSeenAt: Number(row.last_seen_at),
+    endedAt: row.ended_at == null ? null : Number(row.ended_at),
+    gap: Number(row.gap) === 1,
+  };
+}
+
+function playbackMatch(value: unknown): PlaybackMatchOutcome {
+  if (value === "matched" || value === "unmatched" || value === "ambiguous" || value === "remote") return value;
+  throw new Error(`The saved playback match ${String(value)} is invalid.`);
+}
+
 function mediaType(value: unknown): LibraryItem["type"] {
   if (value === "movie" || value === "episode") return value;
   throw new Error(`The saved media type ${String(value)} is invalid.`);
@@ -1657,7 +2727,7 @@ function jobPhase(value: unknown): JobPhase {
 }
 
 function reviewStatus(value: unknown): ReviewStatus {
-  if (value === "pending" || value === "keeping" || value === "discarding") return value;
+  if (value === "pending" || value === "waiting" || value === "keeping" || value === "discarding") return value;
   throw new Error(`The saved review status ${String(value)} is invalid.`);
 }
 

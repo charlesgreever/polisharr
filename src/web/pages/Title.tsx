@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, formatSize, type ClusterNode, type ExecutablePlan, type InspectionReport, type LibraryRow } from "../api";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { api, formatSize, type ClusterNode, type ExecutablePlan, type InspectionReport, type LibraryRow, type PlaybackTitleSummary } from "../api";
 import { Help, PageHead } from "../components/Shell";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
 import { EncodeTargetSelect } from "../components/EncodeTargetSelect";
 import { TitleFacts } from "../components/TitleFacts";
 import { Pill } from "../components/ui";
 import {
+  applyPlaybackAudioDraft,
   audioActionSelectClass,
   audioChannelSelectClass,
   canIdentifyLanguage,
@@ -15,6 +16,7 @@ import {
   isImageSubtitle,
   isUntaggedTrack,
   MISSING_WHISPER_LID,
+  playbackVideoMode,
   untaggedAudioNeedsLanguageIdHint,
   formatClipClock,
   parseClipClock,
@@ -27,6 +29,8 @@ type AudioAction = "keep" | "remove" | "replace_aac" | "replace_downmix" | "add_
 
 export function TitlePage() {
   const { id = "" } = useParams();
+  const [params] = useSearchParams();
+  const repairId = params.get("repair");
   const navigate = useNavigate();
   const [item, setItem] = useState<LibraryRow | null>(null);
   const [av1, setAv1] = useState(false);
@@ -61,6 +65,8 @@ export function TitlePage() {
     reason?: string;
     timeInput: string;
   } | null>(null);
+  const [playback, setPlayback] = useState<PlaybackTitleSummary | null>(null);
+  const [repairNote, setRepairNote] = useState("");
   const [subLid, setSubLid] = useState<{
     trackIndex: number;
     listening: boolean;
@@ -95,13 +101,22 @@ export function TitlePage() {
       for (const t of r.item.report?.subtitles ?? []) nextSubs[t.index] = "keep";
       setAudio(nextAudio);
       setSubs(nextSubs);
+      setPlayback(r.playback ?? null);
+      if (repairId) {
+        return api.playbackRepairDraft(repairId).then((result) => {
+          setVideoMode(playbackVideoMode(result.draft));
+          const audioChoices = Array.isArray(result.draft.audio) ? result.draft.audio as Array<{ index?: number; action?: string; channels?: number }> : undefined;
+          setAudio((current) => applyPlaybackAudioDraft(current, audioChoices));
+          setRepairNote(result.explanation);
+        });
+      }
     }).catch((e: Error) => setMsg(e.message));
     void api.nodes().then((payload) => {
       setNodes(payload.nodes);
       setDefaultNodeId(payload.defaultEncodeNodeId);
       setEncodeNodeId((current) => current || payload.defaultEncodeNodeId);
     }).catch(() => undefined);
-  }, [id]);
+  }, [id, repairId]);
 
   const draft = useMemo(() => ({
     remuxToMkv: iso,
@@ -263,6 +278,10 @@ export function TitlePage() {
         <p className="help">Streams could not be listed yet. You can still remux this disc image to Matroska, or pick a size or quality encode.</p>
       )}
       <TitleFacts item={item} />
+      <PlaybackTitleSummary playback={playback} />
+      {repairNote && (
+        <p className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-ink dark:border-brand-500/30 dark:bg-brand-500/10">{repairNote}</p>
+      )}
       {item.type === "movie" && (
         <div className="glass max-w-xs p-4">
           <EncodeTargetSelect
@@ -573,7 +592,7 @@ export function TitlePage() {
           className="btn"
           type="button"
           disabled={!queueReady}
-          onClick={() => void api.queueCustom(id, draft, false, encodeNodeId || undefined).then(() => setMsg("Custom plan queued.")).catch((e: Error) => setMsg(e.message))}
+          onClick={() => void api.queueCustom(id, draft, false, encodeNodeId || undefined, repairId || undefined).then(() => setMsg("Custom plan queued.")).catch((e: Error) => setMsg(e.message))}
         >
           Queue this plan
         </button>
@@ -633,6 +652,24 @@ export function TitlePage() {
         </button>
       </Section>
       {msg && <p className="ok text-sm">{msg}</p>}
+    </section>
+  );
+}
+
+export function PlaybackTitleSummary({ playback }: { playback: PlaybackTitleSummary | null }) {
+  if (!playback || (playback.observations.length === 0 && !playback.afterKeep.sentence)) return null;
+  return (
+    <section className="glass space-y-3 p-5">
+      <h2 className="text-sm font-semibold tracking-wide text-ink">Playback</h2>
+      {playback.afterKeep.sentence && <p className="m-0 text-sm text-ink">{playback.afterKeep.sentence}</p>}
+      {playback.observations.length > 0 && (
+        <ul className="space-y-1 text-sm text-muted">
+          {playback.observations.slice(0, 5).map((row) => (
+            <li key={row.id}>{row.deviceLabel}: {row.summary}</li>
+          ))}
+        </ul>
+      )}
+      <Link className="btn-secondary inline-flex min-h-11 items-center" to="/playback">All playback observations</Link>
     </section>
   );
 }

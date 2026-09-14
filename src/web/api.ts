@@ -126,9 +126,10 @@ export const api = {
   reorderJobs: (ids: string[]) => req("/api/jobs/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
   jobLogs: (id: string) => req<{ log: string }>(`/api/jobs/${id}/logs`),
   review: (offset = 0, limit = 50) => req<LibraryPage<ReviewRow>>(`/api/review?offset=${offset}&limit=${limit}`),
-  keep: (id: string) => req(`/api/review/${id}/keep`, { method: "POST" }),
-  keepSelected: (ids: string[]) => req<{ accepted: number; skipped: number }>("/api/review/keep-selected", { method: "POST", body: JSON.stringify({ ids }) }),
-  keepAll: () => req<{ accepted: number; skipped: number }>("/api/review/keep-all", { method: "POST" }),
+  keep: (id: string) => req<{ ok: true; accepted: true; disposition: "started" | "waiting" }>(`/api/review/${id}/keep`, { method: "POST" }),
+  cancelKeep: (id: string) => req(`/api/review/${id}/cancel-keep`, { method: "POST" }),
+  keepSelected: (ids: string[]) => req<{ accepted: number; skipped: number; started?: number; waiting?: number }>("/api/review/keep-selected", { method: "POST", body: JSON.stringify({ ids }) }),
+  keepAll: () => req<{ accepted: number; skipped: number; started?: number; waiting?: number }>("/api/review/keep-all", { method: "POST" }),
   discard: (id: string) => req(`/api/review/${id}/discard`, { method: "POST" }),
   requeueFlagged: (id: string) => req<{ ok: true; id: string }>(`/api/review/${id}/requeue`, { method: "POST" }),
   history: (offset = 0, limit = 50) => req<LibraryPage<HistoryRow>>(`/api/history?offset=${offset}&limit=${limit}`),
@@ -177,6 +178,8 @@ export type LibraryPage<T> = {
   nextOffset: number | null;
   total: number;
   pendingCount?: number;
+  waitingCount?: number;
+  keepingCount?: number;
   finishedCount?: number;
   healthyCount?: number;
   suggestionCount?: number;
@@ -428,7 +431,7 @@ export type PlaybackSettingsPayload = {
 export type ReviewRow = {
   id: string;
   displayTitle: string;
-  status: "pending" | "keeping" | "discarding";
+  status: "pending" | "waiting" | "keeping" | "discarding";
   flagged: boolean;
   flagReason: string | null;
   source: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
@@ -438,6 +441,9 @@ export type ReviewRow = {
   encodeApi?: string | null;
   gpuName?: string | null;
   encodeMs?: number | null;
+  intentOrigin?: "keep" | "direct" | null;
+  waitReason?: string | null;
+  cancellable?: boolean;
 };
 export type HistoryRow = { id: string; displayTitle: string; outcome: "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched"; bytesSaved: number; createdAt: number };
 export type HomePayload = {

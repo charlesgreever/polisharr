@@ -15,6 +15,7 @@ import type {
   PlaybackFileRevision,
   PlaybackMatchOutcome,
   PlaybackOccurrence,
+  ReplacementOrigin,
   ReviewItem,
   ReviewStatus,
   Settings,
@@ -22,6 +23,7 @@ import type {
   VideoTarget,
 } from "./types.ts";
 import { PLAYBACK_HISTORY_DAYS, PLAYBACK_HISTORY_MAX } from "./types.ts";
+import { parseFileRevision } from "./file-revision.ts";
 import { parseAudioMix, parseVideoTarget, type AudioMix } from "./types.ts";
 import { normalizeInspection } from "./inspect.ts";
 import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
@@ -30,7 +32,15 @@ import type { SuggestionFilters } from "./suggestion-filters.ts";
 import { suggestionTrackComparison } from "./tracks.ts";
 import { encodeNeedFromPlan, nodeCanEncode, nodeIsOnline, parseHardwareInfo, parseNodeRole, poolSpreadLimit, type ClusterNode, type EncodeNeed } from "./cluster.ts";
 
-export type Page<T> = { items: T[]; nextOffset: number | null; total: number; pendingCount?: number; finishedCount?: number };
+export type Page<T> = {
+  items: T[];
+  nextOffset: number | null;
+  total: number;
+  pendingCount?: number;
+  waitingCount?: number;
+  keepingCount?: number;
+  finishedCount?: number;
+};
 
 export type LibrarySnapshot = {
   item: LibraryItem;
@@ -264,6 +274,25 @@ export class Store {
     this.ensureColumn("jobs", "lease_until", "INTEGER");
     this.ensureColumn("jobs", "lease_token", "TEXT");
     this.ensureColumn("jobs", "started_at", "INTEGER");
+    this.ensureColumn("jobs", "dispatched_write_mode", "TEXT");
+    this.ensureColumn("jobs", "source_revision", "TEXT");
+    this.ensureColumn("reviews", "intent_origin", "TEXT");
+    this.ensureColumn("reviews", "intent_requested_at", "INTEGER");
+    this.ensureColumn("reviews", "source_revision", "TEXT");
+    this.ensureColumn("reviews", "sidecar_revision", "TEXT");
+    this.ensureColumn("reviews", "wait_reason", "TEXT");
+    this.ensureColumn("reviews", "mutation_started", "INTEGER NOT NULL DEFAULT 0");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS kept_events (
+        sidecar_path TEXT PRIMARY KEY,
+        review_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        bytes_saved INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS reviews_active_sidecar
+        ON reviews (sidecar_path) WHERE status IN ('waiting', 'keeping');
+    `);
     this.ensureColumn("library_items", "arr_series_id", "INTEGER");
     this.ensureColumn("library_items", "arr_episode_file_id", "INTEGER");
     this.ensureColumn("library_items", "first_seen_at", "INTEGER NOT NULL DEFAULT 0");
@@ -1008,12 +1037,20 @@ export class Store {
     writeMode: "sidecar" | "direct";
     nodeId: string | null;
     startedAt: number | null;
+    dispatchedWriteMode: "sidecar" | "direct" | null;
+    sourceRevision: PlaybackFileRevision | null;
   }>): void {
     const current = this.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!current) return;
+    const dispatched = patch.dispatchedWriteMode === undefined
+      ? current.dispatched_write_mode
+      : patch.dispatchedWriteMode;
+    const sourceRevision = patch.sourceRevision === undefined
+      ? current.source_revision
+      : patch.sourceRevision == null ? null : JSON.stringify(patch.sourceRevision);
     this.db
       .prepare(
-        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=? WHERE id=?",
+        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=?, dispatched_write_mode=?, source_revision=? WHERE id=?",
       )
       .run(
         patch.status ?? current.status,
@@ -1026,8 +1063,14 @@ export class Store {
         patch.promoteError === undefined ? current.promote_error : patch.promoteError,
         patch.nodeId === undefined ? current.node_id : patch.nodeId,
         patch.startedAt === undefined ? current.started_at : patch.startedAt,
+        dispatched ?? null,
+        sourceRevision ?? null,
         id,
       );
+  }
+
+  releaseJobLease(id: string): void {
+    this.db.prepare("UPDATE jobs SET lease_until = NULL, lease_token = NULL WHERE id = ?").run(id);
   }
 
   appendJobLog(id: string, chunk: string): void {
@@ -1275,8 +1318,10 @@ export class Store {
   insertReview(row: ReviewItem): void {
     this.db
       .prepare(
-        `INSERT INTO reviews (id, job_id, item_id, status, flagged, flag_reason, source_path, sidecar_path, compare, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO reviews (
+           id, job_id, item_id, status, flagged, flag_reason, source_path, sidecar_path, compare, error,
+           intent_origin, intent_requested_at, source_revision, sidecar_revision, wait_reason, mutation_started
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -1296,6 +1341,12 @@ export class Store {
           encodeMs: row.encodeMs ?? null,
         }),
         row.error,
+        row.intentOrigin ?? null,
+        row.intentRequestedAt ?? null,
+        row.sourceRevision ? JSON.stringify(row.sourceRevision) : null,
+        row.sidecarRevision ? JSON.stringify(row.sidecarRevision) : null,
+        row.waitReason ?? null,
+        row.mutationStarted ? 1 : 0,
       );
   }
 
@@ -1314,6 +1365,8 @@ export class Store {
     return {
       ...page(rows.map((row) => ({ ...mapReview(row), displayTitle: this.fileDisplayTitle(String(row.item_id)) ?? joinedDisplayTitle(row, String(row.item_id)) })), total, offset, limit),
       pendingCount: this.pendingReviewCount(),
+      waitingCount: this.reviewCountByStatus("waiting"),
+      keepingCount: this.reviewCountByStatus("keeping"),
     };
   }
 
@@ -1321,12 +1374,27 @@ export class Store {
     return (this.db.prepare("SELECT id FROM reviews WHERE status = 'pending'").all() as Array<{ id: string }>).map((row) => row.id);
   }
 
+  waitingReviewIds(): string[] {
+    return (this.db.prepare(
+      "SELECT id FROM reviews WHERE status = 'waiting' ORDER BY COALESCE(intent_requested_at, 0) ASC, id",
+    ).all() as Array<{ id: string }>).map((row) => row.id);
+  }
+
   pendingReviewCount(): number {
-    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM reviews WHERE status = 'pending'").get() as { n: number }).n);
+    return this.reviewCountByStatus("pending");
+  }
+
+  reviewCountByStatus(status: ReviewStatus): number {
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM reviews WHERE status = ?").get(status) as { n: number }).n);
   }
 
   getReview(id: string): ReviewItem | undefined {
     const row = this.db.prepare("SELECT * FROM reviews WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapReview(row) : undefined;
+  }
+
+  getReviewForJob(jobId: string): ReviewItem | undefined {
+    const row = this.db.prepare("SELECT * FROM reviews WHERE job_id = ?").get(jobId) as Record<string, unknown> | undefined;
     return row ? mapReview(row) : undefined;
   }
 
@@ -1349,16 +1417,66 @@ export class Store {
     return (this.db.prepare("SELECT * FROM reviews WHERE sidecar_path = ?").all(sidecarPath) as Record<string, unknown>[]).map(mapReview);
   }
 
-  updateReview(id: string, patch: Partial<{ status: ReviewStatus; error: string | null }>): void {
+  updateReview(id: string, patch: Partial<{
+    status: ReviewStatus;
+    error: string | null;
+    intentOrigin: ReplacementOrigin | null;
+    intentRequestedAt: number | null;
+    waitReason: string | null;
+    sourceRevision: PlaybackFileRevision | null;
+    sidecarRevision: PlaybackFileRevision | null;
+    mutationStarted: boolean;
+  }>): void {
     const current = this.getReview(id);
     if (!current) return;
+    const origin = patch.intentOrigin === undefined ? current.intentOrigin ?? null : patch.intentOrigin;
+    const requestedAt = patch.intentRequestedAt === undefined ? current.intentRequestedAt ?? null : patch.intentRequestedAt;
+    const waitReason = patch.waitReason === undefined ? current.waitReason ?? null : patch.waitReason;
+    const sourceRevision = patch.sourceRevision === undefined
+      ? current.sourceRevision ?? null
+      : patch.sourceRevision;
+    const sidecarRevision = patch.sidecarRevision === undefined
+      ? current.sidecarRevision ?? null
+      : patch.sidecarRevision;
     this.db
-      .prepare("UPDATE reviews SET status=?, error=? WHERE id=?")
-      .run(patch.status ?? current.status, patch.error === undefined ? current.error : patch.error, id);
+      .prepare(
+        `UPDATE reviews SET status=?, error=?, intent_origin=?, intent_requested_at=?, wait_reason=?,
+           source_revision=?, sidecar_revision=?, mutation_started=? WHERE id=?`,
+      )
+      .run(
+        patch.status ?? current.status,
+        patch.error === undefined ? current.error : patch.error,
+        origin,
+        requestedAt,
+        waitReason,
+        sourceRevision ? JSON.stringify(sourceRevision) : null,
+        sidecarRevision ? JSON.stringify(sidecarRevision) : null,
+        (patch.mutationStarted ?? current.mutationStarted) ? 1 : 0,
+        id,
+      );
+  }
+
+  clearReplacementIntent(id: string): void {
+    this.updateReview(id, {
+      status: "pending",
+      intentOrigin: null,
+      intentRequestedAt: null,
+      waitReason: null,
+      mutationStarted: false,
+    });
   }
 
   deleteReview(id: string): void {
     this.db.prepare("DELETE FROM reviews WHERE id = ?").run(id);
+  }
+
+  recordKeptEvent(sidecarPath: string, reviewId: string, itemId: string, bytesSaved: number, now: number): boolean {
+    const result = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO kept_events (sidecar_path, review_id, item_id, bytes_saved, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(sidecarPath, reviewId, itemId, bytesSaved, now);
+    return result.changes === 1;
   }
 
   addHistory(itemId: string, outcome: ActivityOutcome, bytesSaved: number, now = Date.now()): void {
@@ -1814,6 +1932,10 @@ function mapJob(row: Record<string, unknown>): Job & { plan: JobPlan } {
     assignedNodeId: row.assigned_node_id == null || row.assigned_node_id === "" ? null : String(row.assigned_node_id),
     nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
     startedAt: row.started_at == null ? null : Number(row.started_at),
+    dispatchedWriteMode: row.dispatched_write_mode === "direct" || row.dispatched_write_mode === "sidecar"
+      ? row.dispatched_write_mode
+      : null,
+    sourceRevision: parseFileRevision(row.source_revision),
     plan: JSON.parse(String(row.plan)) as JobPlan,
   };
 }
@@ -1844,6 +1966,13 @@ function mapReview(row: Record<string, unknown>): ReviewItem {
     encodeApi: typeof compare.encodeApi === "string" ? compare.encodeApi : null,
     gpuName: typeof compare.gpuName === "string" ? compare.gpuName : null,
     encodeMs: typeof compare.encodeMs === "number" && Number.isFinite(compare.encodeMs) ? compare.encodeMs : null,
+    intentOrigin: row.intent_origin === "keep" || row.intent_origin === "direct" ? row.intent_origin : null,
+    intentRequestedAt: row.intent_requested_at == null ? null : Number(row.intent_requested_at),
+    waitReason: row.wait_reason == null ? null : String(row.wait_reason),
+    sourceRevision: parseFileRevision(row.source_revision),
+    sidecarRevision: parseFileRevision(row.sidecar_revision),
+    mutationStarted: Number(row.mutation_started) === 1,
+    cancellable: reviewStatus(row.status) === "waiting" && Number(row.mutation_started) !== 1,
   };
 }
 
@@ -1956,7 +2085,7 @@ function jobPhase(value: unknown): JobPhase {
 }
 
 function reviewStatus(value: unknown): ReviewStatus {
-  if (value === "pending" || value === "keeping" || value === "discarding") return value;
+  if (value === "pending" || value === "waiting" || value === "keeping" || value === "discarding") return value;
   throw new Error(`The saved review status ${String(value)} is invalid.`);
 }
 

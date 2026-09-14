@@ -12,7 +12,9 @@ export type JobPhase =
   | "transcoding"
   | "finishing"
   | "idle";
-export type ReviewStatus = "pending" | "keeping" | "discarding";
+export type ReviewStatus = "pending" | "waiting" | "keeping" | "discarding";
+export type ReplacementOrigin = "keep" | "direct";
+export type PromotionDisposition = "started" | "waiting";
 export type SizeCategory = "movie1080p" | "movie4kSdr" | "movie4kHdr" | "tv1080p" | "tv4k" | "tv4kHdr";
 export type SuggestionAction = "transcode" | "remux" | "tracks" | "add_stereo" | "search_language" | "search_release";
 export type VideoTarget = "hevc" | "av1";
@@ -275,6 +277,8 @@ export type Job = {
   startedAt: number | null;
   assignedNodeName?: string | null;
   waitingForNode?: boolean;
+  dispatchedWriteMode?: WriteMode | null;
+  sourceRevision?: PlaybackFileRevision | null;
 };
 
 export type ReviewItem = {
@@ -294,6 +298,13 @@ export type ReviewItem = {
   encodeApi?: string | null;
   gpuName?: string | null;
   encodeMs?: number | null;
+  intentOrigin?: ReplacementOrigin | null;
+  intentRequestedAt?: number | null;
+  waitReason?: string | null;
+  sourceRevision?: PlaybackFileRevision | null;
+  sidecarRevision?: PlaybackFileRevision | null;
+  mutationStarted?: boolean;
+  cancellable?: boolean;
 };
 
 export type HistoryRow = {

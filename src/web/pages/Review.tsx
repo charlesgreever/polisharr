@@ -10,10 +10,16 @@ export function keepAllConfirmCopy(count: number): string {
   return `Keep all ${count} ${noun}? This replaces each library file with its new copy.`;
 }
 
-export function keepStartedCopy(accepted: number, skipped: number): string {
-  if (skipped === 0) return `Keep started for ${accepted}.`;
-  return `Keep started for ${accepted}; skipped ${skipped}.`;
+export function keepStartedCopy(started: number, skipped: number, waiting = 0): string {
+  if (waiting === 0 && skipped === 0) return `Keep started for ${started}.`;
+  if (waiting === 0) return `Keep started for ${started}; skipped ${skipped}.`;
+  if (started === 0 && skipped === 0) return `Waiting for playback on ${waiting}.`;
+  if (skipped === 0) return `Keep started for ${started}; waiting for playback on ${waiting}.`;
+  if (started === 0) return `Waiting for playback on ${waiting}; skipped ${skipped}.`;
+  return `Keep started for ${started}; waiting for playback on ${waiting}; skipped ${skipped}.`;
 }
+
+export const WAITING_TO_REPLACE = "Waiting to replace after playback.";
 
 export function frameFacts(frame: ReviewRow["source"]): string {
   return [frame.codec, formatSize(frame.sizeBytes), formatDuration(frame.durationSec), formatGbHour(frame.sizePerHourGb), frame.tracks]
@@ -53,7 +59,7 @@ export function ReviewPage() {
             type="button"
             disabled={chosen.length === 0}
             onClick={() => void api.keepSelected(chosen.map((i) => i.id)).then((r) => {
-              setMsg(keepStartedCopy(r.accepted, r.skipped));
+              setMsg(keepStartedCopy(r.started ?? r.accepted, r.skipped, r.waiting ?? 0));
               setSelected({});
               return list.reload();
             })}
@@ -71,7 +77,7 @@ export function ReviewPage() {
         </div>
       </PageHead>
       <Help>
-        Review compares the original and the sidecar: size, codec, duration, tracks, and GB per hour. The card names the encode node, the GPU API, the device, and how long the job ran. Keep replaces the library file. Discard throws the sidecar away. Encode smaller queues a tighter size target after a miss. The original stays until Keep finishes. If Polisharr restarts during Keep, the card comes back so you can try again, unless the new file is already in the library. Keep all promotes every waiting sidecar after you confirm.
+        Review compares the original and the sidecar: size, codec, duration, tracks, and GB per hour. The card names the encode node, the GPU API, the device, and how long the job ran. Keep replaces the library file. Discard throws the sidecar away. Encode smaller queues a tighter size target after a miss. The original stays until Keep finishes. If a file is playing, Keep records the request and waits; Cancel wait leaves both copies in place. If Polisharr restarts during Keep, the card comes back so you can try again, unless the new file is already in the library. Keep all promotes every pending sidecar after you confirm and skips cards that are already waiting.
       </Help>
       {confirmAll && (
         <div className="modal-scrim" role="presentation" onClick={() => setConfirmAll(false)}>
@@ -92,7 +98,7 @@ export function ReviewPage() {
                 onClick={() => {
                   setConfirmAll(false);
                   void api.keepAll().then((result) => {
-                    setMsg(keepStartedCopy(result.accepted, result.skipped));
+                    setMsg(keepStartedCopy(result.started ?? result.accepted, result.skipped, result.waiting ?? 0));
                     setSelected({});
                     return list.reload();
                   }).catch((error: Error) => setMsg(error.message));
@@ -128,6 +134,9 @@ export function ReviewPage() {
                     const line = reviewEncodeLine(item);
                     return line ? <div className="text-sm text-muted">{line}</div> : null;
                   })()}
+                  {item.status === "waiting" && (
+                    <div className="text-sm text-muted">{item.waitReason || WAITING_TO_REPLACE}</div>
+                  )}
                   {item.flagged && <div className="text-sm text-accent">{item.flagReason}</div>}
                   {item.error && <div className="text-sm text-bad">{item.error}</div>}
                   <div className="contact-sheet">
@@ -142,9 +151,23 @@ export function ReviewPage() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button className="btn" type="button" disabled={item.status !== "pending"} onClick={() => void api.keep(item.id).then(list.reload)}>
-                      {item.status === "keeping" ? "Keeping…" : "Keep"}
+                      {item.status === "keeping" ? "Keeping…" : item.status === "waiting" ? "Waiting…" : "Keep"}
                     </button>
-                    <button className="btn-secondary danger" type="button" disabled={item.status !== "pending"} onClick={() => void api.discard(item.id).then(list.reload)}>
+                    {item.status === "waiting" && item.cancellable !== false && (
+                      <button
+                        className="btn-secondary"
+                        type="button"
+                        onClick={() => void api.cancelKeep(item.id).then(list.reload)}
+                      >
+                        Cancel wait
+                      </button>
+                    )}
+                    <button
+                      className="btn-secondary danger"
+                      type="button"
+                      disabled={item.status !== "pending" && item.status !== "waiting"}
+                      onClick={() => void api.discard(item.id).then(list.reload)}
+                    >
                       Discard
                     </button>
                     {item.flagged && item.status === "pending" && (

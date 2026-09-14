@@ -11,6 +11,8 @@ describe("Keep all copy", () => {
   it("names accepted and skipped Keep counts", () => {
     expect(keepStartedCopy(3, 0)).toBe("Keep started for 3.");
     expect(keepStartedCopy(2, 1)).toBe("Keep started for 2; skipped 1.");
+    expect(keepStartedCopy(1, 1, 2)).toBe("Keep started for 1; waiting for playback on 2; skipped 1.");
+    expect(keepStartedCopy(0, 0, 2)).toBe("Waiting for playback on 2.");
   });
 
   it("names node, encode API, GPU, and duration without calling VAAPI QuickSync", () => {

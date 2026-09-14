@@ -41,7 +41,7 @@ describe("interrupted Keep recovery", () => {
     expect(existsSync(stagedNewPath(ctx.sourcePath))).toBe(false);
 
     const keep = await ctx.jobs.keep("rev-1");
-    expect(keep).toEqual({ accepted: true });
+    expect(keep).toMatchObject({ accepted: true, disposition: "started" });
     await vi.waitFor(() => expect(ctx.store.getReview("rev-1")).toBeUndefined());
     ctx.close();
   });
@@ -127,7 +127,7 @@ describe("interrupted Keep recovery", () => {
     expect(ctx.store.getReview("rev-1")).toMatchObject({ status: "pending", error: KEEP_INTERRUPTED });
 
     const discarded = await ctx.jobs.discard("rev-1");
-    expect(discarded).toEqual({ accepted: true });
+    expect(discarded).toMatchObject({ accepted: true });
     expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
     ctx.close();
   });
@@ -168,7 +168,7 @@ describe("interrupted Keep recovery", () => {
     });
     expect(ctx.store.reviewPage(0, 50).pendingCount).toBe(2);
     const result = await ctx.jobs.keepPending();
-    expect(result).toEqual({ accepted: 2, skipped: 0 });
+    expect(result).toEqual({ accepted: 2, skipped: 0, started: 2, waiting: 0 });
     await vi.waitFor(() => expect(pendingIds.every((id) => ctx.store.getReview(id) === undefined)).toBe(true));
     expect(ctx.store.getReview("rev-keeping")?.status).toBe("keeping");
     ctx.close();
@@ -250,7 +250,7 @@ describe("interrupted Keep recovery", () => {
         : new Response("{}", { status: 201 })) as typeof fetch,
     });
     const keep = await jobs.keep("rev-1");
-    expect(keep).toEqual({ accepted: true });
+    expect(keep).toMatchObject({ accepted: true, disposition: "started" });
     await vi.waitFor(() => expect(ctx.store.getReview("rev-1")).toBeUndefined());
     expect(readFileSync(ctx.sourcePath, "utf8")).toBe("SIDECAR!!!");
     expect(ctx.store.getJob("job-1")?.promoteError).toMatch(/HTTP 500/);
@@ -313,7 +313,7 @@ describe("interrupted Keep recovery", () => {
       }) as typeof fetch,
     });
     const keep = await jobs.keep("rev-1");
-    expect(keep).toEqual({ accepted: true });
+    expect(keep).toMatchObject({ accepted: true, disposition: "started" });
     await vi.waitFor(() => expect(ctx.store.getReview("rev-1")).toBeUndefined());
     expect(existsSync(newPath)).toBe(true);
     expect(existsSync(oldPath)).toBe(false);

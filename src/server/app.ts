@@ -156,6 +156,7 @@ export function createApp(opts: AppOptions) {
     staleMs: opts.playbackStaleMs ?? PLAYBACK_STALE_MS,
     connectionName: (id) => store.getInstance(id)?.name ?? id,
   });
+  const playbackRefresh: { run: () => void } = { run: () => undefined };
   const jobs = new JobService({
     store,
     optimizer,
@@ -170,6 +171,8 @@ export function createApp(opts: AppOptions) {
     playback: {
       nodeAdmission: (nodeId) => playbackPolicy.nodeAdmission(nodeId, store.getPlaybackSettings()),
       blockedNodeIds: () => playbackPolicy.blockedNodeIds(store.getPlaybackSettings()),
+      fileReplacement: (file) => playbackPolicy.fileReplacement(file, store.getPlaybackSettings()),
+      refreshReplacementPreflight: () => playbackRefresh.run(),
     },
   });
   const isWorker = opts.env.role === "worker";
@@ -189,6 +192,9 @@ export function createApp(opts: AppOptions) {
     playback: jellyfinPlayback,
     policy: playbackPolicy,
   });
+  playbackRefresh.run = () => {
+    void playbackMonitor.refresh();
+  };
   if (!isWorker) playbackMonitor.start();
   const sync = new LibrarySync({
     store,
@@ -1491,21 +1497,29 @@ export function createApp(opts: AppOptions) {
     if (blocked) return c.json({ error: blocked }, 403);
     const result = await jobs.keep(c.req.param("id"));
     if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
-    return c.json({ ok: true }, 202);
+    return c.json({ ok: true, accepted: true, disposition: result.disposition }, 202);
+  });
+
+  app.post("/api/review/:id/cancel-keep", async (c) => {
+    const result = await jobs.cancelKeep(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
+    return c.json({ ok: true });
   });
 
   app.post("/api/review/keep-selected", async (c) => {
     const blocked = gateOptimize();
     if (blocked) return c.json({ error: blocked }, 403);
     const body = await c.req.json<{ ids?: string[] }>();
-    let accepted = 0;
+    let started = 0;
+    let waiting = 0;
     let skipped = 0;
     for (const id of body.ids ?? []) {
       const result = await jobs.keep(id);
-      if ("accepted" in result) accepted += 1;
-      else skipped += 1;
+      if ("error" in result) skipped += 1;
+      else if (result.disposition === "waiting") waiting += 1;
+      else started += 1;
     }
-    return c.json({ accepted, skipped }, 202);
+    return c.json({ accepted: started + waiting, skipped, started, waiting }, 202);
   });
 
   app.post("/api/review/keep-all", async (c) => {

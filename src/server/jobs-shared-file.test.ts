@@ -123,7 +123,7 @@ describe("shared multi-episode files", () => {
         return { ok: true as const };
       },
     });
-    expect(await jobs.keep("rev-35")).toEqual({ accepted: true });
+    expect(await jobs.keep("rev-35")).toMatchObject({ accepted: true, disposition: "started" });
     await vi.waitFor(() => expect(ctx.store.getReview("rev-35")).toBeUndefined());
     expect(ctx.store.getReview("rev-36")).toBeUndefined();
     expect(promoted).toEqual([ctx.sidecarPath]);
@@ -162,7 +162,7 @@ describe("shared multi-episode files", () => {
       },
     });
     const result = await jobs.keepPending();
-    expect(result).toEqual({ accepted: 1, skipped: 1 });
+    expect(result).toEqual({ accepted: 1, skipped: 1, started: 1, waiting: 0 });
     await vi.waitFor(() => expect(ctx.store.listReviews()).toEqual([]));
     expect(promoted).toEqual([ctx.sidecarPath]);
     ctx.close();

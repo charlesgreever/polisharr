@@ -6,17 +6,46 @@ import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
 import { CancelledError, cleanReviewLeftovers, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
 import { aggressiveTargetBytes, missedOutputTarget } from "./size-budget.ts";
-import { classifyInterruptedKeep, KEEP_INTERRUPTED, SIDECAR_GONE } from "./review-recovery.ts";
+import {
+  classifyInterruptedKeep,
+  KEEP_ALREADY_WAITING,
+  KEEP_INTERRUPTED,
+  MISSING_REVISION,
+  REPLACEMENT_STARTED,
+  SIDECAR_GONE,
+  SOURCE_CHANGED,
+  WAITING_TO_REPLACE,
+} from "./review-recovery.ts";
 import { clearStagedBackup, promote, promotedPath, recoverStagedReplace, type PromoteInput, type PromoteResult } from "./promote.ts";
 import { assignProfile, PROFILE_NAMES } from "./arr-profiles.ts";
-import { effectiveWriteMode, profileAssignmentEligible } from "./types.ts";
+import {
+  effectiveWriteMode,
+  PLAYBACK_REPLACEMENT_PREFLIGHT_MS,
+  profileAssignmentEligible,
+  type ExecutablePlan,
+  type LibraryItem,
+  type ReplacementOrigin,
+  type WriteMode,
+} from "./types.ts";
 import { isoInspectionLooksStale, normalizeInspection } from "./inspect.ts";
 import { refreshAndRenameArr } from "./arr.ts";
 import { encodeNeedFromPlan, isAnyOpenNode, LEASE_MS, nodeCanEncode, pickOpenEncodeNode, type RemoteJobDocument } from "./cluster.ts";
 import { encodeApiLabel } from "./hardware.ts";
 import { placeMethodSentence } from "./fs-copy.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
-import { admitNodeWork, PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
+import {
+  admitNodeWork,
+  playbackHoldSentence,
+  PLAYBACK_ALLOWED,
+  type PlaybackDecision,
+  type PlaybackFileTarget,
+} from "./playback-policy.ts";
+import {
+  canonicalFilePath,
+  isTrustedRevision,
+  readFileRevision,
+  revisionsMatch,
+} from "./file-revision.ts";
 
 export type EnqueueOptions = {
   runNow?: boolean;
@@ -27,7 +56,15 @@ export type EnqueueOptions = {
 export type JobPlaybackGate = {
   nodeAdmission(nodeId: string): PlaybackDecision;
   blockedNodeIds(): string[];
+  fileReplacement?(file: PlaybackFileTarget): PlaybackDecision;
+  refreshReplacementPreflight?(): void;
 };
+
+export type KeepRequestResult =
+  | { accepted: true; disposition: "started" | "waiting" }
+  | { error: string; status: number };
+
+export type KeepBulkResult = { accepted: number; skipped: number; started: number; waiting: number };
 
 export type JobServiceOptions = {
   store: Store;
@@ -52,13 +89,18 @@ export class JobService {
   private cancelled = new Set<string>();
   private keepRunning = 0;
   private keepWaiters: Array<() => void> = [];
+  private promoting = new Set<string>();
+  private mutatingPaths = new Set<string>();
+  private mutationWaiters: Array<() => void> = [];
+  private dispatching = false;
+  private stopped = false;
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly opts: JobServiceOptions) {}
 
   start(): void {
     this.opts.store.recoverInterruptedJobs(this.now(), this.localNodeId());
-    void this.recoverInterruptedKeeps();
+    void this.recoverInterruptedKeeps().then(() => this.dispatchWaitingIntents());
     void this.tick();
     this.timer = setInterval(() => void this.tick(), 500);
   }
@@ -89,6 +131,7 @@ export class JobService {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
   }
 
@@ -321,7 +364,10 @@ export class JobService {
     const settings = this.opts.store.getSettings();
     const docs: RemoteJobDocument[] = [];
     for (const job of claimed) {
-      const doc = this.toRemoteDocument(job, job.leaseToken, settings);
+      const item = this.opts.store.getItem(job.itemId);
+      if (item) this.captureDispatch(job.id, item, settings);
+      const captured = this.opts.store.getJob(job.id);
+      const doc = captured ? this.toRemoteDocument({ ...captured, leaseToken: job.leaseToken }, job.leaseToken, settings) : null;
       if (doc) docs.push(doc);
       else {
         this.opts.store.updateJob(job.id, {
@@ -363,6 +409,10 @@ export class JobService {
     const job = this.opts.store.getJob(id);
     if (!job) return { error: "That job does not exist.", status: 404 };
     if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
+    if (job.status === "succeeded") {
+      this.opts.store.releaseJobLease(id);
+      return { ok: true };
+    }
     if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
     const item = this.opts.store.getItem(job.itemId);
     const report = this.opts.store.getInspection(job.itemId);
@@ -370,68 +420,35 @@ export class JobService {
     const settings = this.opts.store.getSettings();
     const output = normalizeInspection(outputRaw, sidecarPath, Number(outputRaw.sizeBytes ?? 0));
     const resolved = resolvePlan(job.plan, job.writeMode);
-    const writeMode = effectiveWriteMode(resolved, settings.writeMode);
+    const writeMode = job.dispatchedWriteMode ?? "sidecar";
     const plan = { ...resolved, writeMode };
     try {
-      if (plan.writeMode === "direct") {
-        const outcome = await this.promoteOutput(item, sidecarPath, report.sizeBytes, output.sizeBytes, plan);
-        if (!outcome.replaced) {
-          this.opts.store.updateJob(id, { status: "failed", error: outcome.error ?? "Direct write failed.", nodeId: null });
-          this.opts.store.addHistory(item.id, "failed", 0, this.now());
-          await this.sweepReviewLeftovers();
-          return { ok: true };
-        }
-        const synced = await this.syncLibraryFile(item, outcome.destPath, output.sizeBytes);
-        const warning = appendWarning(outcome.warning, synced.warning);
-        this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, promoteError: warning, nodeId: job.nodeId });
-        this.opts.store.addHistory(item.id, "kept", outcome.savedBytes, this.now());
-        await this.sweepReviewLeftovers();
-        return { ok: true };
+      const existing = this.opts.store.getReviewForJob(id);
+      if (!existing) {
+        await this.recordValidatedOutput({
+          job,
+          item,
+          report,
+          sidecarPath,
+          output,
+          plan,
+          writeMode,
+          settings,
+        });
       }
-      const targetBytes = plan.video.kind === "size" ? plan.video.targetBytes : null;
-      const flagged = missedOutputTarget({
-        outputBytes: output.sizeBytes,
-        sourceBytes: report.sizeBytes,
-        outputSizePerHourGb: output.sizePerHourGb,
-        categoryCap: settings.sizeCaps[plan.category],
-        targetBytes,
-      });
-      this.opts.store.insertReview({
-        id: randomUUID(),
-        jobId: id,
-        itemId: item.id,
-        displayTitle: displayTitle(item),
-        status: "pending",
-        flagged,
-        flagReason: flagged ? "The sidecar missed the size target or is larger than the original." : null,
-        sourcePath: item.path,
-        sidecarPath,
-        source: {
-          codec: report.videoCodec,
-          quality: item.quality,
-          sizeBytes: report.sizeBytes,
-          sizePerHourGb: report.sizePerHourGb,
-          durationSec: report.durationSec,
-          tracks: `${report.audio.length} audio / ${report.subtitles.length} subtitles`,
-        },
-        sidecar: {
-          codec: output.videoCodec,
-          quality: item.quality,
-          sizeBytes: output.sizeBytes,
-          sizePerHourGb: output.sizePerHourGb,
-          durationSec: output.durationSec,
-          tracks: `${output.audio.length} audio / ${output.subtitles.length} subtitles`,
-        },
-        error: null,
-        ...this.reviewProvenance(job),
-      });
       this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
-      if (flagged) this.opts.store.addHistory(item.id, "flagged", 0, this.now());
+      this.opts.store.releaseJobLease(id);
+      const review = this.opts.store.getReviewForJob(id);
+      if (review && writeMode === "direct") {
+        const result = await this.requestPromotion(review.id, "direct");
+        if ("accepted" in result && result.disposition === "started") void this.performKeep(review.id);
+      }
       await this.sweepReviewLeftovers();
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : "The job failed.";
       this.opts.store.updateJob(id, { status: "failed", error: message, nodeId: job.nodeId });
+      this.opts.store.releaseJobLease(id);
       this.opts.store.addHistory(item.id, "failed", 0, this.now());
       await this.sweepReviewLeftovers();
       return { ok: true };
@@ -458,21 +475,23 @@ export class JobService {
     const report = this.opts.store.getInspection(job.itemId);
     if (!item || !report) return null;
     const resolved = resolvePlan(job.plan, job.writeMode);
+    const writeMode = job.dispatchedWriteMode ?? effectiveWriteMode(resolved, settings.writeMode);
     return {
       id: job.id,
       leaseToken,
       sourcePath: item.path,
       reviewDir: settings.reviewPath,
-      plan: { ...resolved, writeMode: effectiveWriteMode(resolved, settings.writeMode) },
+      plan: { ...resolved, writeMode },
       report,
       target: this.opts.store.videoTargetForItem(item) ?? settings.videoTarget,
       conservative: settings.conservativeMode,
-      writeMode: job.writeMode,
+      writeMode,
       nodeId: job.nodeId ?? this.localNodeId(),
     };
   }
 
   private async tick(): Promise<void> {
+    if (this.stopped) return;
     try {
       const settings = this.opts.store.getSettings();
       this.applySchedule(settings);
@@ -506,6 +525,7 @@ export class JobService {
         this.blockedNodeIds(),
       );
       for (const job of [...takePinned, ...pool.slice(0, poolBudget)]) void this.run(job.id, settings);
+      void this.dispatchWaitingIntents();
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
       console.error(`The job runner skipped a tick because ${message}`);
@@ -539,6 +559,7 @@ export class JobService {
       return;
     }
     this.running.add(id);
+    const captured = this.captureDispatch(id, item, settings);
     this.opts.store.updateJob(id, {
       status: "running",
       phase: "muxing",
@@ -548,9 +569,7 @@ export class JobService {
     });
     try {
       const hardware = await this.opts.hardware();
-      const resolved = resolvePlan(job.plan, job.writeMode);
-      const writeMode = effectiveWriteMode(resolved, settings.writeMode);
-      const plan = { ...resolved, writeMode };
+      const plan = captured.plan;
       const result = await this.opts.optimizer({
         sourcePath: item.path,
         reviewDir: settings.reviewPath,
@@ -577,72 +596,26 @@ export class JobService {
         await removeReviewArtifact(result.sidecarPath);
         return;
       }
-      if (plan.writeMode === "direct") {
-        const destPath = promotedPath(item.path, plan);
-        if (this.cancelled.has(id)) {
-          await removeReviewArtifact(result.sidecarPath);
-          return;
-        }
-        const outcome = await this.promoteOutput(item, result.sidecarPath, report.sizeBytes, result.output.sizeBytes, plan);
-        if (this.cancelled.has(id) && !outcome.replaced) {
-          await removeReviewArtifact(result.sidecarPath);
-          await recoverStagedReplace(destPath);
-          if (destPath !== item.path) await recoverStagedReplace(item.path);
-          return;
-        }
-        if (!outcome.replaced) {
-          await removeReviewArtifact(result.sidecarPath);
-          this.opts.store.updateJob(id, { status: "failed", error: outcome.error ?? "Direct write failed." });
-          this.opts.store.addHistory(item.id, "failed", 0, this.now());
-          return;
-        }
-        if (outcome.placeMethod) this.opts.store.appendJobLog(id, placeMethodSentence(outcome.placeMethod));
-        const synced = await this.syncLibraryFile(item, outcome.destPath, result.output.sizeBytes);
-        const warning = appendWarning(outcome.warning, synced.warning);
-        this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, promoteError: warning });
-        this.opts.store.addHistory(item.id, "kept", outcome.savedBytes, this.now());
-        return;
-      }
-      const targetBytes = plan.video.kind === "size" ? plan.video.targetBytes : null;
-      const flagged = missedOutputTarget({
-        outputBytes: result.output.sizeBytes,
-        sourceBytes: report.sizeBytes,
-        outputSizePerHourGb: result.output.sizePerHourGb,
-        categoryCap: settings.sizeCaps[plan.category],
-        targetBytes,
-      });
-      this.opts.store.insertReview({
-        id: randomUUID(),
-        jobId: id,
-        itemId: item.id,
-        displayTitle: displayTitle(item),
-        status: "pending",
-        flagged,
-        flagReason: flagged ? "The sidecar missed the size target or is larger than the original." : null,
-        sourcePath: item.path,
+      const reviewId = await this.recordValidatedOutput({
+        job: this.opts.store.getJob(id) ?? job,
+        item,
+        report,
         sidecarPath: result.sidecarPath,
-        source: {
-          codec: report.videoCodec,
-          quality: item.quality,
-          sizeBytes: report.sizeBytes,
-          sizePerHourGb: report.sizePerHourGb,
-          durationSec: report.durationSec,
-          tracks: `${report.audio.length} audio / ${report.subtitles.length} subtitles`,
-        },
-        sidecar: {
-          codec: result.output.videoCodec,
-          quality: item.quality,
-          sizeBytes: result.output.sizeBytes,
-          sizePerHourGb: result.output.sizePerHourGb,
-          durationSec: result.output.durationSec,
-          tracks: `${result.output.audio.length} audio / ${result.output.subtitles.length} subtitles`,
-        },
-        error: null,
-        ...this.reviewProvenance(job),
+        output: result.output,
+        plan,
+        writeMode: plan.writeMode,
+        settings,
       });
+      if (this.stopped) return;
       this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1 });
-      if (flagged) this.opts.store.addHistory(item.id, "flagged", 0, this.now());
+      if (plan.writeMode === "direct" && reviewId) {
+        const started = await this.requestPromotion(reviewId, "direct");
+        if ("accepted" in started && started.disposition === "started") {
+          await this.performKeep(reviewId);
+        }
+      }
     } catch (error) {
+      if (this.stopped || isClosedDb(error)) return;
       if (error instanceof CancelledError || this.cancelled.has(id)) {
         this.opts.store.updateJob(id, { status: "cancelled", error: "Cancelled." });
       } else {
@@ -663,7 +636,8 @@ export class JobService {
         this.opts.store.addHistory(review.itemId, "discarded", 0, this.now());
         continue;
       }
-      if (review.status !== "keeping") continue;
+      if (review.status === "waiting" && !review.mutationStarted) continue;
+      if (review.status !== "keeping" && review.status !== "waiting") continue;
       if (!this.opts.store.getReview(review.id)) continue;
       const item = this.opts.store.getItem(review.itemId);
       const job = this.opts.store.getJob(review.jobId);
@@ -685,68 +659,238 @@ export class JobService {
         continue;
       }
       if (kind === "sidecar_gone") {
-        this.opts.store.updateReview(review.id, { status: "pending", error: SIDECAR_GONE });
+        this.failReplacement(review.id, SIDECAR_GONE);
         continue;
       }
-      this.opts.store.updateReview(review.id, { status: "pending", error: KEEP_INTERRUPTED });
+      this.failReplacement(review.id, KEEP_INTERRUPTED);
     }
   }
 
-  async keep(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
+  async keep(reviewId: string): Promise<KeepRequestResult> {
+    const result = await this.requestPromotion(reviewId, "keep");
+    if ("accepted" in result && result.disposition === "started") void this.performKeep(reviewId);
+    return result;
+  }
+
+  async keepPending(): Promise<KeepBulkResult> {
+    let started = 0;
+    let waiting = 0;
+    let skipped = 0;
+    for (const id of this.opts.store.pendingReviewIds()) {
+      const result = await this.keep(id);
+      if ("error" in result) skipped += 1;
+      else if (result.disposition === "waiting") waiting += 1;
+      else started += 1;
+    }
+    return { accepted: started + waiting, skipped, started, waiting };
+  }
+
+  async cancelKeep(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
     const review = this.opts.store.getReview(reviewId);
     if (!review) return { error: "That review item is gone.", status: 404 };
-    if (review.status === "keeping") return { error: "Keep is already running for this title.", status: 409 };
-    if (this.opts.store.reviewsForSidecarPath(review.sidecarPath).some((row) => row.id !== reviewId && row.status === "keeping")) {
+    if (review.status === "keeping" || review.mutationStarted) {
+      return { error: REPLACEMENT_STARTED, status: 409 };
+    }
+    if (review.status !== "waiting") {
+      return { error: "This result is not waiting to replace.", status: 409 };
+    }
+    this.opts.store.clearReplacementIntent(reviewId);
+    this.opts.store.updateReview(reviewId, { error: null });
+    return { accepted: true };
+  }
+
+  private async requestPromotion(reviewId: string, origin: ReplacementOrigin): Promise<KeepRequestResult> {
+    const review = this.opts.store.getReview(reviewId);
+    if (!review) return { error: "That review item is gone.", status: 404 };
+    if (review.status === "keeping") {
+      if (origin === "keep") return { error: "Keep is already running for this title.", status: 409 };
+      return { accepted: true, disposition: "started" };
+    }
+    if (review.status === "waiting") {
+      if (origin === "keep") return { error: KEEP_ALREADY_WAITING, status: 409 };
+      return { accepted: true, disposition: "waiting" };
+    }
+    if (this.opts.store.reviewsForSidecarPath(review.sidecarPath).some((row) => row.id !== reviewId && (row.status === "keeping" || row.status === "waiting"))) {
       return { error: "Keep is already running for this file.", status: 409 };
     }
     if (!(await fileExists(review.sidecarPath))) {
       this.opts.store.updateReview(reviewId, { status: "pending", error: SIDECAR_GONE });
       return { error: SIDECAR_GONE, status: 409 };
     }
-    this.opts.store.updateReview(reviewId, { status: "keeping" });
-    void this.performKeep(reviewId);
-    return { accepted: true };
+    const prepared = this.prepareIntent(review, origin);
+    if ("error" in prepared) return prepared;
+    const item = this.opts.store.getItem(review.itemId);
+    if (!item) {
+      this.failReplacement(reviewId, "The library row disappeared.");
+      return { error: "The library row disappeared.", status: 409 };
+    }
+    const decision = this.fileReplacementDecision(item);
+    if (!decision.allowed || this.preflightStale(decision)) {
+      if (this.preflightStale(decision)) this.opts.playback?.refreshReplacementPreflight?.();
+      this.parkWaiting(reviewId, origin, this.waitReason(decision));
+      return { accepted: true, disposition: "waiting" };
+    }
+    this.opts.store.updateReview(reviewId, { status: "keeping", error: null });
+    return { accepted: true, disposition: "started" };
   }
 
-  async keepPending(): Promise<{ accepted: number; skipped: number }> {
-    let accepted = 0;
-    let skipped = 0;
-    for (const id of this.opts.store.pendingReviewIds()) {
-      const result = await this.keep(id);
-      if ("accepted" in result) accepted += 1;
-      else skipped += 1;
+  private prepareIntent(review: ReviewItem, origin: ReplacementOrigin): { ok: true } | { error: string; status: number } {
+    const job = this.opts.store.getJob(review.jobId);
+    const captured = job?.sourceRevision ?? null;
+    const current = readFileRevision(review.sourcePath);
+    const sidecarRevision = readFileRevision(review.sidecarPath);
+    if (origin === "direct") {
+      if (!isTrustedRevision(captured)) {
+        this.opts.store.updateReview(review.id, { status: "pending", error: MISSING_REVISION, intentOrigin: null });
+        return { error: MISSING_REVISION, status: 409 };
+      }
+      if (!revisionsMatch(captured, current)) {
+        this.opts.store.updateReview(review.id, { status: "pending", error: SOURCE_CHANGED, intentOrigin: null });
+        return { error: SOURCE_CHANGED, status: 409 };
+      }
+    } else if (isTrustedRevision(captured) && !revisionsMatch(captured, current)) {
+      this.opts.store.updateReview(review.id, { status: "pending", error: SOURCE_CHANGED, intentOrigin: null });
+      return { error: SOURCE_CHANGED, status: 409 };
     }
-    return { accepted, skipped };
+    const sourceRevision = isTrustedRevision(captured) ? captured : current;
+    this.opts.store.updateReview(review.id, {
+      intentOrigin: origin,
+      intentRequestedAt: review.intentRequestedAt ?? this.now(),
+      sourceRevision,
+      sidecarRevision,
+      error: null,
+    });
+    return { ok: true };
+  }
+
+  private parkWaiting(reviewId: string, origin: ReplacementOrigin, reason: string): void {
+    const review = this.opts.store.getReview(reviewId);
+    if (!review) return;
+    this.opts.store.updateReview(reviewId, {
+      status: "waiting",
+      intentOrigin: origin,
+      intentRequestedAt: review.intentRequestedAt ?? this.now(),
+      waitReason: reason,
+      mutationStarted: false,
+      error: null,
+    });
+  }
+
+  private failReplacement(reviewId: string, error: string): void {
+    this.opts.store.updateReview(reviewId, {
+      status: "pending",
+      error,
+      intentOrigin: null,
+      intentRequestedAt: null,
+      waitReason: null,
+      mutationStarted: false,
+    });
+  }
+
+  private async dispatchWaitingIntents(): Promise<void> {
+    if (this.dispatching || this.stopped) return;
+    this.dispatching = true;
+    try {
+      for (const id of this.opts.store.waitingReviewIds()) {
+        if (this.promoting.has(id)) continue;
+        const review = this.opts.store.getReview(id);
+        if (!review || review.status !== "waiting" || !review.intentOrigin) continue;
+        const item = this.opts.store.getItem(review.itemId);
+        if (!item) {
+          this.failReplacement(id, "The library row disappeared.");
+          continue;
+        }
+        const decision = this.fileReplacementDecision(item);
+        if (!decision.allowed) {
+          this.opts.store.updateReview(id, { waitReason: this.waitReason(decision) });
+          continue;
+        }
+        if (this.preflightStale(decision)) {
+          this.opts.playback?.refreshReplacementPreflight?.();
+          this.opts.store.updateReview(id, { waitReason: this.waitReason(decision) });
+          continue;
+        }
+        this.promoting.add(id);
+        void this.performKeep(id).finally(() => this.promoting.delete(id));
+      }
+    } finally {
+      this.dispatching = false;
+    }
   }
 
   private async performKeep(reviewId: string): Promise<void> {
-    const review = this.opts.store.getReview(reviewId);
-    if (!review) return;
-    const item = this.opts.store.getItem(review.itemId);
-    if (!item) {
-      this.opts.store.updateReview(reviewId, { status: "pending", error: "The library row disappeared." });
-      return;
+    this.promoting.add(reviewId);
+    try {
+      if (this.stopped) return;
+      const review = this.opts.store.getReview(reviewId);
+      if (!review) return;
+      if (review.status !== "keeping" && review.status !== "waiting") return;
+      const item = this.opts.store.getItem(review.itemId);
+      if (!item) {
+        this.failReplacement(reviewId, "The library row disappeared.");
+        return;
+      }
+      if (!(await fileExists(review.sidecarPath))) {
+        this.failReplacement(reviewId, SIDECAR_GONE);
+        return;
+      }
+      const job = this.opts.store.getJob(review.jobId);
+      const plan = job ? resolvePlan(job.plan, job.writeMode) : undefined;
+      await this.withKeepSlot(async () => {
+        const latest = this.opts.store.getReview(reviewId);
+        if (!latest || (latest.status !== "keeping" && latest.status !== "waiting")) return;
+        const decision = this.fileReplacementDecision(item);
+        if (!decision.allowed || this.preflightStale(decision)) {
+          if (this.preflightStale(decision)) this.opts.playback?.refreshReplacementPreflight?.();
+          this.parkWaiting(reviewId, latest.intentOrigin ?? "keep", this.waitReason(decision));
+          return;
+        }
+        const expectedSource = latest.sourceRevision ?? job?.sourceRevision ?? null;
+        const mustMatchSource = latest.intentOrigin === "direct" || Boolean(latest.waitReason);
+        if (mustMatchSource && isTrustedRevision(expectedSource) && !revisionsMatch(expectedSource, readFileRevision(item.path))) {
+          this.failReplacement(reviewId, SOURCE_CHANGED);
+          return;
+        }
+        if (isTrustedRevision(latest.sidecarRevision) && !revisionsMatch(latest.sidecarRevision, readFileRevision(latest.sidecarPath))) {
+          this.failReplacement(reviewId, "The finished copy changed before replacement. Discard it or run the job again.");
+          return;
+        }
+        const destPath = promotedPath(item.path, plan);
+        const keys = this.mutationKeys(item, destPath, latest.sidecarPath);
+        await this.acquireMutation(keys);
+        try {
+          this.opts.store.updateReview(reviewId, { status: "keeping", mutationStarted: true, error: null });
+          const outcome = await this.promoteOutput(
+            item,
+            latest.sidecarPath,
+            latest.source.sizeBytes ?? 0,
+            latest.sidecar.sizeBytes ?? 0,
+            plan,
+          );
+          if (!outcome.replaced) {
+            this.failReplacement(reviewId, outcome.error ?? "Keep could not replace the library file.");
+            return;
+          }
+          if (job && outcome.placeMethod) this.opts.store.appendJobLog(job.id, placeMethodSentence(outcome.placeMethod));
+          const saved = outcome.savedBytes;
+          if (this.opts.store.recordKeptEvent(latest.sidecarPath, latest.id, item.id, saved, this.now())) {
+            this.opts.store.addHistory(item.id, "kept", saved, this.now());
+          }
+          const synced = await this.syncLibraryFile(item, outcome.destPath, latest.sidecar.sizeBytes ?? item.sizeBytes);
+          this.deleteReviewsForSidecar(latest.sidecarPath);
+          const warning = appendWarning(outcome.warning, synced.warning);
+          if (warning && job) this.opts.store.updateJob(job.id, { promoteError: warning });
+          await this.sweepReviewLeftovers();
+        } finally {
+          this.releaseMutation(keys);
+        }
+      });
+    } catch (error) {
+      if (this.stopped || isClosedDb(error)) return;
+      throw error;
+    } finally {
+      this.promoting.delete(reviewId);
     }
-    if (!(await fileExists(review.sidecarPath))) {
-      this.opts.store.updateReview(reviewId, { status: "pending", error: SIDECAR_GONE });
-      return;
-    }
-    const job = this.opts.store.getJob(review.jobId);
-    const plan = job ? resolvePlan(job.plan, job.writeMode) : undefined;
-    const outcome = await this.withKeepSlot(() =>
-      this.promoteOutput(item, review.sidecarPath, review.source.sizeBytes ?? 0, review.sidecar.sizeBytes ?? 0, plan),
-    );
-    if (!outcome.replaced) {
-      this.opts.store.updateReview(reviewId, { status: "pending", error: outcome.error });
-      return;
-    }
-    if (job && outcome.placeMethod) this.opts.store.appendJobLog(job.id, placeMethodSentence(outcome.placeMethod));
-    this.opts.store.addHistory(item.id, "kept", outcome.savedBytes, this.now());
-    const synced = await this.syncLibraryFile(item, outcome.destPath, review.sidecar.sizeBytes ?? item.sizeBytes);
-    this.deleteReviewsForSidecar(review.sidecarPath);
-    const warning = appendWarning(outcome.warning, synced.warning);
-    if (warning && job) this.opts.store.updateJob(job.id, { promoteError: warning });
-    await this.sweepReviewLeftovers();
   }
 
   private async finalizeCompletedKeep(review: ReviewItem, destPath: string): Promise<void> {
@@ -756,7 +900,9 @@ export class JobService {
       // Sidecar may already have been removed after a successful replace.
     }
     const saved = Math.max(0, (review.source.sizeBytes ?? 0) - (review.sidecar.sizeBytes ?? 0));
-    this.opts.store.addHistory(review.itemId, "kept", saved, this.now());
+    if (this.opts.store.recordKeptEvent(review.sidecarPath, review.id, review.itemId, saved, this.now())) {
+      this.opts.store.addHistory(review.itemId, "kept", saved, this.now());
+    }
     const item = this.opts.store.getItem(review.itemId);
     if (item) await this.syncLibraryFile(item, destPath, review.sidecar.sizeBytes ?? item.sizeBytes);
     else this.opts.store.updateItemFile(review.itemId, destPath, review.sidecar.sizeBytes ?? 0);
@@ -882,8 +1028,13 @@ export class JobService {
   async discard(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
     const review = this.opts.store.getReview(reviewId);
     if (!review) return { error: "That review item is gone.", status: 404 };
+    if (review.status === "keeping" || review.mutationStarted) {
+      return { error: REPLACEMENT_STARTED, status: 409 };
+    }
+    if (review.status === "waiting") this.opts.store.clearReplacementIntent(reviewId);
+    const latest = this.opts.store.getReview(reviewId) ?? review;
     this.opts.store.updateReview(reviewId, { status: "discarding" });
-    await this.unlinkSidecarIfLast(review);
+    await this.unlinkSidecarIfLast(latest);
     this.opts.store.deleteReview(reviewId);
     this.opts.store.addHistory(review.itemId, "discarded", 0, this.now());
     await this.sweepReviewLeftovers();
@@ -944,6 +1095,117 @@ export class JobService {
     return { warning: warnings.length > 0 ? warnings.join(" ") : null };
   }
 
+  // Capture write mode and source identity here so a later Settings change or Arr upgrade cannot be mistaken for the encode input.
+  private captureDispatch(jobId: string, item: LibraryItem, settings: Settings): { writeMode: WriteMode; plan: ExecutablePlan } {
+    const job = this.opts.store.getJob(jobId);
+    const resolved = job ? resolvePlan(job.plan, job.writeMode) : ({ writeMode: settings.writeMode } as ExecutablePlan);
+    const writeMode = effectiveWriteMode(resolved, settings.writeMode);
+    const sourceRevision = readFileRevision(item.path);
+    this.opts.store.updateJob(jobId, { dispatchedWriteMode: writeMode, sourceRevision });
+    return { writeMode, plan: { ...resolved, writeMode } };
+  }
+
+  private async recordValidatedOutput(input: {
+    job: Job;
+    item: LibraryItem;
+    report: InspectionReport;
+    sidecarPath: string;
+    output: InspectionReport;
+    plan: ExecutablePlan;
+    writeMode: WriteMode;
+    settings: Settings;
+  }): Promise<string | null> {
+    const existing = this.opts.store.getReviewForJob(input.job.id);
+    if (existing) return existing.id;
+    const targetBytes = input.plan.video.kind === "size" ? input.plan.video.targetBytes : null;
+    const flagged = missedOutputTarget({
+      outputBytes: input.output.sizeBytes,
+      sourceBytes: input.report.sizeBytes,
+      outputSizePerHourGb: input.output.sizePerHourGb,
+      categoryCap: input.settings.sizeCaps[input.plan.category],
+      targetBytes,
+    });
+    const id = randomUUID();
+    this.opts.store.insertReview({
+      id,
+      jobId: input.job.id,
+      itemId: input.item.id,
+      displayTitle: displayTitle(input.item),
+      status: "pending",
+      flagged,
+      flagReason: flagged ? "The sidecar missed the size target or is larger than the original." : null,
+      sourcePath: input.item.path,
+      sidecarPath: input.sidecarPath,
+      source: {
+        codec: input.report.videoCodec,
+        quality: input.item.quality,
+        sizeBytes: input.report.sizeBytes,
+        sizePerHourGb: input.report.sizePerHourGb,
+        durationSec: input.report.durationSec,
+        tracks: `${input.report.audio.length} audio / ${input.report.subtitles.length} subtitles`,
+      },
+      sidecar: {
+        codec: input.output.videoCodec,
+        quality: input.item.quality,
+        sizeBytes: input.output.sizeBytes,
+        sizePerHourGb: input.output.sizePerHourGb,
+        durationSec: input.output.durationSec,
+        tracks: `${input.output.audio.length} audio / ${input.output.subtitles.length} subtitles`,
+      },
+      error: null,
+      ...this.reviewProvenance(input.job),
+    });
+    if (flagged && input.writeMode !== "direct") this.opts.store.addHistory(input.item.id, "flagged", 0, this.now());
+    return this.opts.store.getReviewForJob(input.job.id)?.id ?? id;
+  }
+
+  private fileReplacementDecision(item: LibraryItem): PlaybackDecision {
+    return this.opts.playback?.fileReplacement?.({
+      itemId: item.id,
+      path: item.path,
+      instanceId: item.instanceId,
+    }) ?? PLAYBACK_ALLOWED;
+  }
+
+  private preflightStale(decision: PlaybackDecision): boolean {
+    if (decision.observedAt == null) return false;
+    return this.now() - decision.observedAt > PLAYBACK_REPLACEMENT_PREFLIGHT_MS;
+  }
+
+  private waitReason(decision: PlaybackDecision): string {
+    return playbackHoldSentence(decision) ?? WAITING_TO_REPLACE;
+  }
+
+  private mutationKeys(item: LibraryItem, destPath: string, sidecarPath: string): string[] {
+    const keys = new Set<string>();
+    for (const path of [item.path, destPath, sidecarPath]) {
+      const canonical = canonicalFilePath(path);
+      if (canonical) keys.add(canonical);
+    }
+    for (const sibling of this.opts.store.itemsForPath(item.path, item.instanceId)) {
+      const canonical = canonicalFilePath(sibling.path);
+      if (canonical) keys.add(canonical);
+    }
+    return [...keys];
+  }
+
+  private tryAcquireMutation(keys: string[]): boolean {
+    if (keys.some((key) => this.mutatingPaths.has(key))) return false;
+    for (const key of keys) this.mutatingPaths.add(key);
+    return true;
+  }
+
+  private async acquireMutation(keys: string[]): Promise<void> {
+    while (!this.tryAcquireMutation(keys)) {
+      await new Promise<void>((resolve) => this.mutationWaiters.push(resolve));
+    }
+  }
+
+  private releaseMutation(keys: string[]): void {
+    for (const key of keys) this.mutatingPaths.delete(key);
+    this.mutationWaiters.shift()?.();
+  }
+
   private now(): number {
     return this.opts.clock?.() ?? Date.now();
   }
@@ -951,6 +1213,10 @@ export class JobService {
 
 export function assignedToNode(assignedNodeId: string | null | undefined, localNodeId: string): boolean {
   return !assignedNodeId || assignedNodeId === localNodeId;
+}
+
+function isClosedDb(error: unknown): boolean {
+  return error instanceof TypeError && String(error.message).includes("database connection is not open");
 }
 
 function jobPhaseOr(value: string, fallback: JobPhase): JobPhase {

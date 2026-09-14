@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "./store.ts";
 import { createPlaybackMonitor, mediaPathsEqual, parsePlaybackSettingsInput } from "./playback-monitor.ts";
+import { createPlaybackPolicy } from "./playback-policy.ts";
 import type { LibraryItem } from "./types.ts";
 
 const stores: Store[] = [];
@@ -207,6 +208,44 @@ describe("playback settings input", () => {
 });
 
 describe("playback monitor", () => {
+  it("polls for node protection without recording history when observation is off", async () => {
+    const db = store();
+    seedLibrary(db);
+    const policy = createPlaybackPolicy({ clock: () => 5_000, connectionName: () => "Jellyfin" });
+    const monitor = createPlaybackMonitor({
+      store: db,
+      decrypt: (value) => value,
+      clock: () => 5_000,
+      pollMs: 0,
+      staleMs: 30_000,
+      policy,
+      fetch: (async (url) => {
+        const text = String(url);
+        if (text.endsWith("/Auth/Keys")) return json({ Items: [{ AccessToken: "server-key", AppName: "Polisharr" }] });
+        if (text.endsWith("/Sessions")) return json([playing()]);
+        if (text.includes("/PlaybackInfo")) {
+          return json({
+            MediaSources: [
+              { Id: "src-1080", Path: "/mnt/nas/movies/film-1080.mkv", Protocol: "File", IsRemote: false },
+            ],
+          });
+        }
+        return json({}, 404);
+      }) as typeof fetch,
+    });
+    monitors.push(monitor);
+    db.savePlaybackSettings([{
+      ...db.defaultPlaybackConnectionSettings("jf"),
+      observePlayback: false,
+      protectNodes: true,
+      protectedNodeIds: ["gpu"],
+    }]);
+    monitor.start();
+    await monitor.refresh();
+    expect(db.listPlaybackOccurrences().items).toEqual([]);
+    expect(policy.nodeAdmission("gpu", db.getPlaybackSettings())).toMatchObject({ allowed: false, reason: "playing" });
+  });
+
   it("attaches two versions that share provider ids to their own paths", async () => {
     const db = store();
     seedLibrary(db);

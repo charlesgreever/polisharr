@@ -43,6 +43,13 @@ import {
   type PlaybackMonitor,
 } from "./playback-monitor.ts";
 import {
+  createPlaybackPolicy,
+  playbackHoldDetail,
+  playbackHoldSentence,
+  playbackMonitoringEnabled,
+  type PlaybackDecision,
+} from "./playback-policy.ts";
+import {
   PLAYBACK_HISTORY_DAYS,
   PLAYBACK_HISTORY_MAX,
   PLAYBACK_POLL_MS,
@@ -144,6 +151,11 @@ export function createApp(opts: AppOptions) {
     recomputeSuggestion: afterInspect,
   });
   const optimizer = opts.optimizer ?? ffmpegOptimizer();
+  const playbackPolicy = createPlaybackPolicy({
+    clock: opts.clock,
+    staleMs: opts.playbackStaleMs ?? PLAYBACK_STALE_MS,
+    connectionName: (id) => store.getInstance(id)?.name ?? id,
+  });
   const jobs = new JobService({
     store,
     optimizer,
@@ -155,6 +167,10 @@ export function createApp(opts: AppOptions) {
     reinspectChangedItem: inspections.reinspectChangedItem,
     inspectOne: inspections.inspectOne,
     localNodeId: () => store.localNodeId(),
+    playback: {
+      nodeAdmission: (nodeId) => playbackPolicy.nodeAdmission(nodeId, store.getPlaybackSettings()),
+      blockedNodeIds: () => playbackPolicy.blockedNodeIds(store.getPlaybackSettings()),
+    },
   });
   const isWorker = opts.env.role === "worker";
   if (!isWorker) jobs.start();
@@ -171,6 +187,7 @@ export function createApp(opts: AppOptions) {
     pollMs: opts.playbackPollMs ?? PLAYBACK_POLL_MS,
     staleMs: opts.playbackStaleMs ?? PLAYBACK_STALE_MS,
     playback: jellyfinPlayback,
+    policy: playbackPolicy,
   });
   if (!isWorker) playbackMonitor.start();
   const sync = new LibrarySync({
@@ -735,13 +752,13 @@ export function createApp(opts: AppOptions) {
           health: coverage.get(row.connectionId) ?? {
             connectionId: row.connectionId,
             observePlayback: row.observePlayback,
-            status: row.observePlayback ? "unknown" : "off",
+            status: playbackMonitoringEnabled(row) ? "unknown" : "off",
             lastSuccessAt: null,
             lastError: null,
             complete: false,
             credentialKind: "unknown",
             householdVisible: false,
-            stale: row.observePlayback,
+            stale: playbackMonitoringEnabled(row),
           },
         };
       }),
@@ -1685,6 +1702,7 @@ export function createApp(opts: AppOptions) {
   function publicNode(node: ClusterNode, thisNodeId: string, activity?: ReturnType<Store["nodeActivity"]>[number]) {
     const now = opts.clock?.() ?? Date.now();
     const load = activity ?? store.nodeActivity().find((row) => row.id === node.id);
+    const playback = publicPlaybackHold(playbackPolicy.nodeAdmission(node.id, store.getPlaybackSettings()));
     return {
       ...node,
       thisNode: node.id === thisNodeId,
@@ -1694,6 +1712,7 @@ export function createApp(opts: AppOptions) {
       runningCount: load?.running ?? 0,
       waitingCount: load?.waiting ?? 0,
       runningTitles: load?.jobs.map((job) => job.title) ?? [],
+      playbackHold: playback,
     };
   }
 
@@ -1757,11 +1776,41 @@ export function createApp(opts: AppOptions) {
     const online = assigned ? nodeIsOnline(assigned.lastSeen, now) : true;
     const busy = Boolean(load && load.running >= load.concurrency);
     const waiting = (job.status === "queued" || job.status === "held") && Boolean(assigned) && (!online || busy);
+    const playbackHold = (job.status === "queued" || job.status === "held" || job.status === "paused")
+      ? publicPlaybackHold(jobPlaybackDecision(job.assignedNodeId ?? null))
+      : null;
+    const playbackReason = playbackHold?.reason === "playing" ? "playback" as const
+      : playbackHold ? "playback-status" as const
+      : null;
     return {
       ...job,
       assignedNodeName: node?.name ?? null,
       waitingForNode: waiting,
-      waitingReason: waiting ? (online ? "busy" as const : "offline" as const) : null,
+      waitingReason: playbackReason ?? (waiting ? (online ? "busy" as const : "offline" as const) : null),
+      playbackHold,
+    };
+  }
+
+  function jobPlaybackDecision(assignedNodeId: string | null): PlaybackDecision {
+    const connections = store.getPlaybackSettings();
+    if (assignedNodeId) return playbackPolicy.nodeAdmission(assignedNodeId, connections);
+    const blocked = new Set(playbackPolicy.blockedNodeIds(connections));
+    const now = opts.clock?.() ?? Date.now();
+    const online = store.listNodes().filter((node) => node.enabled && nodeIsOnline(node.lastSeen, now));
+    if (online.length === 0) return playbackPolicy.nodeAdmission(store.localNodeId(), connections);
+    if (online.some((node) => !blocked.has(node.id))) return { allowed: true, reason: null, connectionIds: [], connectionNames: [], observedAt: null };
+    return playbackPolicy.nodeAdmission(online[0]!.id, connections);
+  }
+
+  function publicPlaybackHold(decision: PlaybackDecision) {
+    if (decision.allowed) return null;
+    return {
+      reason: decision.reason,
+      sentence: playbackHoldSentence(decision),
+      detail: playbackHoldDetail(decision),
+      observedAt: decision.observedAt,
+      connectionIds: decision.connectionIds,
+      connectionNames: decision.connectionNames,
     };
   }
 
@@ -1798,7 +1847,7 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
-  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor };
+  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy };
 }
 
 async function readJson(c: Context): Promise<unknown> {

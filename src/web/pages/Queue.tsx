@@ -16,9 +16,11 @@ export function queueNodeLine(job: {
   assignedNodeName?: string | null;
   assignedNodeId?: string | null;
   waitingForNode?: boolean;
-  waitingReason?: "offline" | "busy" | null;
+  waitingReason?: "offline" | "busy" | "playback" | "playback-status" | null;
   status: string;
+  playbackHold?: { sentence?: string | null; detail?: string | null; observedAt?: number | null } | null;
 }): string | null {
+  if (job.playbackHold?.detail) return job.playbackHold.detail;
   if (job.waitingReason === "busy" && job.assignedNodeName) return `Waiting for ${job.assignedNodeName} (busy)`;
   if (job.waitingForNode && job.assignedNodeName) return `Waiting for ${job.assignedNodeName}`;
   if ((job.status === "queued" || job.status === "held") && job.assignedNodeId == null && !job.assignedNodeName) {
@@ -33,9 +35,11 @@ export function queueWaitingStatus(job: {
   assignedNodeName?: string | null;
   assignedNodeId?: string | null;
   waitingForNode?: boolean;
-  waitingReason?: "offline" | "busy" | null;
+  waitingReason?: "offline" | "busy" | "playback" | "playback-status" | null;
   status: string;
+  playbackHold?: { sentence?: string | null; detail?: string | null; observedAt?: number | null } | null;
 }): string {
+  if (job.playbackHold?.sentence) return job.playbackHold.sentence;
   if (job.waitingReason === "busy" && job.assignedNodeName) return `Waiting for ${job.assignedNodeName} (busy)`;
   if (job.waitingForNode && job.assignedNodeName) return `Waiting for ${job.assignedNodeName}`;
   if (job.assignedNodeId == null && !job.assignedNodeName) return "Any open node";
@@ -205,6 +209,9 @@ function WorkingNowCard({ job, actions }: { job: JobRow; actions: JobActions }) 
     >
       <p className="m-0 text-sm text-muted">{phaseLabel(job.phase, job.status)}</p>
       {nodeLine && <p className="mt-1 text-sm text-muted">{nodeLine}</p>}
+      {job.playbackHold?.observedAt != null && (
+        <p className="mt-1 text-sm text-muted">Last check {new Date(job.playbackHold.observedAt).toLocaleString()}</p>
+      )}
       <p className="mt-1 text-sm text-muted">{planLabel(job)}</p>
       <div className="job-progress mt-3">
         <div className="job-progress-bar" style={{ width: `${Math.max(1, Math.round(job.progress * 100))}%` }} />
@@ -246,9 +253,15 @@ function QueueTable({
                 <td className="min-w-44">
                   <JobTitle job={job} />
                 </td>
-                <td>{queueWaitingStatus(job)}</td>
+                <td>
+                  <div>{queueWaitingStatus(job)}</div>
+                  {job.playbackHold?.detail && <div className="text-xs text-muted">{job.playbackHold.detail}</div>}
+                  {job.playbackHold?.observedAt != null && (
+                    <div className="text-xs text-muted">Last check {new Date(job.playbackHold.observedAt).toLocaleString()}</div>
+                  )}
+                </td>
                 <td>{planLabel(job)}</td>
-                {kind === "waiting" && <td>{phaseLabel(job.phase, job.status)}</td>}
+                {kind === "waiting" && <td>{phaseLabel(job.phase, job.status, job.playbackHold)}</td>}
                 <td>
                   <JobButtons job={job} actions={actions} kind={kind} />
                   <JobNotes job={job} log={actions.logs[job.id]} />
@@ -358,7 +371,8 @@ function planLabel(job: JobRow): string {
   return `${aim} · ${write === "direct" ? "direct write" : "sidecar"}`;
 }
 
-function phaseLabel(phase: string, status: string): string {
+function phaseLabel(phase: string, status: string, playbackHold?: { sentence?: string | null } | null): string {
+  if (playbackHold?.sentence && status !== "held") return playbackHold.sentence;
   if (status === "held") return "Waiting for the off-peak window";
   if (status === "queued") return "Waiting for a slot";
   if (phase === "muxing") return "Muxing tracks";

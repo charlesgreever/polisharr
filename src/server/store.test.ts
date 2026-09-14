@@ -444,6 +444,46 @@ describe("store schema migration", () => {
     expect(store.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["pin-a", "pin-b", "pool-a"]);
   });
 
+  it("does not count playback-blocked peers when spreading pool jobs", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-spread-play-")), "polisharr.db"));
+    stores.push(store);
+    const hardware = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    store.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    store.upsertNode({
+      id: "mac", name: "MacBook Pro", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    const plan = {
+      origin: "bulk" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: [], estimatedOutputBytes: null, category: "movie1080p" as const,
+    };
+    for (const id of ["pool-a", "pool-b", "pool-c", "pool-d", "pool-e"]) {
+      store.insertJob({
+        id, itemId: id, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+        error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: null,
+      });
+    }
+    expect(store.claimQueuedJobs("5090", 4, 1_000, 30_000).map((job) => job.id)).toEqual(["pool-a"]);
+    const open = new Store(join(mkdtempSync(join(tmpdir(), "opt-spread-play-open-")), "polisharr.db"));
+    stores.push(open);
+    open.upsertNode({
+      id: "5090", name: "5090", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    open.upsertNode({
+      id: "mac", name: "MacBook Pro", role: "worker", lastSeen: 1_000, hardware, concurrency: 4, enabled: true, version: "1", currentJobId: null,
+    });
+    for (const id of ["pool-a", "pool-b", "pool-c", "pool-d", "pool-e"]) {
+      open.insertJob({
+        id, itemId: id, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+        error: null, warning: null, runNow: false, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: null,
+      });
+    }
+    expect(open.claimQueuedJobs("5090", 4, 1_000, 30_000, ["mac"]).map((job) => job.id)).toEqual([
+      "pool-a", "pool-b", "pool-c", "pool-d",
+    ]);
+  });
+
   it("counts assigned waiting jobs toward a node's load", () => {
     const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-busy-count-")), "polisharr.db"));
     stores.push(store);

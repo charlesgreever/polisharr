@@ -121,6 +121,7 @@ describe("cluster node identity", () => {
       1_000,
       "intel",
     )?.id).toBe("intel");
+    expect(pickOpenEncodeNode([gpu, mac, hevc], "hevc", 1_000, undefined, ["intel"])?.id).toBe("mac");
     expect(pickOpenEncodeNode(
       [{ ...hevc, runningCount: 1 }, { ...mac, runningCount: 0 }],
       "hevc",

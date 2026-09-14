@@ -16,11 +16,17 @@ import { encodeNeedFromPlan, isAnyOpenNode, LEASE_MS, nodeCanEncode, pickOpenEnc
 import { encodeApiLabel } from "./hardware.ts";
 import { placeMethodSentence } from "./fs-copy.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
+import { admitNodeWork, PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
 
 export type EnqueueOptions = {
   runNow?: boolean;
   writeMode?: import("./types.ts").WriteMode;
   assignedNodeId?: string;
+};
+
+export type JobPlaybackGate = {
+  nodeAdmission(nodeId: string): PlaybackDecision;
+  blockedNodeIds(): string[];
 };
 
 export type JobServiceOptions = {
@@ -36,6 +42,7 @@ export type JobServiceOptions = {
   inspectOne?: (itemId: string) => Promise<{ ok: true; report: InspectionReport } | { ok: false; warning: string }>;
   promote?: (input: PromoteInput) => Promise<PromoteResult>;
   localNodeId?: () => string;
+  playback?: JobPlaybackGate;
 };
 
 export const SHARED_FILE_BUSY = "This file is already in the queue or Review. Another episode uses the same file.";
@@ -221,7 +228,19 @@ export class JobService {
       ...node,
       runningCount: this.opts.store.busyCountOnNode(node.id),
     }));
-    return pickOpenEncodeNode(nodes, need, this.now(), preferred);
+    return pickOpenEncodeNode(nodes, need, this.now(), preferred, this.blockedNodeIds());
+  }
+
+  private blockedNodeIds(): string[] {
+    return this.opts.playback?.blockedNodeIds() ?? [];
+  }
+
+  private nodeWorkAdmission(nodeId: string, runningCount: number, concurrency: number) {
+    return admitNodeWork({
+      decision: this.opts.playback?.nodeAdmission(nodeId) ?? PLAYBACK_ALLOWED,
+      runningCount,
+      concurrency,
+    });
   }
 
   private rejectIncapableNode(nodeId: string, plan: { video?: { kind?: string; codec?: string } }): { error: string; status: number } | undefined {
@@ -288,7 +307,17 @@ export class JobService {
   claimForNode(nodeId: string, freeSlots: number): RemoteJobDocument[] {
     this.applySchedule(this.opts.store.getSettings());
     this.opts.store.expireLeases(this.now());
-    const claimed = this.opts.store.claimQueuedJobs(nodeId, freeSlots, this.now(), LEASE_MS);
+    const node = this.opts.store.getNode(nodeId);
+    if (!node?.enabled) return [];
+    const admission = this.nodeWorkAdmission(nodeId, this.opts.store.runningCountOnNode(nodeId), node.concurrency);
+    if (!admission.allowed) return [];
+    const claimed = this.opts.store.claimQueuedJobs(
+      nodeId,
+      Math.min(freeSlots, admission.freeSlots),
+      this.now(),
+      LEASE_MS,
+      this.blockedNodeIds(),
+    );
     const settings = this.opts.store.getSettings();
     const docs: RemoteJobDocument[] = [];
     for (const job of claimed) {
@@ -452,7 +481,9 @@ export class JobService {
       const localNode = this.opts.store.getNode(localId);
       if (localNode && !localNode.enabled) return;
       const slots = Math.max(1, localNode?.concurrency ?? settings.concurrency);
-      const capacity = slots - this.running.size;
+      const admission = this.nodeWorkAdmission(localId, this.running.size, slots);
+      if (!admission.allowed) return;
+      const capacity = admission.freeSlots;
       if (capacity <= 0) return;
       const queued = this.opts.store.listJobs().filter((job) => job.status === "queued");
       if (!localNode) {
@@ -467,7 +498,13 @@ export class JobService {
       const pool = queued.filter((job) => !job.assignedNodeId && nodeCanEncode(localNode, planNeed(job)));
       const takePinned = pinned.slice(0, capacity);
       const leftoverSlots = capacity - takePinned.length;
-      const poolBudget = this.opts.store.poolSpreadBudget(localId, leftoverSlots, this.now(), pool.map(planNeed));
+      const poolBudget = this.opts.store.poolSpreadBudget(
+        localId,
+        leftoverSlots,
+        this.now(),
+        pool.map(planNeed),
+        this.blockedNodeIds(),
+      );
       for (const job of [...takePinned, ...pool.slice(0, poolBudget)]) void this.run(job.id, settings);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";

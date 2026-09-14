@@ -87,9 +87,11 @@ export function pickOpenEncodeNode(
   need: EncodeNeed,
   now: number,
   preferredId?: string,
+  excludedIds?: Iterable<string>,
 ): { id: string; name: string } | null {
+  const excluded = new Set(excludedIds ?? []);
   const capable = nodes.filter(
-    (node) => node.enabled && nodeIsOnline(node.lastSeen, now) && nodeCanEncode(node, need),
+    (node) => !excluded.has(node.id) && node.enabled && nodeIsOnline(node.lastSeen, now) && nodeCanEncode(node, need),
   );
   if (capable.length === 0) return null;
   const preferred = preferredId && !isAnyOpenNode(preferredId) ? preferredId : "";

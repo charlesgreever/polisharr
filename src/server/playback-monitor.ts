@@ -26,6 +26,11 @@ import {
   type JellyfinPlaybackClient,
   type JellyfinSessionSnapshot,
 } from "./jellyfin-playback.ts";
+import {
+  playbackMonitoringEnabled,
+  type PlaybackPolicy,
+  type PlaybackPolicyObservation,
+} from "./playback-policy.ts";
 
 export type PlaybackCoverage = {
   connections: PlaybackConnectionHealth[];
@@ -48,6 +53,7 @@ export type PlaybackMonitorOptions = {
   staleMs?: number;
   playback?: JellyfinPlaybackClient;
   statFile?: (path: string) => Promise<PlaybackFileRevision | null>;
+  policy?: PlaybackPolicy;
 };
 
 type ConnectionLive = {
@@ -163,6 +169,7 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
   const pollMs = opts.pollMs ?? PLAYBACK_POLL_MS;
   const staleMs = opts.staleMs ?? PLAYBACK_STALE_MS;
   const statFile = opts.statFile ?? defaultStat;
+  const policy = opts.policy;
   const live = new Map<string, ConnectionLive>();
   let timer: ReturnType<typeof setInterval> | undefined;
   let inFlight: Promise<void> | null = null;
@@ -178,7 +185,7 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
         status: effectiveStatus(existing, settings, now(), staleMs),
       };
     }
-    return unknownHealth(connectionId, settings?.observePlayback === true);
+    return unknownHealth(connectionId, settings);
   }
 
   return {
@@ -187,6 +194,7 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
       started = true;
       store.closeOpenPlaybackOccurrences(null, now(), true);
       live.clear();
+      policy?.reset();
       if (pollMs > 0) {
         timer = setInterval(() => void this.refresh(), pollMs);
         timer.unref?.();
@@ -209,6 +217,7 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
         live,
         staleMs,
         statFile,
+        policy,
       }).finally(() => {
         inFlight = null;
       });
@@ -223,6 +232,7 @@ export function createPlaybackMonitor(opts: PlaybackMonitorOptions): PlaybackMon
     forgetConnection(connectionId: string) {
       live.delete(connectionId);
       playback.invalidateSourceCache(connectionId);
+      policy?.forget(connectionId);
     },
   };
 }
@@ -235,35 +245,41 @@ async function pollAll(input: {
   live: Map<string, ConnectionLive>;
   staleMs: number;
   statFile: (path: string) => Promise<PlaybackFileRevision | null>;
+  policy?: PlaybackPolicy;
 }): Promise<void> {
   const settings = input.store.getPlaybackSettings();
   for (const row of settings) {
-    if (!row.observePlayback) {
+    if (!playbackMonitoringEnabled(row)) {
       input.store.closeOpenPlaybackOccurrences(row.connectionId, input.now, true);
       input.live.delete(row.connectionId);
       input.playback.invalidateSourceCache(row.connectionId);
+      input.policy?.forget(row.connectionId);
       continue;
     }
     const inst = input.store.getInstance(row.connectionId);
     if (!inst || inst.kind !== "jellyfin" || !inst.secret) {
+      const message = "That Jellyfin connection has no saved token.";
       writeHealth(input.live, row, {
         status: "error",
-        lastError: "That Jellyfin connection has no saved token.",
+        lastError: message,
         complete: false,
         stale: true,
       }, input.now, input.staleMs);
+      observePolicy(input.policy, row.connectionId, input.now, message);
       continue;
     }
     let token: string;
     try {
       token = input.decrypt(inst.secret);
     } catch {
+      const message = "Polisharr could not read the saved Jellyfin token.";
       writeHealth(input.live, row, {
         status: "error",
-        lastError: "Polisharr could not read the saved Jellyfin token.",
+        lastError: message,
         complete: false,
         stale: true,
       }, input.now, input.staleMs);
+      observePolicy(input.policy, row.connectionId, input.now, message);
       continue;
     }
     const snapshot = await input.playback.fetchSnapshot({
@@ -284,6 +300,7 @@ async function pollAll(input: {
         credentialKind: access.credentialKind,
         householdVisible: access.householdVisible,
       }, input.now, input.staleMs);
+      observePolicy(input.policy, row.connectionId, snapshot.fetchedAt, snapshot.error ?? "Jellyfin did not return a complete session list.");
       continue;
     }
     await applySnapshot({
@@ -298,6 +315,7 @@ async function pollAll(input: {
       staleMs: input.staleMs,
       statFile: input.statFile,
       access,
+      policy: input.policy,
     });
   }
   const known = new Set(settings.map((row) => row.connectionId));
@@ -305,6 +323,7 @@ async function pollAll(input: {
     if (known.has(id)) continue;
     input.live.delete(id);
     input.playback.invalidateSourceCache(id);
+    input.policy?.forget(id);
   }
 }
 
@@ -326,7 +345,7 @@ async function ensureCredential(
   }
   const access = await playback.testPlaybackAccess({ url, token, checkSessions: false });
   const state = existing ?? {
-    health: unknownHealth(settings.connectionId, settings.observePlayback),
+    health: unknownHealth(settings.connectionId, settings),
     missCounts: new Map<string, number>(),
     tokenFingerprint: fingerprint,
   };
@@ -347,42 +366,53 @@ async function applySnapshot(input: {
   staleMs: number;
   statFile: (path: string) => Promise<PlaybackFileRevision | null>;
   access: { credentialKind: PlaybackCredentialKind; householdVisible: boolean };
+  policy?: PlaybackPolicy;
 }): Promise<void> {
   const state = input.live.get(input.settings.connectionId) ?? {
-    health: unknownHealth(input.settings.connectionId, true),
+    health: unknownHealth(input.settings.connectionId, input.settings),
     missCounts: new Map<string, number>(),
     tokenFingerprint: null,
   };
+  if (!input.settings.observePlayback) {
+    input.store.closeOpenPlaybackOccurrences(input.settings.connectionId, input.now, true);
+  }
   const playing = input.snapshot.sessions.filter(sessionHasCurrentItem);
   const seen = new Set<string>();
+  const policySessions: PlaybackPolicyObservation["sessions"] = [];
+  const needMatch = input.settings.observePlayback || input.settings.protectReplacement;
   for (const session of playing) {
     if (!session.nowPlaying) continue;
     const mediaSourceId = session.playState?.mediaSourceId ?? "";
     const key = occurrenceKey(session.sessionId, session.nowPlaying.itemId, mediaSourceId);
     seen.add(key);
     state.missCounts.delete(key);
-    const recorded = await recordOccurrence({
-      store: input.store,
-      playback: input.playback,
-      settings: input.settings,
-      url: input.url,
-      token: input.token,
-      session,
-      now: input.now,
-      statFile: input.statFile,
-    });
-    if (recorded && input.settings.retainHistory) {
+    const recorded = needMatch
+      ? await recordOccurrence({
+        store: input.store,
+        playback: input.playback,
+        settings: input.settings,
+        url: input.url,
+        token: input.token,
+        session,
+        now: input.now,
+        statFile: input.statFile,
+      })
+      : null;
+    if (recorded && input.settings.observePlayback && input.settings.retainHistory) {
       input.store.savePlaybackOccurrence(recorded);
     }
+    policySessions.push(policySessionFrom(input.store, session, recorded));
   }
-  for (const open of input.store.listOpenPlaybackOccurrences(input.settings.connectionId)) {
-    const key = occurrenceKey(open.sessionId, open.itemId, open.mediaSourceId);
-    if (seen.has(key)) continue;
-    const misses = (state.missCounts.get(key) ?? 0) + 1;
-    state.missCounts.set(key, misses);
-    if (misses >= PLAYBACK_OCCURRENCE_MISS_POLLS) {
-      input.store.closePlaybackOccurrence(open.id, input.now, false);
-      state.missCounts.delete(key);
+  if (input.settings.observePlayback) {
+    for (const open of input.store.listOpenPlaybackOccurrences(input.settings.connectionId)) {
+      const key = occurrenceKey(open.sessionId, open.itemId, open.mediaSourceId);
+      if (seen.has(key)) continue;
+      const misses = (state.missCounts.get(key) ?? 0) + 1;
+      state.missCounts.set(key, misses);
+      if (misses >= PLAYBACK_OCCURRENCE_MISS_POLLS) {
+        input.store.closePlaybackOccurrence(open.id, input.now, false);
+        state.missCounts.delete(key);
+      }
     }
   }
   const unavailable = input.access.credentialKind === "userToken";
@@ -397,6 +427,13 @@ async function applySnapshot(input: {
     credentialKind: input.access.credentialKind,
     householdVisible: input.access.householdVisible,
   }, input.now, input.staleMs);
+  input.policy?.observe({
+    connectionId: input.settings.connectionId,
+    fetchedAt: input.snapshot.fetchedAt,
+    complete: true,
+    error: null,
+    sessions: policySessions,
+  });
   input.store.prunePlaybackHistory(input.now);
 }
 
@@ -573,17 +610,53 @@ function unique(values: string[]): string[] {
   return out;
 }
 
-function unknownHealth(connectionId: string, observePlayback: boolean): PlaybackConnectionHealth {
+function observePolicy(policy: PlaybackPolicy | undefined, connectionId: string, fetchedAt: number, error: string): void {
+  policy?.observe({
+    connectionId,
+    fetchedAt,
+    complete: false,
+    error,
+    sessions: [],
+  });
+}
+
+function policySessionFrom(
+  store: Store,
+  session: JellyfinParsedSession,
+  recorded: PlaybackOccurrence | null,
+): PlaybackPolicyObservation["sessions"][number] {
+  const playing = session.nowPlaying;
+  const instanceIds = recorded
+    ? [...new Set(recorded.libraryItemIds.map((id) => store.getItem(id)?.instanceId).filter((id): id is string => Boolean(id)))]
+    : [];
+  return {
+    nowPlaying: playing
+      ? { itemId: playing.itemId, mediaType: playing.mediaType, type: playing.type, path: playing.path }
+      : null,
+    isPaused: session.playState?.isPaused ?? null,
+    match: recorded
+      ? {
+        outcome: recorded.match,
+        libraryItemIds: recorded.libraryItemIds,
+        path: recorded.path,
+        instanceIds,
+      }
+      : null,
+  };
+}
+
+function unknownHealth(connectionId: string, settings: PlaybackConnectionSettings | undefined): PlaybackConnectionHealth {
+  const monitored = settings ? playbackMonitoringEnabled(settings) : false;
   return {
     connectionId,
-    observePlayback,
-    status: observePlayback ? "unknown" : "off",
+    observePlayback: settings?.observePlayback === true,
+    status: monitored ? "unknown" : "off",
     lastSuccessAt: null,
     lastError: null,
     complete: false,
     credentialKind: "unknown",
     householdVisible: false,
-    stale: observePlayback,
+    stale: monitored,
   };
 }
 
@@ -596,7 +669,7 @@ function writeHealth(
 ): void {
   const current = live.get(settings.connectionId);
   const health: PlaybackConnectionHealth = {
-    ...(current?.health ?? unknownHealth(settings.connectionId, settings.observePlayback)),
+    ...(current?.health ?? unknownHealth(settings.connectionId, settings)),
     ...patch,
     connectionId: settings.connectionId,
     observePlayback: settings.observePlayback,
@@ -615,7 +688,7 @@ function tokenFingerprint(token: string): string {
 }
 
 function isStale(health: PlaybackConnectionHealth, settings: PlaybackConnectionSettings | undefined, now: number, staleMs: number): boolean {
-  if (!settings?.observePlayback) return false;
+  if (!settings || !playbackMonitoringEnabled(settings)) return false;
   if (health.lastSuccessAt == null || !health.complete) return true;
   return now - health.lastSuccessAt > staleMs;
 }
@@ -626,7 +699,7 @@ function effectiveStatus(
   now: number,
   staleMs: number,
 ): PlaybackHealthStatus {
-  if (!settings?.observePlayback) return "off";
+  if (!settings || !playbackMonitoringEnabled(settings)) return "off";
   if (isStale(health, settings, now, staleMs) && health.status !== "error" && health.status !== "incomplete" && health.status !== "unavailable" && health.status !== "unknown") {
     return "stale";
   }

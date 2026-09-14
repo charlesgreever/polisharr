@@ -39,3 +39,10 @@ export function hardwareBackendLabel(backend: string): string {
 }
 
 export const FIELD_CONTROL = "h-10 w-full";
+
+export const PLAYBACK_PRIORITY_LABEL = "Let Jellyfin playback take priority";
+export const PLAYBACK_PRIORITY_HELP = "Mapped encode nodes skip new work while this Jellyfin server is playing video. Running jobs finish. Run now still waits for playback.";
+export const PLAYBACK_NODE_HELP = "Pick the encode nodes that share hardware with this Jellyfin server.";
+export const PLAYBACK_COVERAGE_LABEL = "Covered libraries";
+export const PLAYBACK_COVERAGE_HELP = "Replacement protection uses these Radarr and Sonarr libraries.";
+export const PLAYBACK_REPLACEMENT_LABEL = "Protect file replacement";

@@ -70,5 +70,21 @@ describe("Queue sections", () => {
       waitingForNode: true,
       waitingReason: "busy",
     })).toBe("Waiting for 5090 (busy)");
+    expect(queueWaitingStatus({
+      status: "queued",
+      assignedNodeId: "5090",
+      assignedNodeName: "5090",
+      playbackHold: { sentence: "Waiting for Jellyfin playback to finish", detail: "Living Room" },
+    })).toBe("Waiting for Jellyfin playback to finish");
+    expect(queueWaitingStatus({
+      status: "queued",
+      assignedNodeId: "5090",
+      playbackHold: { sentence: "Waiting for Jellyfin playback status." },
+    })).toBe("Waiting for Jellyfin playback status.");
+    expect(queueNodeLine({
+      status: "queued",
+      assignedNodeName: "5090",
+      playbackHold: { sentence: "Waiting for Jellyfin playback to finish", detail: "Living Room" },
+    })).toBe("Living Room");
   });
 });

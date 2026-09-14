@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { SIZE_CAP_GRID, hardwareBackendLabel, sizeCapLabel, transcodeBelowTargetLabel } from "./settings-copy";
+import {
+  PLAYBACK_PRIORITY_HELP,
+  PLAYBACK_PRIORITY_LABEL,
+  SIZE_CAP_GRID,
+  hardwareBackendLabel,
+  sizeCapLabel,
+  transcodeBelowTargetLabel,
+} from "./settings-copy";
 
 describe("settings copy", () => {
   it("names size caps in everyday words", () => {
@@ -24,5 +31,11 @@ describe("settings copy", () => {
     expect(hardwareBackendLabel("vaapi")).toBe("VAAPI");
     expect(hardwareBackendLabel("videotoolbox")).toBe("VideoToolbox");
     expect(hardwareBackendLabel("none")).toBe("none");
+  });
+
+  it("names Jellyfin playback priority without implying Run now skips it", () => {
+    expect(PLAYBACK_PRIORITY_LABEL).toBe("Let Jellyfin playback take priority");
+    expect(PLAYBACK_PRIORITY_HELP).toContain("Run now still waits for playback");
+    expect(PLAYBACK_PRIORITY_HELP).toContain("Running jobs finish");
   });
 });

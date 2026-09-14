@@ -1135,7 +1135,7 @@ export class Store {
     ).run(now).changes;
   }
 
-  claimQueuedJobs(nodeId: string, limit: number, now: number, leaseMs: number): Array<(Job & { plan: JobPlan; leaseToken: string })> {
+  claimQueuedJobs(nodeId: string, limit: number, now: number, leaseMs: number, excludePeerNodeIds: Iterable<string> = []): Array<(Job & { plan: JobPlan; leaseToken: string })> {
     const node = this.getNode(nodeId);
     if (!node?.enabled) return [];
     const slots = Math.max(0, node.concurrency - this.runningCountOnNode(nodeId));
@@ -1179,7 +1179,7 @@ export class Store {
         if (!nodeCanEncode(node, need)) continue;
         capable.push({ id: row.id, need });
       }
-      const budget = this.poolSpreadBudget(nodeId, remaining, now, capable.map((row) => row.need));
+      const budget = this.poolSpreadBudget(nodeId, remaining, now, capable.map((row) => row.need), excludePeerNodeIds);
       const beforePool = claimed.length;
       for (const row of capable) {
         if (claimed.length - beforePool >= budget) break;
@@ -1234,15 +1234,16 @@ export class Store {
     ).get(nodeId, nodeId) as { n: number }).n);
   }
 
-  poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[]): number {
-    return poolSpreadLimit(freeSlots, needs.length, this.peerCapableFreeSlots(nodeId, needs, now));
+  poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[], excludePeerNodeIds: Iterable<string> = []): number {
+    return poolSpreadLimit(freeSlots, needs.length, this.peerCapableFreeSlots(nodeId, needs, now, excludePeerNodeIds));
   }
 
-  peerCapableFreeSlots(claimantId: string, needs: EncodeNeed[], now: number): number {
+  peerCapableFreeSlots(claimantId: string, needs: EncodeNeed[], now: number, excludePeerNodeIds: Iterable<string> = []): number {
     if (needs.length === 0) return 0;
+    const excluded = new Set(excludePeerNodeIds);
     let total = 0;
     for (const peer of this.listNodes()) {
-      if (peer.id === claimantId || !peer.enabled || !nodeIsOnline(peer.lastSeen, now)) continue;
+      if (peer.id === claimantId || excluded.has(peer.id) || !peer.enabled || !nodeIsOnline(peer.lastSeen, now)) continue;
       const free = Math.max(0, peer.concurrency - this.runningCountOnNode(peer.id));
       if (free <= 0) continue;
       if (!needs.some((need) => nodeCanEncode(peer, need))) continue;

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.ts";
 import { loadEnv } from "./env.ts";
+import { PLAYBACK_WAIT_FINISH, PLAYBACK_WAIT_STATUS } from "./playback-policy.ts";
 import type { HardwareInfo } from "./types.ts";
 
 function cookie(res: Response): string {
@@ -290,6 +291,119 @@ describe("playback HTTP", () => {
     };
     expect(settings.connections).toEqual([]);
     expect(observations.connections).toEqual([]);
+  });
+
+  it("saves node and library coverage for playback protection", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    const nodeId = ctx.store.localNodeId();
+    const radarrId = ctx.store.listInstances().find((row) => row.kind === "radarr")!.id;
+    const saved = await ctx.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({
+        connections: [{
+          connectionId: ctx.jfId,
+          protectNodes: true,
+          protectedNodeIds: [nodeId],
+          protectReplacement: true,
+          coveredArrInstanceIds: [radarrId],
+        }],
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const body = await saved.json() as {
+      connections: Array<{ protectNodes: boolean; protectedNodeIds: string[]; protectReplacement: boolean; coveredArrInstanceIds: string[] }>;
+    };
+    expect(body.connections[0]).toMatchObject({
+      protectNodes: true,
+      protectedNodeIds: [nodeId],
+      protectReplacement: true,
+      coveredArrInstanceIds: [radarrId],
+    });
+  });
+
+  it("holds a queued job during playback and does not call Jellyfin for status reads", async () => {
+    let sessions = 0;
+    const ctx = await playbackApp(((url, init) => {
+      if (String(url).endsWith("/Sessions")) sessions += 1;
+      return jellyfinFetch({ sessions: () => [playing()] })(url, init);
+    }) as typeof fetch);
+    const nodeId = ctx.store.localNodeId();
+    await ctx.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({
+        connections: [{ connectionId: ctx.jfId, protectNodes: true, protectedNodeIds: [nodeId] }],
+      }),
+    });
+    const plan = {
+      origin: "custom" as const, video: { kind: "copy" as const }, audio: [], subtitles: [], container: "mkv" as const,
+      writeMode: "sidecar" as const, warning: null, reasons: ["Copy"], estimatedOutputBytes: 1, category: "movie1080p" as const,
+    };
+    ctx.store.insertJob({
+      id: "job-1", itemId: "film-1080", suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: true, createdAt: 1, writeMode: "sidecar", plan, assignedNodeId: nodeId,
+    });
+    const before = sessions;
+    const listed = await ctx.app.request("/api/jobs", { headers: ctx.headers });
+    const settings = await ctx.app.request("/api/playback/settings", { headers: ctx.headers });
+    expect(listed.status).toBe(200);
+    expect(settings.status).toBe(200);
+    expect(sessions).toBe(before);
+    const body = await listed.json() as {
+      items: Array<{ id: string; status: string; playbackHold?: { sentence: string | null; detail: string | null }; waitingReason?: string | null }>;
+    };
+    const job = body.items.find((row) => row.id === "job-1");
+    expect(job?.status).toBe("queued");
+    expect(job?.waitingReason).toBe("playback");
+    expect(job?.playbackHold?.sentence).toBe(PLAYBACK_WAIT_FINISH);
+    expect(job?.playbackHold?.detail).toBe("Jellyfin");
+    expect(ctx.store.getJob("job-1")?.status).toBe("queued");
+  });
+
+  it("holds mapped work when the monitor is stale and shows the last check time", async () => {
+    let now = 1_000;
+    const dir = mkdtempSync(join(tmpdir(), "opt-play-stale-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
+    const created = createApp({
+      env,
+      hardware: async () => hw,
+      fetch: jellyfinFetch({ sessions: () => [] }),
+      clock: () => now,
+      playbackPollMs: 0,
+      playbackTimeoutMs: 50,
+    });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr", apiKey: "arr", enabled: true }),
+    });
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin:8096", token: "server-key", enabled: true }),
+    });
+    const jfId = created.store.listInstances().find((row) => row.kind === "jellyfin")!.id;
+    const nodeId = created.store.localNodeId();
+    await created.app.request("/api/playback/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        connections: [{ connectionId: jfId, protectNodes: true, protectedNodeIds: [nodeId] }],
+      }),
+    });
+    now = 40_000;
+    const listed = await created.app.request("/api/nodes", { headers });
+    const nodes = await listed.json() as { nodes: Array<{ id: string; playbackHold?: { sentence: string | null; observedAt: number | null } | null }> };
+    const node = nodes.nodes.find((row) => row.id === nodeId);
+    expect(node?.playbackHold?.sentence).toBe(PLAYBACK_WAIT_STATUS);
+    expect(node?.playbackHold?.observedAt).toBe(1_000);
   });
 
   it("blocks playback routes on a worker", async () => {

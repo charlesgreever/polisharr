@@ -167,6 +167,9 @@ export const api = {
   addExclusion: (kind: Exclusion["kind"], value: string) =>
     req<{ exclusions: Exclusion[] }>("/api/exclusions", { method: "POST", body: JSON.stringify({ kind, value }) }),
   deleteExclusion: (id: string) => req<{ exclusions: Exclusion[] }>(`/api/exclusions/${id}`, { method: "DELETE" }),
+  playbackSettings: () => req<PlaybackSettingsPayload>("/api/playback/settings"),
+  savePlaybackSettings: (body: { connections: PlaybackConnectionUpdate[] }) =>
+    req<PlaybackSettingsPayload>("/api/playback/settings", { method: "PUT", body: JSON.stringify(body) }),
 };
 
 export type LibraryPage<T> = {
@@ -223,6 +226,7 @@ export type ClusterNode = {
   runningCount?: number;
   waitingCount?: number;
   runningTitles?: string[];
+  playbackHold?: PlaybackHold | null;
 };
 export type WorkNodeJob = {
   id: string;
@@ -380,7 +384,46 @@ export type JobRow = {
   assignedNodeId?: string | null;
   assignedNodeName?: string | null;
   waitingForNode?: boolean;
-  waitingReason?: "offline" | "busy" | null;
+  waitingReason?: "offline" | "busy" | "playback" | "playback-status" | null;
+  playbackHold?: PlaybackHold | null;
+};
+export type PlaybackHold = {
+  reason: "playing" | "unknown" | "cooldown" | null;
+  sentence: string | null;
+  detail: string | null;
+  observedAt: number | null;
+  connectionIds: string[];
+  connectionNames: string[];
+};
+export type PlaybackConnectionUpdate = {
+  connectionId: string;
+  observePlayback?: boolean;
+  retainHistory?: boolean;
+  protectNodes?: boolean;
+  protectedNodeIds?: string[];
+  protectReplacement?: boolean;
+  coveredArrInstanceIds?: string[];
+};
+export type PlaybackSettingsPayload = {
+  connections: Array<{
+    connectionId: string;
+    name: string;
+    url: string;
+    observePlayback: boolean;
+    retainHistory: boolean;
+    protectNodes: boolean;
+    protectedNodeIds: string[];
+    protectReplacement: boolean;
+    coveredArrInstanceIds: string[];
+    health: {
+      status: string;
+      stale: boolean;
+      lastSuccessAt: number | null;
+      lastError: string | null;
+    };
+  }>;
+  historyDays: number;
+  historyMaxOccurrences: number;
 };
 export type ReviewRow = {
   id: string;

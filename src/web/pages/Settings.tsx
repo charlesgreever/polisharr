@@ -38,7 +38,6 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
   const [widgetKey, setWidgetKey] = useState<string | null>(null);
   const [clusterToken, setClusterToken] = useState<string | null>(null);
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
-  const [playback, setPlayback] = useState<PlaybackSettingsPayload | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [playback, setPlayback] = useState<PlaybackSettingsPayload | null>(null);
@@ -55,7 +54,6 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
     void api.hardware().then(setHw);
     void api.exclusions().then((result) => setExclusions(result.exclusions));
     void api.nodes().then((payload) => setNodes(payload.nodes));
-    void api.playbackSettings().then(setPlayback).catch(() => undefined);
     const id = setInterval(() => {
       void api.nodes().then((payload) => setNodes(payload.nodes)).catch(() => undefined);
     }, 10_000);

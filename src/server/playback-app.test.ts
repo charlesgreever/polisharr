@@ -464,7 +464,8 @@ describe("playback HTTP", () => {
     const node = nodes.nodes.find((row) => row.id === nodeId);
     expect(node?.playbackHold?.sentence).toBe(PLAYBACK_WAIT_STATUS);
     expect(node?.playbackHold?.observedAt).toBe(1_000);
-=======
+  });
+
   it("explains audio conversion, opens an add-stereo draft, and leaves the queue empty", async () => {
     const ctx = await playbackApp(jellyfinFetch({ sessions: () => [playing()] }));
     ctx.store.saveInspection("film-1080", surroundReport());
@@ -719,7 +720,6 @@ describe("playback HTTP", () => {
     expect(queued.status).toBe(409);
     const jobs = await (await ctx.app.request("/api/jobs", { headers: ctx.headers })).json() as { items: unknown[] };
     expect(jobs.items).toEqual([]);
->>>>>>> execute-plan/2eebf78f-pr-2-explain-problems-and-open-repair-drafts
   });
 
   it("blocks playback routes on a worker", async () => {

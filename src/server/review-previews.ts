@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   nodeCanEncode,
@@ -45,7 +45,7 @@ import {
   type PreviewRenderer,
   type PreviewRendererControl,
 } from "./preview-render.ts";
-import { previewPairDir, previewRoot, removePreviewPairDir } from "./optimize.ts";
+import { previewDirBytes, previewPairDir, previewRoot, removePreviewPairDir, sweepUnownedPreviewDirs } from "./optimize.ts";
 import type { Store } from "./store.ts";
 import type {
   PreviewAdmissionKind,
@@ -70,6 +70,7 @@ export const PREVIEW_CLIP_GONE = "That preview clip is gone.";
 export const PREVIEW_CLIP_BUSY = "That preview is still generating.";
 export const PREVIEW_STALE = "The original or finished copy changed. Request a new preview.";
 export const PREVIEW_EVICT_PINNED = "That preview is still playing.";
+export const PREVIEW_CACHE_CLEANUP_WARNING = "Polisharr could not delete a preview pair, so cache accounting still includes those bytes.";
 
 export type { PreviewRenderer, PreviewRendererControl };
 
@@ -128,12 +129,9 @@ export class PreviewService {
   constructor(private readonly opts: PreviewServiceOptions) {}
 
   start(): void {
-    this.opts.store.expirePreviewLeases(this.now());
+    const expired = this.opts.store.expirePreviewLeases(this.now());
     const interrupted = this.opts.store.recoverInterruptedPreviews();
-    for (const id of interrupted) {
-      this.cacheReservations.delete(id);
-      void removePreviewPairDir(this.pairDir(id));
-    }
+    for (const id of [...expired, ...interrupted]) void this.discardPairFiles(id);
     void this.reconcileCache();
     void this.tick();
     this.timer = setInterval(() => void this.tick(), 500);
@@ -148,11 +146,16 @@ export class PreviewService {
   expire(): void {
     if (this.stopped) return;
     try {
-      this.opts.store.expirePreviewLeases(this.now());
+      const expired = this.opts.store.expirePreviewLeases(this.now());
+      for (const id of expired) void this.discardPairFiles(id);
     } catch (error) {
       if (isClosedDb(error)) return;
       throw error;
     }
+  }
+
+  cacheUsage(): number {
+    return this.cacheBytes();
   }
 
   runningCountOnNode(nodeId: string): number {
@@ -304,7 +307,7 @@ export class PreviewService {
     this.opts.store.updatePreviewTask(id, { status: "cancelled", waitReason: null, updatedAt: now });
     this.opts.store.releasePreviewReservations(id);
     this.releaseReservation(id);
-    void this.removePairFiles(id);
+    void this.discardPairFiles(id);
     return { ok: true };
   }
 
@@ -395,14 +398,17 @@ export class PreviewService {
     const task = this.opts.store.getPreviewTask(id);
     if (!task) return { error: "That preview task does not exist.", status: 404 };
     if (task.status === "cancelled" || !task.publicationAllowed) {
+      void this.discardPairFiles(id);
       return { error: PREVIEW_PUBLICATION_REVOKED, status: 409 };
     }
     if (task.status === "ready") {
       this.opts.store.releasePreviewReservations(id);
       return { ok: true };
     }
-    if (!this.opts.store.previewLeaseMatches(id, leaseToken)) return { error: PREVIEW_LEASE_INVALID, status: 409 };
-    if (task.status !== "running") return { error: PREVIEW_LEASE_INVALID, status: 409 };
+    if (!this.opts.store.previewLeaseMatches(id, leaseToken) || task.status !== "running") {
+      void this.discardPairFiles(id);
+      return { error: PREVIEW_LEASE_INVALID, status: 409 };
+    }
     const dir = this.pairDir(id);
     if (!publishedPairValidSync(dir)) {
       this.fail(id, leaseToken, PREVIEW_PAIR_INCOMPLETE);
@@ -431,9 +437,11 @@ export class PreviewService {
     if (!task) return { error: "That preview task does not exist.", status: 404 };
     if (task.status === "cancelled") {
       this.opts.store.releasePreviewReservations(id);
+      void this.discardPairFiles(id);
       return { cancelled: true };
     }
     if (!this.opts.store.previewLeaseMatches(id, leaseToken)) {
+      if (task.status !== "ready") void this.discardPairFiles(id);
       return { error: PREVIEW_LEASE_INVALID, status: 409 };
     }
     this.opts.store.updatePreviewTask(id, {
@@ -446,7 +454,7 @@ export class PreviewService {
     });
     this.opts.store.releasePreviewReservations(id);
     this.releaseReservation(id);
-    void this.removePairFiles(id);
+    void this.discardPairFiles(id);
     return { ok: true };
   }
 
@@ -501,15 +509,19 @@ export class PreviewService {
     const renderer = this.opts.renderer ?? stubPreviewRenderer;
     try {
       const result = await renderer(doc, {
-        isCancelled: () => this.opts.store.getPreviewTask(doc.id)?.status === "cancelled",
+        isCancelled: () => {
+          const status = this.opts.store.getPreviewTask(doc.id)?.status;
+          return status === "cancelled" || status === "failed";
+        },
         onProgress: (progress) => {
           void this.progress(doc.id, doc.leaseToken, progress);
         },
         registerChild: () => undefined,
       });
       const latest = this.opts.store.getPreviewTask(doc.id);
-      if (!latest || latest.status === "cancelled" || !latest.publicationAllowed) {
+      if (!latest || latest.status === "cancelled" || latest.status === "failed" || !latest.publicationAllowed) {
         this.opts.store.releasePreviewReservations(doc.id);
+        void this.discardPairFiles(doc.id);
         return;
       }
       if (result.ok) this.complete(doc.id, doc.leaseToken);
@@ -696,14 +708,14 @@ export class PreviewService {
   }
 
   private cacheBytes(): number {
-    const published = this.opts.store.previewCacheBytes();
+    const stored = this.opts.store.previewCacheBytes();
     let reserved = 0;
     for (const [id, bytes] of this.cacheReservations) {
       const task = this.opts.store.getPreviewTask(id);
-      if (task?.status === "ready") continue;
+      if (task?.status === "ready" || (task?.bytes ?? 0) > 0) continue;
       reserved += bytes;
     }
-    return published + reserved;
+    return stored + reserved + this.unownedPreviewDiskBytes();
   }
 
   private reserveCache(taskId: string): void {
@@ -734,12 +746,11 @@ export class PreviewService {
       status: "expired",
       error,
       waitReason: null,
-      bytes: 0,
       expiresAt: null,
       updatedAt: this.now(),
     });
     this.releaseReservation(id);
-    void this.removePairFiles(id);
+    void this.discardPairFiles(id);
   }
 
   private touch(id: string): void {
@@ -754,29 +765,91 @@ export class PreviewService {
     return publishedPairValidSync(this.pairDir(task.id));
   }
 
-  private async removePairFiles(id: string): Promise<void> {
+  private async discardPairFiles(id: string): Promise<void> {
     this.renderPlans.delete(id);
-    await removePreviewPairDir(this.pairDir(id));
+    this.releaseReservation(id);
+    const dir = this.pairDir(id);
+    try {
+      const onDisk = previewDirBytes(dir);
+      const task = this.opts.store.getPreviewTask(id);
+      if (onDisk > 0 && (task?.bytes ?? 0) < onDisk) {
+        this.opts.store.updatePreviewTask(id, { bytes: onDisk, updatedAt: this.now() });
+      }
+      const gone = await removePreviewPairDir(dir);
+      if (gone) {
+        if ((this.opts.store.getPreviewTask(id)?.bytes ?? 0) > 0) {
+          this.opts.store.updatePreviewTask(id, { bytes: 0, updatedAt: this.now() });
+        }
+        return;
+      }
+      const leftover = previewDirBytes(dir);
+      if (leftover <= 0) return;
+      this.opts.store.updatePreviewTask(id, { bytes: leftover, updatedAt: this.now() });
+      console.error(`${PREVIEW_CACHE_CLEANUP_WARNING} ${leftover} bytes remain in ${dir}.`);
+    } catch (error) {
+      if (isClosedDb(error)) return;
+      throw error;
+    }
   }
 
   private invalidateReviewPairs(reviewId: string): void {
     for (const task of this.opts.store.listPreviewTasks(reviewId)) {
       this.releaseReservation(task.id);
-      void this.removePairFiles(task.id);
       if (task.status === "ready") {
-        this.opts.store.updatePreviewTask(task.id, { status: "expired", bytes: 0, updatedAt: this.now() });
+        this.opts.store.updatePreviewTask(task.id, { status: "expired", updatedAt: this.now() });
       }
+      void this.discardPairFiles(task.id);
     }
   }
 
   private async reconcileCache(): Promise<void> {
     const root = previewRoot(this.reviewDir());
-    for (const task of this.opts.store.listPreviewTasks()) {
-      if (task.status !== "ready") continue;
-      if (publishedPairValidSync(this.pairDir(task.id))) continue;
-      this.expirePair(task.id, "The cached preview is no longer valid.");
+    const owned = new Set<string>();
+    try {
+      for (const task of this.opts.store.listPreviewTasks()) {
+        if (task.status === "running") {
+          owned.add(task.id);
+          continue;
+        }
+        if (task.status === "ready" && publishedPairValidSync(this.pairDir(task.id))) {
+          owned.add(task.id);
+          continue;
+        }
+        if (task.status === "ready") this.expirePair(task.id, "The cached preview is no longer valid.");
+      }
+      const leftover = await sweepUnownedPreviewDirs(root, owned);
+      for (const id of leftover) {
+        const bytes = previewDirBytes(this.pairDir(id));
+        if (bytes <= 0) continue;
+        const task = this.opts.store.getPreviewTask(id);
+        if (task) this.opts.store.updatePreviewTask(id, { bytes, updatedAt: this.now() });
+        console.error(`${PREVIEW_CACHE_CLEANUP_WARNING} ${bytes} bytes remain in ${this.pairDir(id)}.`);
+      }
+      for (const task of this.opts.store.listPreviewTasks()) {
+        if (owned.has(task.id) || existsSync(this.pairDir(task.id))) continue;
+        if (task.bytes > 0) this.opts.store.updatePreviewTask(task.id, { bytes: 0, updatedAt: this.now() });
+      }
+    } catch (error) {
+      if (isClosedDb(error)) return;
+      throw error;
     }
-    if (!existsSync(root)) return;
+  }
+
+  private unownedPreviewDiskBytes(): number {
+    const root = previewRoot(this.reviewDir());
+    let names: string[];
+    try {
+      names = readdirSync(root);
+    } catch {
+      return 0;
+    }
+    const known = new Set(this.opts.store.listPreviewTasks().map((task) => task.id));
+    let total = 0;
+    for (const name of names) {
+      if (known.has(name)) continue;
+      total += previewDirBytes(join(root, name));
+    }
+    return total;
   }
 
   private planFromTask(task: PreviewTask): PreviewRenderPlan | null {

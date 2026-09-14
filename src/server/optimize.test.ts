@@ -22,8 +22,12 @@ import {
   toolLocaleEnv,
   appleDoublePath,
   cleanReviewLeftovers,
+  PREVIEW_DIR_NAME,
+  PREVIEW_ORIGINAL_FILE,
+  PREVIEW_PUBLISHED_MARKER,
   removeEmptyDir,
   removeReviewArtifact,
+  sweepUnownedPreviewDirs,
   WORK_DIR_GUARD,
   parseFfmpegProgress,
   parseMkvmergeProgress,
@@ -129,6 +133,22 @@ describe("macOS AppleDouble leftovers", () => {
     expect(existsSync(live)).toBe(true);
     expect(existsSync(join(live, WORK_DIR_GUARD))).toBe(true);
     expect(existsSync(leftover)).toBe(false);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("sweeps unowned published preview dirs and keeps owned pairs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-preview-sweep-"));
+    const owned = join(dir, PREVIEW_DIR_NAME, "owned");
+    const stray = join(dir, PREVIEW_DIR_NAME, "stray");
+    await mkdir(owned, { recursive: true });
+    await mkdir(stray, { recursive: true });
+    await writeFile(join(owned, PREVIEW_ORIGINAL_FILE), "keep");
+    await writeFile(join(owned, PREVIEW_PUBLISHED_MARKER), "");
+    await writeFile(join(stray, PREVIEW_ORIGINAL_FILE), "drop");
+    await writeFile(join(stray, PREVIEW_PUBLISHED_MARKER), "");
+    await sweepUnownedPreviewDirs(join(dir, PREVIEW_DIR_NAME), new Set(["owned"]));
+    expect(existsSync(owned)).toBe(true);
+    expect(existsSync(stray)).toBe(false);
     await rm(dir, { recursive: true, force: true });
   });
 });

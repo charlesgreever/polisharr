@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readdir, rm, rmdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -79,14 +80,52 @@ export async function cleanReviewLeftovers(reviewDir: string): Promise<void> {
   await cleanPreviewTree(previewRoot(reviewDir));
 }
 
-export async function removePreviewPairDir(dir: string): Promise<void> {
+export async function removePreviewPairDir(dir: string): Promise<boolean> {
   try {
     await rm(dir, { recursive: true, force: true });
   } catch {
-    // Pair directory may already be gone.
+    // Pair directory may already be gone or still locked.
   }
   const fork = appleDoublePath(dir);
   if (fork) await tryUnlink(fork);
+  return !existsSync(dir);
+}
+
+export function previewDirBytes(dir: string): number {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const name of names) {
+    try {
+      const info = statSync(join(dir, name));
+      if (info.isFile()) total += info.size;
+    } catch {
+      // File may have been removed while we counted.
+    }
+  }
+  return total;
+}
+
+export async function sweepUnownedPreviewDirs(root: string, ownedIds: ReadonlySet<string>): Promise<string[]> {
+  let entries: Array<{ name: string; isDirectory: () => boolean }>;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const leftover: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (ownedIds.has(entry.name)) continue;
+    const dir = join(root, entry.name);
+    const gone = await removePreviewPairDir(dir);
+    if (!gone) leftover.push(entry.name);
+  }
+  return leftover;
 }
 
 async function cleanPreviewTree(root: string): Promise<void> {

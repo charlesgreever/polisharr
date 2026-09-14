@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,14 +6,24 @@ import { PREVIEW_LEASE_MS, PREVIEW_LEASE_SAFETY_MARGIN_MS, PREVIEW_PROTOCOL_VERS
 import { JobService, type JobPlaybackGate } from "./jobs.ts";
 import { PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
 import {
+  PREVIEW_CACHE_MAX_BYTES,
+  PREVIEW_CACHE_TTL_MS,
   PREVIEW_FINISHED_FILE,
   PREVIEW_HDR_UNAVAILABLE,
   PREVIEW_ORIGINAL_FILE,
   PREVIEW_PUBLISHED_MARKER,
   type PreviewMediaInfo,
 } from "./preview-render.ts";
-import { previewPairDir } from "./optimize.ts";
-import { nextAdmissionKind, NO_PREVIEW_NODE, PREVIEW_LEASE_INVALID, PREVIEW_PUBLICATION_REVOKED, PREVIEW_STALE, PreviewService } from "./review-previews.ts";
+import { previewDirBytes, previewPairDir, previewRoot } from "./optimize.ts";
+import {
+  nextAdmissionKind,
+  NO_PREVIEW_NODE,
+  PREVIEW_CACHE_CLEANUP_WARNING,
+  PREVIEW_LEASE_INVALID,
+  PREVIEW_PUBLICATION_REVOKED,
+  PREVIEW_STALE,
+  PreviewService,
+} from "./review-previews.ts";
 import { Store } from "./store.ts";
 import type { PreviewCapability } from "./cluster.ts";
 import type { ExecutablePlan, InspectionReport, ReviewItem } from "./types.ts";
@@ -491,5 +501,101 @@ describe("preview task lifecycle", () => {
     writeFileSync(ctx.sourcePath, "CHANGED!!");
     const stale = ctx.previews.openClip("rev-1", requested.task.id, "original");
     expect(stale).toMatchObject({ error: PREVIEW_STALE, status: 409 });
+  });
+
+  it("deletes a published pair after the lease expires and a late complete is rejected", async () => {
+    let now = 1_000;
+    const ctx = harness({ clock: () => now });
+    const requested = await ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    publishPair(ctx.dir, requested.task.id);
+    const pair = previewPairDir(ctx.dir, requested.task.id);
+    now = 1_000 + PREVIEW_LEASE_MS + 1;
+    ctx.previews.expire();
+    expect(ctx.previews.complete(requested.task.id, claimed[0]!.leaseToken)).toMatchObject({
+      error: PREVIEW_LEASE_INVALID,
+      status: 409,
+    });
+    await vi.waitFor(() => expect(existsSync(pair)).toBe(false));
+    expect(ctx.store.getPreviewTask(requested.task.id)?.bytes).toBe(0);
+  });
+
+  it("keeps cache accounting when pair files cannot be deleted", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((message) => {
+      errors.push(String(message));
+    });
+    let now = 1_000;
+    const ctx = harness({ clock: () => now });
+    const requested = await ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    ctx.previews.claimForNode("worker-1", 1);
+    publishPair(ctx.dir, requested.task.id, "0123456789", "abcdefghij");
+    const root = previewRoot(ctx.dir);
+    const pair = previewPairDir(ctx.dir, requested.task.id);
+    chmodSync(pair, 0o555);
+    chmodSync(root, 0o555);
+    now = 1_000 + PREVIEW_LEASE_MS + 1;
+    ctx.previews.expire();
+    try {
+      await vi.waitFor(() => {
+        expect(existsSync(pair)).toBe(true);
+        expect(ctx.previews.cacheUsage()).toBeGreaterThanOrEqual(previewDirBytes(pair));
+        expect(errors.some((row) => row.includes(PREVIEW_CACHE_CLEANUP_WARNING))).toBe(true);
+      });
+      ctx.store.updatePreviewTask(requested.task.id, { bytes: PREVIEW_CACHE_MAX_BYTES, updatedAt: now });
+      const extra = await ctx.previews.request("rev-1", { startMs: 2_000 });
+      if (!("accepted" in extra)) return;
+      expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
+      expect(ctx.store.getPreviewTask(extra.task.id)?.waitReason).toBe("cache_capacity");
+    } finally {
+      chmodSync(root, 0o755);
+      try {
+        chmodSync(pair, 0o755);
+      } catch {
+        // Pair dir may already be gone.
+      }
+      spy.mockRestore();
+    }
+  });
+
+  it("evicts an expired idle pair before admitting another preview", async () => {
+    let now = 1_000;
+    const ctx = harness({ clock: () => now });
+    const first = await ctx.previews.request("rev-1", { startMs: 0 });
+    if (!("accepted" in first)) return;
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    publishPair(ctx.dir, first.task.id);
+    expect(ctx.previews.complete(first.task.id, claimed[0]!.leaseToken)).toEqual({ ok: true });
+    now = 1_000 + PREVIEW_CACHE_TTL_MS + 1;
+    ctx.store.upsertNode({ ...ctx.store.getNode("worker-1")!, lastSeen: now });
+    const second = await ctx.previews.request("rev-1", { startMs: 2_000 });
+    if (!("accepted" in second)) return;
+    expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(1);
+    expect(ctx.store.getPreviewTask(first.task.id)?.status).toBe("expired");
+    await vi.waitFor(() => expect(existsSync(previewPairDir(ctx.dir, first.task.id))).toBe(false));
+  });
+
+  it("retries an interrupted preview with its stored render plan after restart", async () => {
+    const ctx = harness();
+    const requested = await ctx.previews.request("rev-1", { startMs: 1_000, originalAudioIndex: 1, sidecarAudioIndex: 2 });
+    if (!("accepted" in requested)) return;
+    expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(1);
+    expect(ctx.store.getPreviewTask(requested.task.id)?.artifact).toBeTruthy();
+    ctx.previews.start();
+    expect(ctx.store.getPreviewTask(requested.task.id)?.status).toBe("queued");
+    expect(ctx.store.getPreviewTask(requested.task.id)?.artifact).toMatchObject({
+      originalAudioIndex: 1,
+      sidecarAudioIndex: 2,
+      interval: { startMs: 1_000, durationMs: 15_000 },
+    });
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    expect(claimed[0]?.render).toMatchObject({
+      originalAudioIndex: 1,
+      sidecarAudioIndex: 2,
+      startMs: 1_000,
+      durationMs: 15_000,
+    });
   });
 });

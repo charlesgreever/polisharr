@@ -14,7 +14,7 @@ import {
   type RemotePreviewDocument,
 } from "./cluster.ts";
 import type { HardwareInfo, InspectionReport } from "./types.ts";
-import { CancelledError, isExecutablePlan, removeReviewArtifact, resolvePlan, type Optimizer } from "./optimize.ts";
+import { CancelledError, isExecutablePlan, removePreviewPairDir, removeReviewArtifact, resolvePlan, type Optimizer } from "./optimize.ts";
 import type { PreviewRenderer } from "./review-previews.ts";
 
 export type WorkerJoinStatus = "misconfigured" | "connecting" | "connected" | "unreachable" | "rejected";
@@ -374,7 +374,10 @@ export class WorkerLoop {
         },
       });
       const latest = this.previewInflight.get(preview.id);
-      if (!latest || latest.cancelled || latest.disconnected) return;
+      if (!latest || latest.cancelled || latest.disconnected) {
+        if (preview.cacheDir) await removePreviewPairDir(preview.cacheDir);
+        return;
+      }
       if (result.ok) {
         await this.postJson(`/api/cluster/previews/${preview.id}/complete`, { leaseToken: latest.leaseToken });
       } else {

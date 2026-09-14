@@ -1943,7 +1943,7 @@ export class Store {
 
   previewCacheBytes(): number {
     return Number((this.db.prepare(
-      "SELECT COALESCE(SUM(bytes), 0) AS n FROM preview_tasks WHERE status = 'ready'",
+      "SELECT COALESCE(SUM(bytes), 0) AS n FROM preview_tasks WHERE bytes > 0",
     ).get() as { n: number }).n);
   }
 
@@ -1953,7 +1953,7 @@ export class Store {
     ).all() as Array<{ id: string }>;
     this.db.prepare(
       `UPDATE preview_tasks SET status = 'queued', wait_reason = NULL, node_id = NULL, lease_token = NULL,
-         lease_until = NULL, error = NULL, artifact = NULL, bytes = 0, expires_at = NULL
+         lease_until = NULL, error = NULL, expires_at = NULL
        WHERE status = 'running'`,
     ).run();
     const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
@@ -1986,7 +1986,7 @@ export class Store {
     ).all(nodeId) as Array<{ id: string }>).map((row) => row.id);
   }
 
-  expirePreviewLeases(now: number): number {
+  expirePreviewLeases(now: number): string[] {
     const expired = this.db.prepare(
       "SELECT id FROM preview_tasks WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?",
     ).all(now) as Array<{ id: string }>;
@@ -2008,7 +2008,7 @@ export class Store {
       for (const row of stale) release.run(row.id);
     });
     tx();
-    return expired.length;
+    return expired.map((row) => row.id);
   }
 
   claimQueuedPreview(

@@ -6,7 +6,7 @@ import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { AudioMixSelect } from "../components/AudioMixSelect";
 import { EncodeTargetSelect } from "../components/EncodeTargetSelect";
-import { LibraryHealthPills } from "../components/LibraryHealthPills";
+import { LibraryHealthCounts, LibraryWorkFilter } from "../components/LibraryHealthPills";
 import { LibraryMediaCells, LibraryMediaHeaders } from "../components/LibraryMediaCells";
 import { Pill } from "../components/ui";
 import { loadRetainedPages, mergePage, needsFocusedPage } from "../library-pages";
@@ -93,7 +93,7 @@ export function SeriesPage() {
       <PageHead title="Series">
         <RefreshLibrary onDone={refreshed} />
       </PageHead>
-      <Help>Series loads show headers first. Expand one show to load its episodes. Encode target on a show chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. Prefer stereo replaces surround with AAC stereo and drops the original mix, which is useful for kids TVs. Keep surround turns that off. House default follows Settings, which adds stereo for Atmos and keeps the original mix. Each header shows how many episodes are healthy and how many still have suggestions. Click suggestions to list only episodes that still need work. Exempt on an episode keeps that file off the size cap so Polisharr only offers language cleanup and stereo. Optimize all episodes queues that show without expanding it. Stop tracking removes the show from Sonarr and deletes its files.</Help>
+      <Help>Series loads show headers first. Expand one show to load its episodes. Encode target on a show chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. Prefer stereo replaces surround with AAC stereo and drops the original mix, which is useful for kids TVs. Keep surround turns that off. House default follows Settings, which adds stereo for Atmos and keeps the original mix. Each header counts healthy episodes and open suggestions. After you expand, Show All episodes or Needs work (suggestions, unread files, and files Polisharr could not read). Exempt on an episode keeps that file off the size cap so Polisharr only offers language cleanup and stereo. Optimize all episodes queues that show without expanding it. Remove this series from Sonarr deletes its files and stops Sonarr from keeping the show.</Help>
       {summaries.length === 0 ? (
         <div className="empty">
           <div className="space-y-3">
@@ -283,20 +283,12 @@ function SeriesGroup({
             <span className="series-title">{summary.showTitle}</span>
             <span className="series-meta">
               <span>{summary.instanceName} · {summary.episodeCount} episodes</span>
-              <LibraryHealthPills
-                healthyCount={summary.healthyCount}
-                suggestionCount={summary.suggestionCount}
-                work={work}
-                onWorkChange={(next) => {
-                  setWork(next);
-                  if (open) {
-                    setEpisodes([]);
-                    setNextOffset(0);
-                    workRef.current = next;
-                    void loadEpisodes(true);
-                  }
-                }}
-              />
+              <span className="mt-1 block">
+                <LibraryHealthCounts
+                  healthyCount={summary.healthyCount}
+                  suggestionCount={summary.suggestionCount}
+                />
+              </span>
             </span>
           </span>
         </button>
@@ -370,18 +362,31 @@ function SeriesGroup({
           onClick={() => {
             if (!window.confirm(untrackConfirm("Sonarr", summary.showTitle, "series"))) return;
             void api.untrackSeries(summary.instanceId, summary.arrSeriesId).then(() => {
-              onMsg("Sonarr stopped tracking this series.");
+              onMsg("Sonarr removed this series and deleted its files.");
               onPatch({ episodeCount: 0, healthyCount: 0, suggestionCount: 0 });
               setEpisodes([]);
               setNextOffset(null);
             }).catch((cause: Error) => onMsg(cause.message));
           }}
         >
-          Stop tracking in Sonarr
+          Remove this series from Sonarr
         </button>
       </div>
       {open && (
         <div className="series-table-wrap">
+          <div className="px-3 pb-2 pt-1">
+            <LibraryWorkFilter
+              work={work}
+              noun="episodes"
+              onWorkChange={(next) => {
+                setWork(next);
+                setEpisodes([]);
+                setNextOffset(0);
+                workRef.current = next;
+                void loadEpisodes(true);
+              }}
+            />
+          </div>
           {error && (
             <div className="p-3 text-sm text-rose-400">
               {error} <button className="btn-secondary ml-2" type="button" onClick={() => void loadEpisodes(true)}>Retry</button>
@@ -421,7 +426,7 @@ function SeriesGroup({
           </table>
           {episodes.length === 0 && !error && (
             <div className="p-3 text-sm text-muted">
-              {nextOffset === 0 ? "Loading episodes…" : work ? "Every episode is healthy." : "No episodes in this show."}
+              {nextOffset === 0 ? "Loading episodes…" : work ? "Nothing needs work. Every episode is healthy." : "No episodes in this show."}
             </div>
           )}
           {nextOffset != null && episodes.length > 0 && (

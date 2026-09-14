@@ -91,8 +91,8 @@ export function RowActions({
         <button
           className={textBtn}
           type="button"
-          title={`Ask ${arrName} to remove this file and search again`}
-          aria-label={`Ask ${arrName} to remove this file and search again`}
+          title={`Ask ${arrName} to delete this file and search for another copy`}
+          aria-label={`Replace this file in ${arrName}`}
           onClick={() => {
             if (!window.confirm(replaceSearchConfirm(arrName, item.sharedFileLabel))) return;
             void run(`${arrName} will search for a replacement.`, async () => {
@@ -103,13 +103,13 @@ export function RowActions({
             });
           }}
         >
-          Search again
+          Replace this file
         </button>
         <button
           className={`${textBtn} text-error-600 dark:text-error-500`}
           type="button"
-          title={`Stop tracking in ${arrName}`}
-          aria-label={`Stop tracking in ${arrName}`}
+          title={`${arrName} will delete the files and stop keeping this ${item.type === "episode" ? "series" : "movie"}`}
+          aria-label={`Remove this ${item.type === "episode" ? "series" : "movie"} from ${arrName}`}
           onClick={() => {
             const kind = item.type === "episode" ? "series" : "movie";
             const title = item.type === "episode" ? (item.showTitle || item.displayTitle) : item.displayTitle;
@@ -122,7 +122,7 @@ export function RowActions({
             });
           }}
         >
-          Stop tracking
+          {`Remove from ${arrName}`}
         </button>
       </div>
       {item.type === "movie" && (

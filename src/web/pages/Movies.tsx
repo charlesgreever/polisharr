@@ -139,15 +139,18 @@ export function MoviesPage() {
       <PageHead title="Movies">
         <RefreshLibrary onDone={() => void load(true)} />
       </PageHead>
-      <Help>Each row is one movie. Encode target chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Open a title for custom work. Queue still uses the automatic suggestion. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo. The header counts every movie, not just this page. Click suggestions to list only movies that still need work.</Help>
+      <Help>Each row is one movie. Encode target chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Open a title for custom work. Queue still uses the automatic suggestion. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo. The header counts every movie, not just this page. Show All movies, or Needs work for suggestions, unread files, and files Polisharr could not read.</Help>
       {libraryTotal > 0 && (
-        <div className="mt-4 flex flex-wrap items-center gap-2 text-sm text-muted">
-          <span>{libraryTotal} movies</span>
+        <div className="mt-4 flex flex-col gap-2 text-sm text-muted">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>{libraryTotal} movies</span>
+          </div>
           <LibraryHealthPills
             healthyCount={healthyCount}
             suggestionCount={suggestionCount}
             work={work}
             onWorkChange={setWork}
+            noun="movies"
           />
         </div>
       )}
@@ -155,7 +158,7 @@ export function MoviesPage() {
       {items.length === 0 ? (
         <div className="empty">
           <div className="space-y-3">
-            <p>{work && libraryTotal > 0 ? "Every movie is healthy." : "No movies loaded yet. Refresh pulls titles from the Radarr connections in Settings."}</p>
+            <p>{work && libraryTotal > 0 ? "Nothing needs work. Every movie is healthy." : "No movies loaded yet. Refresh pulls titles from the Radarr connections in Settings."}</p>
             {!work && <RefreshLibrary onDone={() => void load(true)} />}
           </div>
         </div>

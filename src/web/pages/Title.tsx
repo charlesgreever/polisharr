@@ -254,7 +254,7 @@ export function TitlePage() {
         <Link className="btn-secondary" to={item.type === "movie" ? "/movies" : "/series"}>Back</Link>
       </PageHead>
       <Help>
-        {`Custom work is optional. Bulk suggestions still exist. Queue stays off until the plan differs from the source. A sidecar is the new file waiting in Review until you Keep it. Direct write replaces the library file after an integrity check. Codec replace turns one soundtrack into AAC at the same layout. Downmix makes a smaller layout such as stereo. Size mode aims at a file size you type. Quality mode aims at an encoder quality number (lower is larger). Identify language listens to a 45-second audio clip, or reads a few minutes of a text subtitle track. Untagged PGS can be identified from a short OCR sample when that helper is installed. Saving a language does not rewrite the library file. Queue this plan can remux a copy that writes the tag; Keep then replaces the library file. Ask ${arrName} to search again deletes this file and grabs a replacement using that app's quality profile. Stop tracking deletes the files and removes the movie or series from ${arrName}.`}
+        {`Custom work is optional. Bulk suggestions still exist. Queue stays off until the plan differs from the source. A sidecar is the new file waiting in Review until you Keep it. Direct write replaces the library file after an integrity check. Codec replace turns one soundtrack into AAC at the same layout. Downmix makes a smaller layout such as stereo. Size mode aims at a file size you type. Quality mode aims at an encoder quality number (lower is larger). Identify language listens to a 45-second audio clip, or reads a few minutes of a text subtitle track. Untagged PGS can be identified from a short OCR sample when that helper is installed. Saving a language does not rewrite the library file. Queue this plan can remux a copy that writes the tag; Keep then replaces the library file. Replace this file asks ${arrName} to delete the current copy and search for another. Remove from ${arrName} deletes the files and drops the movie or series from that app.`}
       </Help>
       {(locked || item.error) && (
         <p className="help">{item.error || "This title is still uninspected or unreadable. Optimize stays off until inspect finishes."}</p>
@@ -615,7 +615,7 @@ export function TitlePage() {
               .catch((e: Error) => setMsg(e.message));
           }}
         >
-          {`Ask ${arrName} to remove this file and search again`}
+          {`Ask ${arrName} to replace this file`}
         </button>
         <button
           className="btn-secondary danger"
@@ -629,7 +629,7 @@ export function TitlePage() {
               .catch((e: Error) => setMsg(e.message));
           }}
         >
-          {`Stop tracking in ${arrName}`}
+          {`Remove this ${item.type === "episode" ? "series" : "movie"} from ${arrName}`}
         </button>
       </Section>
       {msg && <p className="ok text-sm">{msg}</p>}

@@ -67,10 +67,13 @@ export function SuggestionsPage() {
             <select value={filters.codec ?? ""} onChange={(event) => setFilter("codec", event.target.value)}>
               <option value="">Any codec</option><option value="h264">H.264</option><option value="hevc">HEVC</option><option value="av1">AV1</option>
             </select>
-            <select value={sort} onChange={(event) => setSort(event.target.value === "savings" ? "savings" : "title")} aria-label="Sort suggestions">
-              <option value="title">Title</option>
-              <option value="savings">Largest savings</option>
-            </select>
+            <label className="flex items-center gap-2 text-sm text-muted">
+              <span className="whitespace-nowrap font-medium">Sort by</span>
+              <select value={sort} onChange={(event) => setSort(event.target.value === "savings" ? "savings" : "title")}>
+                <option value="title">Title</option>
+                <option value="savings">Largest savings</option>
+              </select>
+            </label>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <EncodeNodeSelect

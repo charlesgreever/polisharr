@@ -75,8 +75,8 @@ describe("library media cells", () => {
     expect(html).toContain("aria-label=\"Force suggestion\"");
     expect(html).toContain("aria-label=\"Add stereo\"");
     expect(html).toContain("aria-label=\"Exempt\"");
-    expect(html).toContain("Ask Radarr to remove this file and search again");
-    expect(html).toContain("Stop tracking in Radarr");
+    expect(html).toContain("Replace this file in Radarr");
+    expect(html).toContain("Remove this movie from Radarr");
     expect(html).toContain("Exempt");
     expect(html).toContain("aria-label=\"Open\"");
     expect(html).toContain("aria-label=\"Encode target\"");

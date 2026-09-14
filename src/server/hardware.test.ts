@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseBackend, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, probeEncodeDevices } from "./hardware.ts";
+import { chooseBackend, choosePreviewEncoder, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, parseH264PreviewEncoders, probeEncodeDevices, probePreviewCapability } from "./hardware.ts";
 
 const jellyfinBoth = `
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
@@ -126,5 +126,44 @@ describe("hardware backend choice", () => {
   it("treats darwin as the Apple media engine device and linux as not", () => {
     expect(probeEncodeDevices([], "darwin").videotoolbox).toBe(true);
     expect(probeEncodeDevices([], "linux").videotoolbox).toBe(false);
+  });
+});
+
+describe("H.264 preview capability", () => {
+  it("does not treat HEVC-only listing as H.264 preview support", () => {
+    const hevcNvencOnly = `
+ V..... hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
+`;
+    expect(parseH264PreviewEncoders(hevcNvencOnly).nvenc).toBe(false);
+    expect(parseEncoders(hevcNvencOnly).nvenc).toBe(true);
+    expect(choosePreviewEncoder(parseH264PreviewEncoders(hevcNvencOnly), "cuda")).toBeNull();
+  });
+
+  it("advertises a profile only after a successful smoke check", async () => {
+    const hw = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    const listing = `
+ V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+ V..... hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
+`;
+    const ok = await probePreviewCapability("ffmpeg", hw, async () => listing, async () => true);
+    expect(ok.h264Encoder).toBe("h264_nvenc");
+    expect(ok.profiles).toEqual(["sdr-1080p-h264"]);
+    const failed = await probePreviewCapability("ffmpeg", hw, async () => listing, async () => false);
+    expect(failed.h264Encoder).toBeNull();
+    expect(failed.profiles).toEqual([]);
+  });
+
+  it("fails closed when smoke throws or the backend is none", async () => {
+    const none = await probePreviewCapability("ffmpeg", { backend: "none", cuda: false, vaapi: false, av1: false, reason: null }, async () => "h264_nvenc", async () => true);
+    expect(none.h264Encoder).toBeNull();
+    const threw = await probePreviewCapability(
+      "ffmpeg",
+      { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+      async () => "h264_nvenc",
+      async () => {
+        throw new Error("encoder missing");
+      },
+    );
+    expect(threw.h264Encoder).toBeNull();
   });
 });

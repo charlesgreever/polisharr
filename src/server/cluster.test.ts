@@ -3,10 +3,15 @@ import {
   clusterHasAv1,
   encodeNeedFromPlan,
   nodeCanEncode,
+  nodeCanPreview,
   nodeHardwareLabel,
   nodeIsOnline,
   nodeRoleLabel,
+  parsePreviewCapability,
+  parsePreviewComplete,
+  parseRemotePreviewDocument,
   pickOpenEncodeNode,
+  pickOpenPreviewNode,
   poolSpreadLimit,
   NODE_STALE_MS,
   parseClusterClaim,
@@ -16,6 +21,8 @@ import {
   parseNodeRole,
   parseRemoteComplete,
   parseRemoteProgress,
+  PREVIEW_PROTOCOL_VERSION,
+  PREVIEW_SDR_1080P_PROFILE,
 } from "./cluster.ts";
 
 describe("cluster node identity", () => {
@@ -154,7 +161,7 @@ describe("cluster node identity", () => {
       concurrency: 2,
     })).toEqual({
       ok: true,
-      hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, videotoolbox: false, vaapiDevice: undefined, gpuName: undefined, qsv: false }, concurrency: 2 },
+      hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, videotoolbox: false, vaapiDevice: undefined, gpuName: undefined, qsv: false }, concurrency: 2, preview: null },
     });
     expect(parseClusterHello({ name: "5090" }).ok).toBe(false);
     expect(parseClusterHeartbeat({
@@ -164,7 +171,7 @@ describe("cluster node identity", () => {
       runningJobIds: ["job-9", 12],
     })).toMatchObject({
       ok: true,
-      beat: { nodeId: "worker-1", currentJobId: "job-9", runningJobIds: ["job-9"], concurrency: 1 },
+      beat: { nodeId: "worker-1", currentJobId: "job-9", runningJobIds: ["job-9"], concurrency: 1, preview: null, runningPreviewIds: [] },
     });
     expect(parseClusterClaim({ nodeId: "worker-1", freeSlots: 2 })).toEqual({ ok: true, nodeId: "worker-1", freeSlots: 2 });
     expect(parseRemoteComplete({
@@ -181,5 +188,57 @@ describe("cluster node identity", () => {
       log: "frame=1\n",
     });
     expect(parseRemoteProgress({ leaseToken: "tok", phase: "transcoding", progress: 0.4 }).ok).toBe(true);
+  });
+
+  it("treats missing preview capability as none so old workers keep receiving ordinary jobs", () => {
+    expect(parsePreviewCapability(undefined)).toBeNull();
+    expect(parsePreviewCapability({ protocolVersion: PREVIEW_PROTOCOL_VERSION, h264Encoder: null, profiles: [] })).toEqual({
+      protocolVersion: PREVIEW_PROTOCOL_VERSION,
+      h264Encoder: null,
+      profiles: [],
+    });
+    expect(nodeCanPreview({ preview: null })).toBe(false);
+    expect(nodeCanPreview({
+      preview: { protocolVersion: PREVIEW_PROTOCOL_VERSION, h264Encoder: "h264_nvenc", profiles: [PREVIEW_SDR_1080P_PROFILE] },
+    })).toBe(true);
+  });
+
+  it("rejects optimize-job fields on preview completion and requires a preview kind", () => {
+    expect(parsePreviewComplete({ leaseToken: "tok", sidecarPath: "/review/out.mkv", output: {} }).ok).toBe(false);
+    expect(parseRemotePreviewDocument({
+      id: "job-1",
+      leaseToken: "tok",
+      sourcePath: "/a.mkv",
+      reviewDir: "/review",
+    }).ok).toBe(false);
+    expect(parseRemotePreviewDocument({
+      kind: "preview",
+      protocolVersion: PREVIEW_PROTOCOL_VERSION,
+      id: "prv-1",
+      leaseToken: "tok",
+      leaseUntil: 2_000,
+      reviewId: "rev-1",
+      sourcePath: "/a.mkv",
+      sidecarPath: "/b.mkv",
+      nodeId: "worker-1",
+      profileId: PREVIEW_SDR_1080P_PROFILE,
+      request: { startMs: 1000, durationMs: 15_000 },
+    }).ok).toBe(true);
+  });
+
+  it("picks any capable preview node and ignores ordinary job pinning", () => {
+    const worker = {
+      id: "worker-1",
+      name: "5090",
+      enabled: true,
+      lastSeen: 1_000,
+      concurrency: 2,
+      runningCount: 0,
+      previewRunning: 0,
+      preview: { protocolVersion: PREVIEW_PROTOCOL_VERSION, h264Encoder: "h264_nvenc" as const, profiles: [PREVIEW_SDR_1080P_PROFILE] },
+    };
+    const old = { ...worker, id: "old", name: "old", preview: null };
+    expect(pickOpenPreviewNode([old, worker], 1_000)?.id).toBe("worker-1");
+    expect(pickOpenPreviewNode([{ ...worker, previewRunning: 1 }], 1_000)).toBeNull();
   });
 });

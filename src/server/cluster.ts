@@ -1,6 +1,29 @@
-import type { HardwareInfo } from "./types.ts";
+import type { HardwareInfo, PreviewH264Encoder, PreviewRequest } from "./types.ts";
+
+export type { PreviewRequest };
 
 export type NodeRole = "standalone" | "master" | "worker";
+
+export const PREVIEW_PROTOCOL_VERSION = 1;
+export const PREVIEW_SDR_1080P_PROFILE = "sdr-1080p-h264";
+export const PREVIEW_LEASE_MS = 30_000;
+export const PREVIEW_LEASE_RENEW_MIN_MS = 10_000;
+export const PREVIEW_LEASE_SAFETY_MARGIN_MS = 5_000;
+export const PREVIEW_TIMEOUT_MS = 5 * 60_000;
+export const PREVIEW_MAX_PER_NODE = 1;
+export const PREVIEW_MAX_GLOBAL = 2;
+
+export type PreviewCapability = {
+  protocolVersion: number;
+  h264Encoder: PreviewH264Encoder | null;
+  profiles: string[];
+};
+
+export const NO_PREVIEW_CAPABILITY: PreviewCapability = {
+  protocolVersion: PREVIEW_PROTOCOL_VERSION,
+  h264Encoder: null,
+  profiles: [],
+};
 
 export type ClusterNode = {
   id: string;
@@ -12,6 +35,7 @@ export type ClusterNode = {
   enabled: boolean;
   version: string;
   currentJobId: string | null;
+  preview?: PreviewCapability | null;
 };
 
 export function parseNodeRole(value: unknown): NodeRole {
@@ -140,6 +164,7 @@ export type ClusterHello = {
   version: string;
   hardware: HardwareInfo;
   concurrency: number;
+  preview: PreviewCapability | null;
 };
 
 export type ClusterHeartbeat = {
@@ -148,6 +173,22 @@ export type ClusterHeartbeat = {
   concurrency: number;
   currentJobId: string | null;
   runningJobIds: string[];
+  preview: PreviewCapability | null;
+  runningPreviewIds: string[];
+};
+
+export type RemotePreviewDocument = {
+  kind: "preview";
+  protocolVersion: number;
+  id: string;
+  leaseToken: string;
+  leaseUntil: number;
+  reviewId: string;
+  sourcePath: string;
+  sidecarPath: string;
+  request: PreviewRequest;
+  profileId: string;
+  nodeId: string;
 };
 
 export function parseClusterHello(value: unknown): { ok: true; hello: ClusterHello } | { ok: false; error: string } {
@@ -167,6 +208,7 @@ export function parseClusterHello(value: unknown): { ok: true; hello: ClusterHel
       version,
       hardware: parseHardwareInfo(raw.hardware),
       concurrency,
+      preview: parsePreviewCapability(raw.preview),
     },
   };
 }
@@ -191,6 +233,10 @@ export function parseClusterHeartbeat(value: unknown): { ok: true; beat: Cluster
       concurrency,
       currentJobId,
       runningJobIds,
+      preview: parsePreviewCapability(raw.preview),
+      runningPreviewIds: Array.isArray(raw.runningPreviewIds)
+        ? raw.runningPreviewIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : [],
     },
   };
 }
@@ -268,5 +314,154 @@ export function parseRemoteFail(value: unknown): { ok: true; leaseToken: string;
 function parseConcurrency(value: unknown): number | null {
   if (value === undefined) return 1;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 16) return null;
+  return value;
+}
+
+export function parsePreviewCapability(value: unknown): PreviewCapability | null {
+  if (value == null) return null;
+  const raw = record(value);
+  if (raw.protocolVersion !== PREVIEW_PROTOCOL_VERSION) return null;
+  const encoder = raw.h264Encoder;
+  const h264Encoder =
+    encoder === "h264_nvenc" || encoder === "h264_vaapi" || encoder === "h264_videotoolbox" ? encoder : null;
+  const profiles = Array.isArray(raw.profiles)
+    ? raw.profiles.filter((id): id is string => id === PREVIEW_SDR_1080P_PROFILE)
+    : [];
+  if (!h264Encoder || profiles.length === 0) return { ...NO_PREVIEW_CAPABILITY };
+  return { protocolVersion: PREVIEW_PROTOCOL_VERSION, h264Encoder, profiles };
+}
+
+export function nodeCanPreview(node: { enabled?: boolean; preview?: PreviewCapability | null }): boolean {
+  if (node.enabled === false) return false;
+  const cap = node.preview;
+  return Boolean(cap?.h264Encoder && cap.protocolVersion === PREVIEW_PROTOCOL_VERSION && cap.profiles.includes(PREVIEW_SDR_1080P_PROFILE));
+}
+
+export function pickOpenPreviewNode(
+  nodes: Array<{
+    id: string;
+    name: string;
+    enabled: boolean;
+    lastSeen: number;
+    concurrency: number;
+    runningCount: number;
+    previewRunning: number;
+    preview: PreviewCapability | null | undefined;
+  }>,
+  now: number,
+  excludedIds?: Iterable<string>,
+): { id: string; name: string } | null {
+  const excluded = new Set(excludedIds ?? []);
+  const capable = nodes.filter(
+    (node) =>
+      !excluded.has(node.id)
+      && node.enabled
+      && nodeIsOnline(node.lastSeen, now)
+      && nodeCanPreview(node)
+      && node.previewRunning < PREVIEW_MAX_PER_NODE
+      && node.runningCount < node.concurrency,
+  );
+  if (capable.length === 0) return null;
+  capable.sort((left, right) => {
+    if (left.runningCount !== right.runningCount) return left.runningCount - right.runningCount;
+    const freeLeft = left.concurrency - left.runningCount;
+    const freeRight = right.concurrency - right.runningCount;
+    if (freeRight !== freeLeft) return freeRight - freeLeft;
+    return left.name.localeCompare(right.name);
+  });
+  return capable[0] ? { id: capable[0].id, name: capable[0].name } : null;
+}
+
+export function parsePreviewRequest(value: unknown): PreviewRequest {
+  const raw = record(value);
+  const startMs = finiteNumber(raw.startMs);
+  const durationMs = finiteNumber(raw.durationMs);
+  return {
+    startMs: startMs != null && startMs >= 0 ? startMs : 0,
+    durationMs: durationMs != null && durationMs > 0 ? durationMs : 15_000,
+    originalAudioIndex: integerOrNull(raw.originalAudioIndex),
+    sidecarAudioIndex: integerOrNull(raw.sidecarAudioIndex),
+  };
+}
+
+export function parseRemotePreviewDocument(
+  value: unknown,
+): { ok: true; preview: RemotePreviewDocument } | { ok: false; error: string } {
+  const raw = record(value);
+  if (raw.kind !== "preview") return { ok: false, error: "That payload is not a preview task." };
+  const id = trimString(raw.id);
+  const leaseToken = trimString(raw.leaseToken);
+  const reviewId = trimString(raw.reviewId);
+  const sourcePath = trimString(raw.sourcePath);
+  const sidecarPath = trimString(raw.sidecarPath);
+  const nodeId = trimString(raw.nodeId);
+  const profileId = trimString(raw.profileId) || PREVIEW_SDR_1080P_PROFILE;
+  const leaseUntil = finiteNumber(raw.leaseUntil);
+  if (!id || !leaseToken || !reviewId || !sourcePath || !sidecarPath || !nodeId) {
+    return { ok: false, error: "A preview task is missing required fields." };
+  }
+  if (leaseUntil == null) return { ok: false, error: "A preview lease deadline is required." };
+  if (raw.protocolVersion !== PREVIEW_PROTOCOL_VERSION) {
+    return { ok: false, error: "This worker does not speak this preview protocol." };
+  }
+  return {
+    ok: true,
+    preview: {
+      kind: "preview",
+      protocolVersion: PREVIEW_PROTOCOL_VERSION,
+      id,
+      leaseToken,
+      leaseUntil,
+      reviewId,
+      sourcePath,
+      sidecarPath,
+      request: parsePreviewRequest(raw.request),
+      profileId,
+      nodeId,
+    },
+  };
+}
+
+export function parsePreviewProgress(
+  value: unknown,
+): { ok: true; leaseToken: string; progress: number | null; log: string } | { ok: false; error: string } {
+  const raw = record(value);
+  const leaseToken = trimString(raw.leaseToken);
+  if (!leaseToken) return { ok: false, error: "A lease token is required." };
+  if (raw.progress !== undefined && (typeof raw.progress !== "number" || !Number.isFinite(raw.progress))) {
+    return { ok: false, error: "Progress is invalid." };
+  }
+  return {
+    ok: true,
+    leaseToken,
+    progress: typeof raw.progress === "number" ? Math.min(1, Math.max(0, raw.progress)) : null,
+    log: typeof raw.log === "string" ? raw.log : "",
+  };
+}
+
+export function parsePreviewComplete(value: unknown): { ok: true; leaseToken: string } | { ok: false; error: string } {
+  const raw = record(value);
+  const leaseToken = trimString(raw.leaseToken);
+  if (!leaseToken) return { ok: false, error: "A lease token is required." };
+  if (raw.sidecarPath != null || raw.output != null || raw.plan != null) {
+    return { ok: false, error: "Preview completion cannot carry optimize-job fields." };
+  }
+  return { ok: true, leaseToken };
+}
+
+export function parsePreviewFail(value: unknown): { ok: true; leaseToken: string; error: string } | { ok: false; error: string } {
+  const raw = record(value);
+  const leaseToken = trimString(raw.leaseToken);
+  if (!leaseToken) return { ok: false, error: "A lease token is required." };
+  const error = trimString(raw.error) || "The preview failed.";
+  return { ok: true, leaseToken, error };
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function integerOrNull(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return null;
   return value;
 }

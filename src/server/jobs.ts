@@ -30,6 +30,7 @@ import {
 import { isoInspectionLooksStale, normalizeInspection } from "./inspect.ts";
 import { refreshAndRenameArr } from "./arr.ts";
 import { encodeNeedFromPlan, isAnyOpenNode, LEASE_MS, nodeCanEncode, pickOpenEncodeNode, type RemoteJobDocument } from "./cluster.ts";
+import type { PreviewCoordinator } from "./review-previews.ts";
 import { encodeApiLabel } from "./hardware.ts";
 import { placeMethodSentence } from "./fs-copy.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
@@ -80,6 +81,7 @@ export type JobServiceOptions = {
   promote?: (input: PromoteInput) => Promise<PromoteResult>;
   localNodeId?: () => string;
   playback?: JobPlaybackGate;
+  previews?: PreviewCoordinator;
 };
 
 export const SHARED_FILE_BUSY = "This file is already in the queue or Review. Another episode uses the same file.";
@@ -95,8 +97,19 @@ export class JobService {
   private dispatching = false;
   private stopped = false;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private previews: PreviewCoordinator | undefined;
 
-  constructor(private readonly opts: JobServiceOptions) {}
+  constructor(private readonly opts: JobServiceOptions) {
+    this.previews = opts.previews;
+  }
+
+  attachPreviews(previews: PreviewCoordinator): void {
+    this.previews = previews;
+  }
+
+  isPathMutating(path: string): boolean {
+    return this.mutatingPaths.has(canonicalFilePath(path));
+  }
 
   start(): void {
     this.opts.store.recoverInterruptedJobs(this.now(), this.localNodeId());
@@ -350,8 +363,10 @@ export class JobService {
   claimForNode(nodeId: string, freeSlots: number): RemoteJobDocument[] {
     this.applySchedule(this.opts.store.getSettings());
     this.opts.store.expireLeases(this.now());
+    this.previews?.expire();
     const node = this.opts.store.getNode(nodeId);
     if (!node?.enabled) return [];
+    if (this.previews?.shouldDeferOptimize(nodeId)) return [];
     const admission = this.nodeWorkAdmission(nodeId, this.opts.store.runningCountOnNode(nodeId), node.concurrency);
     if (!admission.allowed) return [];
     const claimed = this.opts.store.claimQueuedJobs(
@@ -362,6 +377,7 @@ export class JobService {
       this.blockedNodeIds(),
     );
     const settings = this.opts.store.getSettings();
+    if (claimed.length > 0) this.previews?.recordAdmission(nodeId, "optimize");
     const docs: RemoteJobDocument[] = [];
     for (const job of claimed) {
       const item = this.opts.store.getItem(job.itemId);
@@ -506,14 +522,17 @@ export class JobService {
       const settings = this.opts.store.getSettings();
       this.applySchedule(settings);
       this.opts.store.expireLeases(this.now());
+      this.previews?.expire();
       // Replacement is master disk work. It must not wait for encode admission, slots, or node enablement.
       void this.dispatchWaitingIntents();
       const localId = this.localNodeId();
       const localNode = this.opts.store.getNode(localId);
       if (localNode && !localNode.enabled) return;
       const slots = Math.max(1, localNode?.concurrency ?? settings.concurrency);
-      const admission = this.nodeWorkAdmission(localId, this.running.size, slots);
+      const running = this.running.size + (this.previews?.runningCountOnNode(localId) ?? this.opts.store.runningPreviewCountOnNode(localId));
+      const admission = this.nodeWorkAdmission(localId, running, slots);
       if (!admission.allowed) return;
+      if (this.previews?.shouldDeferOptimize(localId)) return;
       const capacity = admission.freeSlots;
       if (capacity <= 0) return;
       const queued = this.opts.store.listJobs().filter((job) => job.status === "queued");
@@ -570,6 +589,7 @@ export class JobService {
       return;
     }
     this.running.add(id);
+    this.previews?.recordAdmission(this.localNodeId(), "optimize");
     const captured = this.captureDispatch(id, item, settings);
     this.opts.store.updateJob(id, {
       status: "running",
@@ -678,6 +698,7 @@ export class JobService {
   }
 
   async keep(reviewId: string): Promise<KeepRequestResult> {
+    this.previews?.revokeAndCancel(reviewId);
     const result = await this.requestPromotion(reviewId, "keep");
     if ("accepted" in result && result.disposition === "started") void this.performKeep(reviewId);
     return result;
@@ -878,6 +899,7 @@ export class JobService {
         }
         const destPath = promotedPath(item.path, plan);
         const keys = this.mutationKeys(item, destPath, latest.sidecarPath);
+        await this.previews?.withdrawAndWait(reviewId);
         await this.acquireMutation(keys);
         try {
           if (!this.opts.store.claimReplacementMutation(reviewId)) return;
@@ -1049,6 +1071,7 @@ export class JobService {
   }
 
   async discard(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
+    await this.previews?.withdrawAndWait(reviewId);
     const claimed = this.opts.store.claimReviewDiscard(reviewId);
     if (!claimed) {
       const review = this.opts.store.getReview(reviewId);
@@ -1057,6 +1080,7 @@ export class JobService {
     }
     await this.unlinkSidecarIfLast(claimed);
     this.opts.store.deleteReview(reviewId);
+    this.previews?.forgetReview(reviewId);
     this.opts.store.addHistory(claimed.itemId, "discarded", 0, this.now());
     await this.sweepReviewLeftovers();
     return { accepted: true };
@@ -1070,6 +1094,7 @@ export class JobService {
 
   private deleteReviewsForSidecar(sidecarPath: string): void {
     for (const row of this.opts.store.reviewsForSidecarPath(sidecarPath)) {
+      this.previews?.forgetReview(row.id);
       this.opts.store.deleteReview(row.id);
     }
   }

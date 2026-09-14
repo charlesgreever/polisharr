@@ -15,6 +15,11 @@ import type {
   PlaybackFileRevision,
   PlaybackMatchOutcome,
   PlaybackOccurrence,
+  PreviewAdmissionKind,
+  PreviewRequest,
+  PreviewTask,
+  PreviewTaskStatus,
+  PreviewWaitReason,
   ReplacementOrigin,
   ReviewItem,
   ReviewStatus,
@@ -30,7 +35,18 @@ import { displayTitle, displayTitleForFile, tokenize } from "./titles.ts";
 import { parseStoredSettings } from "./settings.ts";
 import type { SuggestionFilters } from "./suggestion-filters.ts";
 import { suggestionTrackComparison } from "./tracks.ts";
-import { encodeNeedFromPlan, nodeCanEncode, nodeIsOnline, parseHardwareInfo, parseNodeRole, poolSpreadLimit, type ClusterNode, type EncodeNeed } from "./cluster.ts";
+import {
+  encodeNeedFromPlan,
+  nodeCanEncode,
+  nodeIsOnline,
+  parseHardwareInfo,
+  parseNodeRole,
+  parsePreviewCapability,
+  parsePreviewRequest,
+  poolSpreadLimit,
+  type ClusterNode,
+  type EncodeNeed,
+} from "./cluster.ts";
 
 export type Page<T> = {
   items: T[];
@@ -282,6 +298,40 @@ export class Store {
     this.ensureColumn("reviews", "sidecar_revision", "TEXT");
     this.ensureColumn("reviews", "wait_reason", "TEXT");
     this.ensureColumn("reviews", "mutation_started", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("nodes", "preview", "TEXT");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS preview_tasks (
+        id TEXT PRIMARY KEY,
+        review_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        wait_reason TEXT,
+        node_id TEXT,
+        lease_token TEXT,
+        lease_until INTEGER,
+        publication_allowed INTEGER NOT NULL DEFAULT 1,
+        error TEXT,
+        request TEXT NOT NULL,
+        source_revision TEXT,
+        sidecar_revision TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS preview_tasks_review ON preview_tasks (review_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS preview_tasks_status ON preview_tasks (status);
+      CREATE TABLE IF NOT EXISTS preview_reservations (
+        task_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        PRIMARY KEY (task_id, kind)
+      );
+      CREATE INDEX IF NOT EXISTS preview_reservations_path ON preview_reservations (path);
+      CREATE TABLE IF NOT EXISTS node_admission (
+        node_id TEXT PRIMARY KEY,
+        last_kind TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
+    `);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS kept_events (
         sidecar_path TEXT PRIMARY KEY,
@@ -1263,10 +1313,33 @@ export class Store {
     ).all(nodeId) as Array<{ id: string }>).map((row) => row.id);
   }
 
-  runningCountOnNode(nodeId: string): number {
+  runningJobCountOnNode(nodeId: string): number {
     return Number((this.db.prepare(
       "SELECT COUNT(*) AS n FROM jobs WHERE node_id = ? AND status = 'running'",
     ).get(nodeId) as { n: number }).n);
+  }
+
+  runningPreviewCountOnNode(nodeId: string): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM preview_tasks WHERE node_id = ? AND status = 'running'",
+    ).get(nodeId) as { n: number }).n);
+  }
+
+  runningPreviewCount(): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM preview_tasks WHERE status = 'running'",
+    ).get() as { n: number }).n);
+  }
+
+  queuedPreviewCount(): number {
+    return Number((this.db.prepare(
+      "SELECT COUNT(*) AS n FROM preview_tasks WHERE status = 'queued'",
+    ).get() as { n: number }).n);
+  }
+
+  runningCountOnNode(nodeId: string): number {
+    // A preview pair consumes one ordinary encode slot.
+    return this.runningJobCountOnNode(nodeId) + this.runningPreviewCountOnNode(nodeId);
   }
 
   busyCountOnNode(nodeId: string): number {
@@ -1274,7 +1347,7 @@ export class Store {
       `SELECT COUNT(*) AS n FROM jobs WHERE
          (status = 'running' AND node_id = ?)
          OR (status IN ('queued', 'held', 'paused') AND assigned_node_id = ?)`,
-    ).get(nodeId, nodeId) as { n: number }).n);
+    ).get(nodeId, nodeId) as { n: number }).n) + this.runningPreviewCountOnNode(nodeId);
   }
 
   poolSpreadBudget(nodeId: string, freeSlots: number, now: number, needs: EncodeNeed[], excludePeerNodeIds: Iterable<string> = []): number {
@@ -1684,8 +1757,8 @@ export class Store {
 
   upsertNode(node: ClusterNode): void {
     this.db.prepare(
-      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id, preview)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          role = excluded.role,
@@ -1694,7 +1767,8 @@ export class Store {
          concurrency = excluded.concurrency,
          enabled = excluded.enabled,
          version = excluded.version,
-         current_job_id = excluded.current_job_id`,
+         current_job_id = excluded.current_job_id,
+         preview = excluded.preview`,
     ).run(
       node.id,
       node.name,
@@ -1705,6 +1779,7 @@ export class Store {
       node.enabled ? 1 : 0,
       node.version,
       node.currentJobId,
+      node.preview == null ? null : JSON.stringify(node.preview),
     );
   }
 
@@ -1719,6 +1794,242 @@ export class Store {
 
   deleteNode(id: string): void {
     this.db.prepare("DELETE FROM nodes WHERE id = ?").run(id);
+  }
+
+  lastAdmissionKind(nodeId: string): PreviewAdmissionKind | null {
+    const row = this.db.prepare("SELECT last_kind FROM node_admission WHERE node_id = ?").get(nodeId) as
+      | { last_kind: string }
+      | undefined;
+    if (row?.last_kind === "optimize" || row?.last_kind === "preview") return row.last_kind;
+    return null;
+  }
+
+  recordAdmissionKind(nodeId: string, kind: PreviewAdmissionKind, now: number): void {
+    this.db.prepare(
+      `INSERT INTO node_admission (node_id, last_kind, at) VALUES (?, ?, ?)
+       ON CONFLICT(node_id) DO UPDATE SET last_kind = excluded.last_kind, at = excluded.at`,
+    ).run(nodeId, kind, now);
+  }
+
+  insertPreviewTask(row: {
+    id: string;
+    reviewId: string;
+    status?: PreviewTaskStatus;
+    waitReason?: PreviewWaitReason | null;
+    error?: string | null;
+    request: PreviewRequest;
+    sourceRevision?: PlaybackFileRevision | null;
+    sidecarRevision?: PlaybackFileRevision | null;
+    createdAt: number;
+  }): void {
+    this.db.prepare(
+      `INSERT INTO preview_tasks (
+         id, review_id, status, wait_reason, node_id, lease_token, lease_until, publication_allowed,
+         error, request, source_revision, sidecar_revision, created_at, started_at, updated_at
+       ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, ?, ?, ?, ?, ?, NULL, ?)`,
+    ).run(
+      row.id,
+      row.reviewId,
+      row.status ?? "queued",
+      row.waitReason ?? null,
+      row.error ?? null,
+      JSON.stringify(row.request),
+      row.sourceRevision ? JSON.stringify(row.sourceRevision) : null,
+      row.sidecarRevision ? JSON.stringify(row.sidecarRevision) : null,
+      row.createdAt,
+      row.createdAt,
+    );
+  }
+
+  getPreviewTask(id: string): PreviewTask | undefined {
+    const row = this.db.prepare("SELECT * FROM preview_tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapPreviewTask(row) : undefined;
+  }
+
+  listPreviewTasks(reviewId?: string): PreviewTask[] {
+    const rows = reviewId
+      ? this.db.prepare("SELECT * FROM preview_tasks WHERE review_id = ? ORDER BY created_at ASC").all(reviewId)
+      : this.db.prepare("SELECT * FROM preview_tasks ORDER BY created_at ASC").all();
+    return (rows as Record<string, unknown>[]).map(mapPreviewTask);
+  }
+
+  queuedPreviewTasks(): PreviewTask[] {
+    return (this.db.prepare(
+      "SELECT * FROM preview_tasks WHERE status = 'queued' ORDER BY created_at ASC, id ASC",
+    ).all() as Record<string, unknown>[]).map(mapPreviewTask);
+  }
+
+  updatePreviewTask(id: string, patch: Partial<{
+    status: PreviewTaskStatus;
+    waitReason: PreviewWaitReason | null;
+    nodeId: string | null;
+    leaseToken: string | null;
+    leaseUntil: number | null;
+    publicationAllowed: boolean;
+    error: string | null;
+    startedAt: number | null;
+    updatedAt: number;
+  }>): void {
+    const current = this.getPreviewTask(id);
+    if (!current) return;
+    this.db.prepare(
+      `UPDATE preview_tasks SET status=?, wait_reason=?, node_id=?, lease_token=?, lease_until=?,
+         publication_allowed=?, error=?, started_at=?, updated_at=? WHERE id=?`,
+    ).run(
+      patch.status ?? current.status,
+      patch.waitReason === undefined ? current.waitReason : patch.waitReason,
+      patch.nodeId === undefined ? current.nodeId : patch.nodeId,
+      patch.leaseToken === undefined ? current.leaseToken : patch.leaseToken,
+      patch.leaseUntil === undefined ? current.leaseUntil : patch.leaseUntil,
+      (patch.publicationAllowed ?? current.publicationAllowed) ? 1 : 0,
+      patch.error === undefined ? current.error : patch.error,
+      patch.startedAt === undefined ? current.startedAt : patch.startedAt,
+      patch.updatedAt ?? current.updatedAt,
+      id,
+    );
+  }
+
+  previewLeaseMatches(id: string, token: string): boolean {
+    const task = this.getPreviewTask(id);
+    return Boolean(task?.leaseToken && token && task.leaseToken === token);
+  }
+
+  renewPreviewLeases(nodeId: string, taskIds: string[], until: number): void {
+    if (taskIds.length === 0) return;
+    const stmt = this.db.prepare(
+      "UPDATE preview_tasks SET lease_until = ?, updated_at = ? WHERE id = ? AND node_id = ? AND status = 'running'",
+    );
+    const tx = this.db.transaction(() => {
+      for (const id of taskIds) stmt.run(until, until, id, nodeId);
+    });
+    tx();
+  }
+
+  cancelledPreviewIdsForNode(nodeId: string): string[] {
+    return (this.db.prepare(
+      "SELECT id FROM preview_tasks WHERE node_id = ? AND status = 'cancelled'",
+    ).all(nodeId) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  expirePreviewLeases(now: number): number {
+    const expired = this.db.prepare(
+      "SELECT id FROM preview_tasks WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?",
+    ).all(now) as Array<{ id: string }>;
+    const fail = this.db.prepare(
+      `UPDATE preview_tasks SET status = 'failed', error = 'The preview node stopped.',
+         lease_token = NULL, lease_until = NULL, wait_reason = NULL, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    );
+    const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
+    const tx = this.db.transaction(() => {
+      for (const row of expired) {
+        fail.run(now, row.id);
+        release.run(row.id);
+      }
+    });
+    tx();
+    return expired.length;
+  }
+
+  claimQueuedPreview(
+    nodeId: string,
+    now: number,
+    leaseMs: number,
+    paths: { sourcePath: string; sidecarPath: string },
+  ): (PreviewTask & { leaseToken: string }) | null {
+    const claim = this.db.transaction(() => {
+      const row = this.db.prepare(
+        "SELECT id FROM preview_tasks WHERE status = 'queued' ORDER BY created_at ASC, id ASC LIMIT 1",
+      ).get() as { id: string } | undefined;
+      if (!row) return null;
+      const token = randomUUID();
+      const result = this.db.prepare(
+        `UPDATE preview_tasks SET status = 'running', wait_reason = NULL, node_id = ?, lease_token = ?,
+           lease_until = ?, started_at = COALESCE(started_at, ?), updated_at = ?, error = NULL
+         WHERE id = ? AND status = 'queued'`,
+      ).run(nodeId, token, now + leaseMs, now, now, row.id);
+      if (result.changes !== 1) return null;
+      this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?").run(row.id);
+      this.db.prepare(
+        "INSERT INTO preview_reservations (task_id, path, kind) VALUES (?, ?, 'source')",
+      ).run(row.id, paths.sourcePath);
+      this.db.prepare(
+        "INSERT INTO preview_reservations (task_id, path, kind) VALUES (?, ?, 'sidecar')",
+      ).run(row.id, paths.sidecarPath);
+      const task = this.getPreviewTask(row.id);
+      return task ? { ...task, leaseToken: token } : null;
+    });
+    return claim();
+  }
+
+  releasePreviewReservations(taskId: string): void {
+    this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?").run(taskId);
+  }
+
+  reservationsForReview(reviewId: string): Array<{ taskId: string; path: string; kind: string }> {
+    return this.db.prepare(
+      `SELECT r.task_id AS taskId, r.path AS path, r.kind AS kind
+       FROM preview_reservations r JOIN preview_tasks t ON t.id = r.task_id
+       WHERE t.review_id = ?`,
+    ).all(reviewId) as Array<{ taskId: string; path: string; kind: string }>;
+  }
+
+  reservationsForPath(path: string): Array<{ taskId: string; reviewId: string }> {
+    return this.db.prepare(
+      `SELECT r.task_id AS taskId, t.review_id AS reviewId
+       FROM preview_reservations r JOIN preview_tasks t ON t.id = r.task_id
+       WHERE r.path = ?`,
+    ).all(path) as Array<{ taskId: string; reviewId: string }>;
+  }
+
+  revokePreviewPublication(reviewId: string, now: number): void {
+    this.db.prepare(
+      "UPDATE preview_tasks SET publication_allowed = 0, updated_at = ? WHERE review_id = ?",
+    ).run(now, reviewId);
+  }
+
+  cancelPreviewTasksForReview(reviewId: string, now: number): string[] {
+    const rows = this.db.prepare(
+      "SELECT id, status FROM preview_tasks WHERE review_id = ? AND status IN ('queued', 'running')",
+    ).all(reviewId) as Array<{ id: string; status: string }>;
+    const cancelQueued = this.db.prepare(
+      `UPDATE preview_tasks SET status = 'cancelled', wait_reason = NULL, lease_token = NULL, lease_until = NULL,
+         updated_at = ? WHERE id = ? AND status = 'queued'`,
+    );
+    const cancelRunning = this.db.prepare(
+      "UPDATE preview_tasks SET status = 'cancelled', wait_reason = NULL, updated_at = ? WHERE id = ? AND status = 'running'",
+    );
+    const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
+    const tx = this.db.transaction(() => {
+      for (const row of rows) {
+        if (row.status === "queued") {
+          cancelQueued.run(now, row.id);
+          release.run(row.id);
+        } else {
+          cancelRunning.run(now, row.id);
+        }
+      }
+    });
+    tx();
+    return rows.map((row) => row.id);
+  }
+
+  deletePreviewTasksForReview(reviewId: string): void {
+    const ids = (this.db.prepare("SELECT id FROM preview_tasks WHERE review_id = ?").all(reviewId) as Array<{ id: string }>)
+      .map((row) => row.id);
+    const tx = this.db.transaction(() => {
+      for (const id of ids) this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?").run(id);
+      this.db.prepare("DELETE FROM preview_tasks WHERE review_id = ?").run(reviewId);
+    });
+    tx();
+  }
+
+  readerWaitDeadline(reviewId: string, now: number, safetyMarginMs: number): number {
+    const rows = this.db.prepare(
+      "SELECT lease_until FROM preview_tasks WHERE review_id = ? AND status IN ('running', 'cancelled') AND lease_until IS NOT NULL",
+    ).all(reviewId) as Array<{ lease_until: number }>;
+    if (rows.length === 0) return now;
+    return Math.max(...rows.map((row) => row.lease_until + safetyMarginMs));
   }
 
   close(): void {
@@ -2024,6 +2335,52 @@ function mapNode(row: Record<string, unknown>): ClusterNode {
     enabled: Number(row.enabled) === 1,
     version: String(row.version ?? ""),
     currentJobId: row.current_job_id == null ? null : String(row.current_job_id),
+    preview: parsePreviewCapability(parseJson(row.preview)),
+  };
+}
+
+function parseJson(value: unknown): unknown {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function previewStatus(value: unknown): PreviewTaskStatus {
+  if (
+    value === "queued" || value === "running" || value === "ready"
+    || value === "failed" || value === "cancelled" || value === "expired"
+  ) {
+    return value;
+  }
+  return "failed";
+}
+
+function previewWaitReason(value: unknown): PreviewWaitReason | null {
+  if (value === "node" || value === "playback" || value === "input_lock" || value === "cache_capacity") return value;
+  return null;
+}
+
+function mapPreviewTask(row: Record<string, unknown>): PreviewTask {
+  return {
+    id: String(row.id),
+    reviewId: String(row.review_id),
+    status: previewStatus(row.status),
+    waitReason: previewWaitReason(row.wait_reason),
+    nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
+    leaseToken: row.lease_token == null || row.lease_token === "" ? null : String(row.lease_token),
+    leaseUntil: row.lease_until == null ? null : Number(row.lease_until),
+    publicationAllowed: Number(row.publication_allowed) === 1,
+    error: row.error == null ? null : String(row.error),
+    request: parsePreviewRequest(parseJson(row.request)),
+    sourceRevision: parseFileRevision(row.source_revision),
+    sidecarRevision: parseFileRevision(row.sidecar_revision),
+    createdAt: Number(row.created_at),
+    startedAt: row.started_at == null ? null : Number(row.started_at),
+    updatedAt: Number(row.updated_at),
   };
 }
 

@@ -1,0 +1,393 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { PREVIEW_LEASE_MS, PREVIEW_LEASE_SAFETY_MARGIN_MS, PREVIEW_PROTOCOL_VERSION, PREVIEW_SDR_1080P_PROFILE } from "./cluster.ts";
+import { JobService, type JobPlaybackGate } from "./jobs.ts";
+import { PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
+import { nextAdmissionKind, NO_PREVIEW_NODE, PREVIEW_LEASE_INVALID, PREVIEW_PUBLICATION_REVOKED, PreviewService } from "./review-previews.ts";
+import { Store } from "./store.ts";
+import type { PreviewCapability } from "./cluster.ts";
+import type { ExecutablePlan, InspectionReport, ReviewItem } from "./types.ts";
+
+const stores: Store[] = [];
+const services: Array<{ stop(): void }> = [];
+
+afterEach(() => {
+  for (const svc of services) svc.stop();
+  services.length = 0;
+  for (const store of stores) store.close();
+  stores.length = 0;
+});
+
+const previewCap: PreviewCapability = {
+  protocolVersion: PREVIEW_PROTOCOL_VERSION,
+  h264Encoder: "h264_nvenc",
+  profiles: [PREVIEW_SDR_1080P_PROFILE],
+};
+
+const blockedPlay: PlaybackDecision = {
+  allowed: false,
+  reason: "playing",
+  connectionIds: ["jf"],
+  connectionNames: ["Living Room"],
+  observedAt: 1_000,
+};
+
+function compare(sourceBytes: number, sidecarBytes: number): Pick<ReviewItem, "source" | "sidecar"> {
+  return {
+    source: { codec: "hevc", quality: "HD", sizeBytes: sourceBytes, sizePerHourGb: 1, durationSec: 60, tracks: "1 audio / 0 subtitles" },
+    sidecar: { codec: "hevc", quality: "HD", sizeBytes: sidecarBytes, sizePerHourGb: 0.5, durationSec: 60, tracks: "1 audio / 0 subtitles" },
+  };
+}
+
+function reportFor(path: string, sizeBytes: number): InspectionReport {
+  return {
+    sourceSig: `${path}|${sizeBytes}`,
+    sourceMethod: "ffprobe",
+    listingState: "complete",
+    durationSec: 60,
+    sizeBytes,
+    sizePerHourGb: 1,
+    videoCodec: "h264",
+    width: 1920,
+    height: 1080,
+    bitDepth: 8,
+    hdr: "none",
+    audio: [],
+    subtitles: [],
+    hasChapters: false,
+    hasAttachments: false,
+  };
+}
+
+function copyPlan(): ExecutablePlan {
+  return {
+    origin: "custom",
+    video: { kind: "copy" },
+    audio: [],
+    subtitles: [],
+    container: "mkv",
+    writeMode: "sidecar",
+    warning: null,
+    reasons: ["Copy tracks."],
+    estimatedOutputBytes: 3,
+    category: "movie1080p",
+  };
+}
+
+function harness(opts: {
+  playback?: JobPlaybackGate;
+  clock?: () => number;
+  cacheFits?: () => boolean;
+  isMutating?: (path: string) => boolean;
+  sleep?: (ms: number) => Promise<void>;
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "opt-preview-"));
+  const store = new Store(join(dir, "polisharr.db"));
+  stores.push(store);
+  store.saveSettings({ ...store.getSettings(), reviewPath: dir, concurrency: 1 });
+  store.upsertNode({
+    id: "master",
+    name: "homeserver",
+    role: "master",
+    lastSeen: 1_000,
+    hardware: { backend: "none", cuda: false, vaapi: false, av1: false, reason: "No GPU." },
+    concurrency: 1,
+    enabled: true,
+    version: "1",
+    currentJobId: null,
+    preview: null,
+  });
+  store.upsertNode({
+    id: "worker-1",
+    name: "5090",
+    role: "worker",
+    lastSeen: 1_000,
+    hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+    concurrency: 1,
+    enabled: true,
+    version: "1",
+    currentJobId: null,
+    preview: previewCap,
+  });
+  store.upsertNode({
+    id: "old-worker",
+    name: "old",
+    role: "worker",
+    lastSeen: 1_000,
+    hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+    concurrency: 1,
+    enabled: true,
+    version: "1",
+    currentJobId: null,
+    preview: null,
+  });
+  const instanceId = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: "enc", enabled: true });
+  const itemId = `${instanceId}:movie:10`;
+  const sourcePath = join(dir, "movie.mkv");
+  const sidecarPath = join(dir, "sidecar.mkv");
+  writeFileSync(sourcePath, "ORIGINAL!");
+  writeFileSync(sidecarPath, "SIDECAR!!!");
+  store.upsertItem({
+    id: itemId, instanceId, arrId: 10, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+    title: "Film", showTitle: null, season: null, episode: null, episodeTitle: null, path: sourcePath,
+    sizeBytes: 9, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+  });
+  store.saveInspection(itemId, reportFor(sourcePath, 9));
+  store.insertJob({
+    id: "job-1", itemId, suggestionId: null, status: "succeeded", phase: "idle", progress: 1,
+    error: null, warning: null, runNow: false, createdAt: 1, plan: copyPlan(),
+  });
+  store.insertReview({
+    id: "rev-1", jobId: "job-1", itemId, displayTitle: "Film", status: "pending", flagged: false, flagReason: null,
+    sourcePath, sidecarPath, ...compare(9, 10), error: null,
+  });
+  const previews = new PreviewService({
+    store,
+    clock: opts.clock ?? (() => 1_000),
+    sleep: opts.sleep,
+    playback: opts.playback,
+    isMutating: opts.isMutating,
+    cacheFits: opts.cacheFits,
+    localNodeId: () => "master",
+  });
+  services.push(previews);
+  const jobs = new JobService({
+    store,
+    optimizer: async () => ({ sidecarPath, output: reportFor(sidecarPath, 10) }),
+    hardware: async () => ({ backend: "none", cuda: false, vaapi: false, av1: false, reason: null }),
+    tools: { ffmpeg: "ffmpeg", ffprobe: "ffprobe", mkvmerge: "mkvmerge" },
+    decrypt: () => "key",
+    fetch: (async () => new Response("{}", { status: 201 })) as typeof fetch,
+    reinspectChangedItem: async () => ({ ok: true as const }),
+    clock: opts.clock ?? (() => 1_000),
+    playback: opts.playback,
+    localNodeId: () => "master",
+    sleep: opts.sleep,
+  });
+  jobs.attachPreviews(previews);
+  services.push(jobs);
+  return { dir, store, jobs, previews, itemId, sourcePath, sidecarPath };
+}
+
+describe("preview admission preference", () => {
+  it("prefers one preview then ordinary work so queued encodes are not starved", () => {
+    expect(nextAdmissionKind({ lastKind: null, previewWaiting: true, optimizeWaiting: true })).toBe("preview");
+    expect(nextAdmissionKind({ lastKind: "preview", previewWaiting: true, optimizeWaiting: true })).toBe("optimize");
+    expect(nextAdmissionKind({ lastKind: "optimize", previewWaiting: true, optimizeWaiting: true })).toBe("preview");
+    expect(nextAdmissionKind({ lastKind: "preview", previewWaiting: true, optimizeWaiting: false })).toBe("preview");
+  });
+});
+
+describe("preview task lifecycle", () => {
+  it("queues a preview with its own id and fails closed when no H.264 node exists", () => {
+    const ctx = harness();
+    ctx.store.deleteNode("worker-1");
+    const result = ctx.previews.request("rev-1");
+    expect("accepted" in result).toBe(true);
+    if (!("accepted" in result)) return;
+    expect(result.task.id).not.toBe("job-1");
+    expect(result.task.status).toBe("failed");
+    expect(result.task.error).toBe(NO_PREVIEW_NODE);
+    expect(ctx.store.workSummary().queued).toBe(0);
+    expect(ctx.store.workSummary().review).toBe(1);
+    expect(ctx.store.historyPage(0, 10).total).toBe(0);
+  });
+
+  it("dispatches a GPU-less master to a capable worker and withholds work from an old worker", () => {
+    const ctx = harness();
+    const requested = ctx.previews.request("rev-1");
+    expect("accepted" in requested).toBe(true);
+    if (!("accepted" in requested)) return;
+    expect(requested.task.status).toBe("queued");
+    expect(ctx.previews.claimForNode("old-worker", 1)).toEqual([]);
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.kind).toBe("preview");
+    expect(claimed[0]?.id).toBe(requested.task.id);
+    expect(claimed[0]?.id).not.toBe("job-1");
+    expect(ctx.previews.status(requested.task.id)).toMatchObject({
+      status: "running",
+      nodeId: "worker-1",
+      nodeName: "5090",
+    });
+    expect(ctx.store.runningCountOnNode("worker-1")).toBe(1);
+    expect(ctx.store.reservationsForReview("rev-1")).toHaveLength(2);
+  });
+
+  it("shares node slots with encodes and limits one pair per node and two globally", () => {
+    const ctx = harness();
+    ctx.store.upsertNode({
+      ...ctx.store.getNode("worker-1")!,
+      concurrency: 1,
+      lastSeen: 1_000,
+      preview: previewCap,
+    });
+    ctx.store.insertJob({
+      id: "job-queued", itemId: ctx.itemId, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: true, createdAt: 2, plan: copyPlan(), assignedNodeId: "worker-1",
+    });
+    const first = ctx.previews.request("rev-1");
+    if (!("accepted" in first)) return;
+    expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(1);
+    expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(0);
+
+    ctx.store.upsertNode({
+      id: "worker-2", name: "4070", role: "worker", lastSeen: 1_000,
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+      concurrency: 1, enabled: true, version: "1", currentJobId: null, preview: previewCap,
+    });
+    ctx.store.upsertNode({
+      id: "worker-3", name: "a770", role: "worker", lastSeen: 1_000,
+      hardware: { backend: "vaapi", cuda: false, vaapi: true, av1: false, reason: null },
+      concurrency: 1, enabled: true, version: "1", currentJobId: null, preview: previewCap,
+    });
+    const second = ctx.previews.request("rev-1");
+    const third = ctx.previews.request("rev-1");
+    if (!("accepted" in second) || !("accepted" in third)) return;
+    expect(ctx.previews.claimForNode("worker-2", 1)).toHaveLength(1);
+    expect(ctx.store.runningPreviewCount()).toBe(2);
+    expect(ctx.previews.claimForNode("worker-3", 1)).toHaveLength(0);
+    const leftover = ctx.store.queuedPreviewTasks();
+    expect(leftover).toHaveLength(1);
+    expect(leftover[0]?.waitReason).toBe("node");
+  });
+
+  it("holds preview dispatch during playback and reports the playback wait reason", () => {
+    const ctx = harness({
+      playback: {
+        nodeAdmission: (nodeId) => nodeId === "worker-1" ? blockedPlay : PLAYBACK_ALLOWED,
+        blockedNodeIds: () => ["worker-1"],
+      },
+    });
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(ctx.store.getPreviewTask(requested.task.id)?.waitReason).toBe("playback");
+  });
+
+  it("waits for input lock or cache capacity instead of dispatching", () => {
+    const mutating = harness({ isMutating: () => true });
+    const locked = mutating.previews.request("rev-1");
+    if (!("accepted" in locked)) return;
+    expect(mutating.previews.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(mutating.store.getPreviewTask(locked.task.id)?.waitReason).toBe("input_lock");
+
+    const cache = harness({ cacheFits: () => false });
+    const waiting = cache.previews.request("rev-1");
+    if (!("accepted" in waiting)) return;
+    expect(cache.previews.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(cache.store.getPreviewTask(waiting.task.id)?.waitReason).toBe("cache_capacity");
+  });
+
+  it("admits ordinary work after one preview when both wait", () => {
+    const ctx = harness();
+    ctx.store.insertJob({
+      id: "job-queued", itemId: ctx.itemId, suggestionId: null, status: "queued", phase: "queued", progress: 0,
+      error: null, warning: null, runNow: true, createdAt: 2, plan: copyPlan(), assignedNodeId: "worker-1",
+    });
+    const first = ctx.previews.request("rev-1");
+    if (!("accepted" in first)) return;
+    const previewDoc = ctx.previews.claimForNode("worker-1", 1);
+    expect(previewDoc).toHaveLength(1);
+    expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(ctx.previews.complete(first.task.id, previewDoc[0]!.leaseToken)).toEqual({ ok: true });
+    const second = ctx.previews.request("rev-1");
+    if (!("accepted" in second)) return;
+    expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
+    expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(1);
+  });
+
+  it("does not pin previews to an ordinary job's node", () => {
+    const ctx = harness();
+    ctx.store.upsertNode({
+      id: "worker-2", name: "4070", role: "worker", lastSeen: 1_000,
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+      concurrency: 1, enabled: true, version: "1", currentJobId: null, preview: previewCap,
+    });
+    ctx.store.updateJob("job-1", { status: "queued" });
+    ctx.store.setJobAssignedNode("job-1", "worker-1");
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    const claimed = ctx.previews.claimForNode("worker-2", 1);
+    expect(claimed[0]?.nodeId).toBe("worker-2");
+  });
+
+  it("rejects stale leases and revoked publication on late completion", () => {
+    let now = 1_000;
+    const ctx = harness({ clock: () => now });
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    const token = claimed[0]!.leaseToken;
+    now = 1_000 + PREVIEW_LEASE_MS + 1;
+    ctx.previews.expire();
+    expect(ctx.previews.complete(requested.task.id, token)).toMatchObject({ error: PREVIEW_LEASE_INVALID, status: 409 });
+    expect(ctx.store.getPreviewTask(requested.task.id)?.status).toBe("failed");
+
+    const again = ctx.previews.request("rev-1");
+    if (!("accepted" in again)) return;
+    now = 1_000 + PREVIEW_LEASE_MS + 2;
+    const claimedAgain = ctx.previews.claimForNode("worker-1", 1);
+    ctx.previews.revokeAndCancel("rev-1");
+    expect(ctx.previews.complete(again.task.id, claimedAgain[0]!.leaseToken)).toMatchObject({
+      error: PREVIEW_PUBLICATION_REVOKED,
+      status: 409,
+    });
+    expect(ctx.store.getPreviewTask(again.task.id)?.status).not.toBe("ready");
+  });
+
+  it("cancels a preview without cancelling the optimize job or changing Review counts", () => {
+    const ctx = harness();
+    ctx.store.updateJob("job-1", { status: "succeeded" });
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    expect(ctx.previews.cancel(requested.task.id)).toEqual({ ok: true });
+    expect(ctx.store.getPreviewTask(requested.task.id)?.status).toBe("cancelled");
+    expect(ctx.store.getJob("job-1")?.status).toBe("succeeded");
+    expect(ctx.store.workSummary().review).toBe(1);
+    expect(ctx.store.historyPage(0, 10).total).toBe(0);
+  });
+
+  it("waits through the preview lease and safety margin before Keep mutates source bytes", async () => {
+    let now = 1_000;
+    const ctx = harness({
+      clock: () => now,
+      sleep: async (ms) => {
+        now += ms;
+      },
+    });
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    ctx.previews.claimForNode("worker-1", 1);
+    expect(ctx.store.reservationsForReview("rev-1").length).toBeGreaterThan(0);
+    const keep = ctx.jobs.keep("rev-1");
+    await vi.waitFor(() => expect(readFileSync(ctx.sourcePath, "utf8")).toBe("SIDECAR!!!"));
+    await keep;
+    expect(now).toBeGreaterThanOrEqual(1_000 + PREVIEW_LEASE_MS + PREVIEW_LEASE_SAFETY_MARGIN_MS);
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+  });
+
+  it("does not let Discard delete an input still held by an authorized reader until release", async () => {
+    const waiters: Array<() => void> = [];
+    const ctx = harness({
+      sleep: () => new Promise<void>((resolve) => {
+        waiters.push(resolve);
+      }),
+    });
+    const requested = ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    const discarding = ctx.jobs.discard("rev-1");
+    await vi.waitFor(() => expect(waiters.length).toBeGreaterThan(0));
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("SIDECAR!!!");
+    expect(ctx.store.getReview("rev-1")).toBeDefined();
+    ctx.previews.fail(requested.task.id, claimed[0]!.leaseToken, "cancelled");
+    for (const wake of waiters) wake();
+    await discarding;
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+  });
+});

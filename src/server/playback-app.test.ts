@@ -13,11 +13,12 @@ function cookie(res: Response): string {
 }
 
 const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null };
-const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
+const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; previews?: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
 
 afterEach(async () => {
   for (const a of apps) {
     a.app.jobs.stop();
+    a.app.previews?.stop();
     a.app.workerLoop?.stop();
     await a.app.playbackMonitor?.stop();
     a.store.close();

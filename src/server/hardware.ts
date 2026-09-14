@@ -1,7 +1,15 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import type { HardwareBackend, HardwareInfo } from "./types.ts";
+import {
+  NO_PREVIEW_CAPABILITY,
+  PREVIEW_PROTOCOL_VERSION,
+  PREVIEW_SDR_1080P_PROFILE,
+  type PreviewCapability,
+} from "./cluster.ts";
+import type { HardwareBackend, HardwareInfo, PreviewH264Encoder } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +42,118 @@ export function parseEncoders(text: string): EncoderListing {
     vaapiAv1: /\b(av1_vaapi|av1_qsv)\b/.test(lower),
     videotoolboxAv1: /\bav1_videotoolbox\b/.test(lower),
     qsv: /\b(h264_qsv|hevc_qsv|av1_qsv)\b/.test(lower),
+  };
+}
+
+export function parseH264PreviewEncoders(text: string): { nvenc: boolean; vaapi: boolean; videotoolbox: boolean } {
+  const lower = text.toLowerCase();
+  return {
+    nvenc: /\bh264_nvenc\b/.test(lower),
+    vaapi: /\bh264_vaapi\b/.test(lower),
+    videotoolbox: /\bh264_videotoolbox\b/.test(lower),
+  };
+}
+
+export function choosePreviewEncoder(
+  listed: { nvenc: boolean; vaapi: boolean; videotoolbox: boolean },
+  backend: HardwareBackend,
+): PreviewH264Encoder | null {
+  if (backend === "cuda" && listed.nvenc) return "h264_nvenc";
+  if (backend === "vaapi" && listed.vaapi) return "h264_vaapi";
+  if (backend === "videotoolbox" && listed.videotoolbox) return "h264_videotoolbox";
+  return null;
+}
+
+export type PreviewSmokeCheck = (input: {
+  ffmpeg: string;
+  encoder: PreviewH264Encoder;
+  vaapiDevice?: string | null;
+}) => Promise<boolean>;
+
+export async function defaultPreviewSmoke(input: {
+  ffmpeg: string;
+  encoder: PreviewH264Encoder;
+  vaapiDevice?: string | null;
+}): Promise<boolean> {
+  const dir = mkdtempSync(join(tmpdir(), "polisharr-preview-smoke-"));
+  const out = join(dir, "smoke.mp4");
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=size=64x64:rate=1:duration=1",
+    "-f",
+    "lavfi",
+    "-i",
+    "anullsrc=r=48000:cl=stereo",
+    "-t",
+    "1",
+    "-c:v",
+    input.encoder,
+    "-c:a",
+    "aac",
+    "-f",
+    "mp4",
+    "-y",
+    out,
+  ];
+  if (input.encoder === "h264_vaapi" && input.vaapiDevice) {
+    args.splice(3, 0, "-vaapi_device", input.vaapiDevice);
+  }
+  try {
+    await execFileAsync(input.ffmpeg, args, { timeout: 8000 });
+    const { stdout, stderr } = await execFileAsync("ffprobe", ["-hide_banner", "-print_format", "json", "-show_streams", out], { timeout: 5000 });
+    const parsed: unknown = JSON.parse(`${stdout}`);
+    const streams = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as { streams?: unknown }).streams
+      : null;
+    if (!Array.isArray(streams)) return false;
+    const hasH264 = streams.some((stream) => stream && typeof stream === "object" && (stream as { codec_name?: unknown }).codec_name === "h264");
+    const hasAac = streams.some((stream) => stream && typeof stream === "object" && (stream as { codec_name?: unknown }).codec_name === "aac");
+    return hasH264 && hasAac && !String(stderr).toLowerCase().includes("error");
+  } catch {
+    return false;
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Temp smoke files may already be gone.
+    }
+  }
+}
+
+export async function probePreviewCapability(
+  ffmpeg: string,
+  hardware: HardwareInfo,
+  listEncoders: () => Promise<string> = async () => {
+    const { stdout, stderr } = await execFileAsync(ffmpeg, ["-hide_banner", "-encoders"], { timeout: 8000 });
+    return `${stdout}\n${stderr}`;
+  },
+  smoke: PreviewSmokeCheck = defaultPreviewSmoke,
+): Promise<PreviewCapability> {
+  if (hardware.backend === "none") return { ...NO_PREVIEW_CAPABILITY };
+  let listing = "";
+  try {
+    listing = await listEncoders();
+  } catch {
+    return { ...NO_PREVIEW_CAPABILITY };
+  }
+  const encoder = choosePreviewEncoder(parseH264PreviewEncoders(listing), hardware.backend);
+  if (!encoder) return { ...NO_PREVIEW_CAPABILITY };
+  let ok = false;
+  try {
+    ok = await smoke({ ffmpeg, encoder, vaapiDevice: hardware.vaapiDevice });
+  } catch {
+    return { ...NO_PREVIEW_CAPABILITY };
+  }
+  if (!ok) return { ...NO_PREVIEW_CAPABILITY };
+  return {
+    protocolVersion: PREVIEW_PROTOCOL_VERSION,
+    h264Encoder: encoder,
+    profiles: [PREVIEW_SDR_1080P_PROFILE],
   };
 }
 

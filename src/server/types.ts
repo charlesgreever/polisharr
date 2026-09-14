@@ -13,6 +13,35 @@ export type JobPhase =
   | "finishing"
   | "idle";
 export type ReviewStatus = "pending" | "waiting" | "keeping" | "discarding";
+export type PreviewTaskStatus = "queued" | "running" | "ready" | "failed" | "cancelled" | "expired";
+export type PreviewWaitReason = "node" | "playback" | "input_lock" | "cache_capacity";
+export type PreviewH264Encoder = "h264_nvenc" | "h264_vaapi" | "h264_videotoolbox";
+export type PreviewAdmissionKind = "optimize" | "preview";
+
+export type PreviewRequest = {
+  startMs: number;
+  durationMs: number;
+  originalAudioIndex: number | null;
+  sidecarAudioIndex: number | null;
+};
+
+export type PreviewTask = {
+  id: string;
+  reviewId: string;
+  status: PreviewTaskStatus;
+  waitReason: PreviewWaitReason | null;
+  nodeId: string | null;
+  leaseToken: string | null;
+  leaseUntil: number | null;
+  publicationAllowed: boolean;
+  error: string | null;
+  request: PreviewRequest;
+  sourceRevision: PlaybackFileRevision | null;
+  sidecarRevision: PlaybackFileRevision | null;
+  createdAt: number;
+  startedAt: number | null;
+  updatedAt: number;
+};
 export type ReplacementOrigin = "keep" | "direct";
 export type PromotionDisposition = "started" | "waiting";
 export type SizeCategory = "movie1080p" | "movie4kSdr" | "movie4kHdr" | "tv1080p" | "tv4k" | "tv4kHdr";

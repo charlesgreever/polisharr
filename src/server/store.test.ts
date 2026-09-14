@@ -97,6 +97,7 @@ describe("store schema migration", () => {
         enabled: true,
         version: "0.0.0",
         currentJobId: null,
+        preview: null,
       },
     ]);
   });
@@ -502,6 +503,21 @@ describe("store schema migration", () => {
     });
     expect(store.runningCountOnNode("5090")).toBe(1);
     expect(store.busyCountOnNode("5090")).toBe(2);
+  });
+
+  it("counts running preview pairs toward node slots without changing Review or queue totals", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-preview-count-")), "polisharr.db"));
+    stores.push(store);
+    store.insertPreviewTask({
+      id: "prv-1",
+      reviewId: "rev-1",
+      request: { startMs: 0, durationMs: 15_000, originalAudioIndex: null, sidecarAudioIndex: null },
+      createdAt: 1,
+    });
+    store.updatePreviewTask("prv-1", { status: "running", nodeId: "5090", updatedAt: 2 });
+    expect(store.runningCountOnNode("5090")).toBe(1);
+    expect(store.runningPreviewCount()).toBe(1);
+    expect(store.workSummary()).toMatchObject({ queued: 0, review: 0 });
   });
 
   it("returns interrupted running jobs to the queue after restart", () => {

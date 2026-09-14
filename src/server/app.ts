@@ -13,7 +13,7 @@ import argon2 from "argon2";
 import { readAppVersion, type Env } from "./env.ts";
 import { Store } from "./store.ts";
 import { decryptSecret, encryptSecret, loadOrCreateSecret } from "./secrets.ts";
-import { detectHardware, type HardwareProbe } from "./hardware.ts";
+import { detectHardware, probePreviewCapability, type HardwareProbe, type PreviewSmokeCheck } from "./hardware.ts";
 import { isLocalAddress, requestAddress } from "./net.ts";
 import {
   testRadarr,
@@ -85,12 +85,22 @@ import {
   parseClusterClaim,
   parseClusterHeartbeat,
   parseClusterHello,
+  parsePreviewComplete,
+  parsePreviewFail,
+  parsePreviewProgress,
   parseRemoteComplete,
   parseRemoteFail,
   parseRemoteProgress,
+  PREVIEW_LEASE_MS,
   type ClusterNode,
 } from "./cluster.ts";
 import { WorkerLoop } from "./worker-loop.ts";
+import {
+  PreviewService,
+  publicPreviewStatus,
+  stubPreviewRenderer,
+  type PreviewRenderer,
+} from "./review-previews.ts";
 
 const execFileAsync = promisify(execFile);
 const SESSION_TTL = 14 * 24 * 60 * 60 * 1000;
@@ -133,6 +143,10 @@ export type AppOptions = {
   playbackPollMs?: number;
   playbackTimeoutMs?: number;
   playbackStaleMs?: number;
+  previewCapability?: () => Promise<import("./cluster.ts").PreviewCapability | null>;
+  previewRenderer?: PreviewRenderer;
+  previewSmoke?: PreviewSmokeCheck;
+  previewCacheFits?: () => boolean;
 };
 
 export function createApp(opts: AppOptions) {
@@ -175,8 +189,29 @@ export function createApp(opts: AppOptions) {
       refreshReplacementPreflight: () => playbackRefresh.run(),
     },
   });
+  async function resolvePreviewCapability() {
+    if (opts.previewCapability) return opts.previewCapability();
+    if (opts.hardware && !opts.previewSmoke) return null;
+    return probePreviewCapability(opts.env.ffmpeg, await hardware(), undefined, opts.previewSmoke);
+  }
+  const previews = new PreviewService({
+    store,
+    clock: opts.clock,
+    playback: {
+      nodeAdmission: (nodeId) => playbackPolicy.nodeAdmission(nodeId, store.getPlaybackSettings()),
+      blockedNodeIds: () => playbackPolicy.blockedNodeIds(store.getPlaybackSettings()),
+    },
+    isMutating: (path) => jobs.isPathMutating(path),
+    cacheFits: opts.previewCacheFits,
+    renderer: opts.previewRenderer ?? stubPreviewRenderer,
+    localNodeId: () => store.localNodeId(),
+  });
+  jobs.attachPreviews(previews);
   const isWorker = opts.env.role === "worker";
-  if (!isWorker) jobs.start();
+  if (!isWorker) {
+    jobs.start();
+    previews.start();
+  }
   const jellyfinPlayback = createJellyfinPlayback({
     fetch: httpFetch,
     clock: opts.clock,
@@ -215,6 +250,8 @@ export function createApp(opts: AppOptions) {
     fetch: httpFetch,
     optimizer,
     tools: { ffmpeg: opts.env.ffmpeg, ffprobe: opts.env.ffprobe, mkvmerge: opts.env.mkvmerge },
+    previewCapability: resolvePreviewCapability,
+    previewRenderer: opts.previewRenderer ?? stubPreviewRenderer,
   });
 
   const app = new Hono();
@@ -416,7 +453,7 @@ export function createApp(opts: AppOptions) {
     const node = store.getNode(id);
     if (!node) return c.json({ error: "That encode node is not registered." }, 404);
     const jobs = store.listJobs().filter((job) => job.assignedNodeId === id || job.nodeId === id);
-    if (jobs.some((job) => job.status === "running")) {
+    if (jobs.some((job) => job.status === "running") || store.runningPreviewCountOnNode(id) > 0) {
       return c.json({ error: "Stop the running job on this node first." }, 409);
     }
     if (jobs.some((job) => job.status === "queued" || job.status === "held")) {
@@ -465,6 +502,7 @@ export function createApp(opts: AppOptions) {
       enabled: existing?.enabled ?? true,
       version: parsed.hello.version,
       currentJobId: null,
+      preview: parsed.hello.preview,
     });
     if (clusterAv1() !== av1Before) recomputeAllSuggestions();
     const node = store.getNode(parsed.hello.nodeId);
@@ -485,12 +523,15 @@ export function createApp(opts: AppOptions) {
       hardware: parsed.beat.hardware,
       currentJobId: parsed.beat.currentJobId,
       version: existing.version,
+      preview: parsed.beat.preview,
     });
     store.renewNodeLeases(parsed.beat.nodeId, parsed.beat.runningJobIds, now + LEASE_MS);
+    store.renewPreviewLeases(parsed.beat.nodeId, parsed.beat.runningPreviewIds, now + PREVIEW_LEASE_MS);
     const node = store.getNode(parsed.beat.nodeId);
     return c.json({
       ok: true,
       cancelJobIds: store.cancelledIdsForNode(parsed.beat.nodeId),
+      cancelPreviewIds: store.cancelledPreviewIdsForNode(parsed.beat.nodeId),
       concurrency: node?.concurrency ?? existing.concurrency,
     });
   });
@@ -533,6 +574,49 @@ export function createApp(opts: AppOptions) {
     const parsed = parseRemoteFail(await readJson(c));
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     const result = jobs.failRemote(c.req.param("id"), parsed.leaseToken, parsed.error);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/previews/claim", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parseClusterClaim(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    if (!store.getNode(parsed.nodeId)) return c.json({ error: CLUSTER_UNKNOWN_NODE }, 404);
+    const claimed = previews.claimForNode(parsed.nodeId, parsed.freeSlots);
+    return c.json({ previews: claimed });
+  });
+
+  app.post("/api/cluster/previews/:id/progress", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parsePreviewProgress(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = previews.progress(c.req.param("id"), parsed.leaseToken, parsed.progress);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/previews/:id/complete", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parsePreviewComplete(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = previews.complete(c.req.param("id"), parsed.leaseToken);
+    if ("cancelled" in result) return c.json({ cancelled: true }, 409);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/cluster/previews/:id/fail", async (c) => {
+    const denied = clusterAdmission(c);
+    if (denied) return denied;
+    const parsed = parsePreviewFail(await readJson(c));
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    const result = previews.fail(c.req.param("id"), parsed.leaseToken, parsed.error);
     if ("cancelled" in result) return c.json({ cancelled: true }, 409);
     if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
     return c.json({ ok: true });
@@ -1535,6 +1619,33 @@ export function createApp(opts: AppOptions) {
     return c.json({ ok: true }, 202);
   });
 
+  app.post("/api/review/:id/previews", async (c) => {
+    const blocked = gateOptimize();
+    if (blocked) return c.json({ error: blocked }, 403);
+    const result = previews.request(c.req.param("id"), await readJson(c));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    const node = result.task.nodeId ? store.getNode(result.task.nodeId) : undefined;
+    return c.json(publicPreviewStatus(result.task, node?.name ?? null), 202);
+  });
+
+  app.get("/api/review/:id/previews/:taskId", (c) => {
+    const review = store.getReview(c.req.param("id"));
+    if (!review) return c.json({ error: "That review item is gone." }, 404);
+    const task = previews.status(c.req.param("taskId"));
+    if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
+    return c.json(publicPreviewStatus(task, task.nodeName));
+  });
+
+  app.post("/api/review/:id/previews/:taskId/cancel", (c) => {
+    const review = store.getReview(c.req.param("id"));
+    if (!review) return c.json({ error: "That review item is gone." }, 404);
+    const task = store.getPreviewTask(c.req.param("taskId"));
+    if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
+    const result = previews.cancel(task.id);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
+  });
+
   app.post("/api/review/:id/requeue", async (c) => {
     const blocked = gateOptimize();
     if (blocked) return c.json({ error: blocked }, 403);
@@ -1770,6 +1881,7 @@ export function createApp(opts: AppOptions) {
       enabled: existing?.enabled ?? true,
       version,
       currentJobId: running?.id ?? null,
+      preview: await resolvePreviewCapability(),
     };
     store.upsertNode(node);
     return node;
@@ -1861,7 +1973,7 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
-  return { app, store, jobs, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy };
+  return { app, store, jobs, previews, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy };
 }
 
 async function readJson(c: Context): Promise<unknown> {

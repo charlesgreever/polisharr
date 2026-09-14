@@ -949,4 +949,34 @@ describe("store schema migration", () => {
     expect(store.listPlaybackOccurrences().items).toEqual([]);
     expect(store.getPlaybackSettings()[0]?.observePlayback).toBe(true);
   });
+
+  it("looks up a library path by exact match and by case-insensitive SQL", () => {
+    const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-path-lookup-")), "polisharr.db"));
+    stores.push(store);
+    const radarr = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
+    store.upsertItem({
+      id: "film-1",
+      instanceId: radarr,
+      arrId: 1,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Film",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: "/mnt/nas/Movies/Film.mkv",
+      sizeBytes: 1,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    expect(store.itemsForCanonicalPath("/mnt/nas/Movies/Film.mkv").map((row) => row.id)).toEqual(["film-1"]);
+    expect(store.itemsForCanonicalPath("/mnt/nas/movies/film.mkv")).toEqual([]);
+    expect(store.itemsForPathIgnoreCase("/mnt/nas/movies/film.mkv").map((row) => row.id)).toEqual(["film-1"]);
+  });
 });

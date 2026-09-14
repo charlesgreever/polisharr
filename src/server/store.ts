@@ -483,6 +483,16 @@ export class Store {
     return rows.map(mapItem);
   }
 
+  itemsForPathIgnoreCase(path: string): LibraryItem[] {
+    if (!path) return [];
+    const rows = this.db.prepare(
+      `SELECT i.*, inst.name AS instance_name FROM library_items i JOIN instances inst ON inst.id = i.instance_id
+       WHERE LOWER(i.path) = LOWER(?)
+       ORDER BY i.season, i.episode, i.id`,
+    ).all(path) as Record<string, unknown>[];
+    return rows.map(mapItem);
+  }
+
   fileDisplayTitle(itemId: string): string | undefined {
     const item = this.getItem(itemId);
     if (!item) return undefined;

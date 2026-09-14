@@ -533,14 +533,15 @@ async function revisionForPath(
 }
 
 function libraryItemsForPath(store: Store, path: string): LibraryItem[] {
-  const exact = store.itemsForCanonicalPath(canonicalMediaPath(path));
-  const matched = exact.filter((item) => mediaPathsEqual(item.path, path));
-  if (matched.length) return matched;
-  if (path !== canonicalMediaPath(path)) {
+  const canonical = canonicalMediaPath(path);
+  const exact = store.itemsForCanonicalPath(canonical).filter((item) => mediaPathsEqual(item.path, path));
+  if (exact.length) return exact;
+  if (path !== canonical) {
     const raw = store.itemsForCanonicalPath(path).filter((item) => mediaPathsEqual(item.path, path));
     if (raw.length) return raw;
   }
-  return store.listItems().filter((item) => mediaPathsEqual(item.path, path));
+  if (process.platform !== "win32" && process.platform !== "darwin") return [];
+  return store.itemsForPathIgnoreCase(canonical).filter((item) => mediaPathsEqual(item.path, path));
 }
 
 function titleForItems(store: Store, ids: string[], fallback: string): string {

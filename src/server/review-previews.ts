@@ -104,6 +104,7 @@ export type PreviewServiceOptions = {
   localNodeId?: () => string;
   probeMedia?: (path: string) => Promise<PreviewMediaInfo>;
   reviewPath?: () => string;
+  removePairDir?: (dir: string) => Promise<boolean>;
 };
 
 export function nextAdmissionKind(input: {
@@ -775,7 +776,7 @@ export class PreviewService {
       if (onDisk > 0 && (task?.bytes ?? 0) < onDisk) {
         this.opts.store.updatePreviewTask(id, { bytes: onDisk, updatedAt: this.now() });
       }
-      const gone = await removePreviewPairDir(dir);
+      const gone = await (this.opts.removePairDir ?? removePreviewPairDir)(dir);
       if (gone) {
         if ((this.opts.store.getPreviewTask(id)?.bytes ?? 0) > 0) {
           this.opts.store.updatePreviewTask(id, { bytes: 0, updatedAt: this.now() });

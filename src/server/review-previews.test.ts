@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,7 @@ import {
   PREVIEW_PUBLISHED_MARKER,
   type PreviewMediaInfo,
 } from "./preview-render.ts";
-import { previewDirBytes, previewPairDir, previewRoot } from "./optimize.ts";
+import { previewDirBytes, previewPairDir } from "./optimize.ts";
 import {
   nextAdmissionKind,
   NO_PREVIEW_NODE,
@@ -127,6 +127,7 @@ function harness(opts: {
   isMutating?: (path: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
   probeMedia?: (path: string) => Promise<PreviewMediaInfo>;
+  removePairDir?: (dir: string) => Promise<boolean>;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "opt-preview-"));
   const store = new Store(join(dir, "polisharr.db"));
@@ -198,6 +199,7 @@ function harness(opts: {
     localNodeId: () => "master",
     probeMedia: opts.probeMedia ?? (async () => sdrMedia()),
     reviewPath: () => dir,
+    removePairDir: opts.removePairDir,
   });
   services.push(previews);
   const jobs = new JobService({
@@ -527,18 +529,16 @@ describe("preview task lifecycle", () => {
       errors.push(String(message));
     });
     let now = 1_000;
-    const ctx = harness({ clock: () => now });
-    const requested = await ctx.previews.request("rev-1");
-    if (!("accepted" in requested)) return;
-    ctx.previews.claimForNode("worker-1", 1);
-    publishPair(ctx.dir, requested.task.id, "0123456789", "abcdefghij");
-    const root = previewRoot(ctx.dir);
-    const pair = previewPairDir(ctx.dir, requested.task.id);
-    chmodSync(pair, 0o555);
-    chmodSync(root, 0o555);
-    now = 1_000 + PREVIEW_LEASE_MS + 1;
-    ctx.previews.expire();
+    // Root in Docker can unlink a 0555 tree, so the test stubs the delete seam instead of chmod.
+    const ctx = harness({ clock: () => now, removePairDir: async () => false });
     try {
+      const requested = await ctx.previews.request("rev-1");
+      if (!("accepted" in requested)) return;
+      ctx.previews.claimForNode("worker-1", 1);
+      publishPair(ctx.dir, requested.task.id, "0123456789", "abcdefghij");
+      const pair = previewPairDir(ctx.dir, requested.task.id);
+      now = 1_000 + PREVIEW_LEASE_MS + 1;
+      ctx.previews.expire();
       await vi.waitFor(() => {
         expect(existsSync(pair)).toBe(true);
         expect(ctx.previews.cacheUsage()).toBeGreaterThanOrEqual(previewDirBytes(pair));
@@ -550,12 +550,6 @@ describe("preview task lifecycle", () => {
       expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
       expect(ctx.store.getPreviewTask(extra.task.id)?.waitReason).toBe("cache_capacity");
     } finally {
-      chmodSync(root, 0o755);
-      try {
-        chmodSync(pair, 0o755);
-      } catch {
-        // Pair dir may already be gone.
-      }
       spy.mockRestore();
     }
   });

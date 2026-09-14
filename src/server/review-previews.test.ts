@@ -1,11 +1,19 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PREVIEW_LEASE_MS, PREVIEW_LEASE_SAFETY_MARGIN_MS, PREVIEW_PROTOCOL_VERSION, PREVIEW_SDR_1080P_PROFILE } from "./cluster.ts";
 import { JobService, type JobPlaybackGate } from "./jobs.ts";
 import { PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
-import { nextAdmissionKind, NO_PREVIEW_NODE, PREVIEW_LEASE_INVALID, PREVIEW_PUBLICATION_REVOKED, PreviewService } from "./review-previews.ts";
+import {
+  PREVIEW_FINISHED_FILE,
+  PREVIEW_HDR_UNAVAILABLE,
+  PREVIEW_ORIGINAL_FILE,
+  PREVIEW_PUBLISHED_MARKER,
+  type PreviewMediaInfo,
+} from "./preview-render.ts";
+import { previewPairDir } from "./optimize.ts";
+import { nextAdmissionKind, NO_PREVIEW_NODE, PREVIEW_LEASE_INVALID, PREVIEW_PUBLICATION_REVOKED, PREVIEW_STALE, PreviewService } from "./review-previews.ts";
 import { Store } from "./store.ts";
 import type { PreviewCapability } from "./cluster.ts";
 import type { ExecutablePlan, InspectionReport, ReviewItem } from "./types.ts";
@@ -54,7 +62,7 @@ function reportFor(path: string, sizeBytes: number): InspectionReport {
     height: 1080,
     bitDepth: 8,
     hdr: "none",
-    audio: [],
+    audio: [{ index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false, default: true }],
     subtitles: [],
     hasChapters: false,
     hasAttachments: false,
@@ -76,12 +84,39 @@ function copyPlan(): ExecutablePlan {
   };
 }
 
+function sdrMedia(over: Partial<PreviewMediaInfo> = {}): PreviewMediaInfo {
+  return {
+    durationMs: 60_000,
+    width: 1920,
+    height: 1080,
+    sarNum: 1,
+    sarDen: 1,
+    hdr: "none",
+    videoIndex: 0,
+    audio: [
+      { index: 1, language: "eng", channels: 6, codec: "ac3", default: true },
+      { index: 2, language: "eng", channels: 2, codec: "aac", default: false },
+    ],
+    hasVideo: true,
+    ...over,
+  };
+}
+
+function publishPair(reviewPath: string, taskId: string, original = "orig-bytes", finished = "fin-bytes"): void {
+  const dir = previewPairDir(reviewPath, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, PREVIEW_ORIGINAL_FILE), original);
+  writeFileSync(join(dir, PREVIEW_FINISHED_FILE), finished);
+  writeFileSync(join(dir, PREVIEW_PUBLISHED_MARKER), "");
+}
+
 function harness(opts: {
   playback?: JobPlaybackGate;
   clock?: () => number;
   cacheFits?: () => boolean;
   isMutating?: (path: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
+  probeMedia?: (path: string) => Promise<PreviewMediaInfo>;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "opt-preview-"));
   const store = new Store(join(dir, "polisharr.db"));
@@ -151,6 +186,8 @@ function harness(opts: {
     isMutating: opts.isMutating,
     cacheFits: opts.cacheFits,
     localNodeId: () => "master",
+    probeMedia: opts.probeMedia ?? (async () => sdrMedia()),
+    reviewPath: () => dir,
   });
   services.push(previews);
   const jobs = new JobService({
@@ -181,10 +218,10 @@ describe("preview admission preference", () => {
 });
 
 describe("preview task lifecycle", () => {
-  it("queues a preview with its own id and fails closed when no H.264 node exists", () => {
+  it("queues a preview with its own id and fails closed when no H.264 node exists", async () => {
     const ctx = harness();
     ctx.store.deleteNode("worker-1");
-    const result = ctx.previews.request("rev-1");
+    const result = await ctx.previews.request("rev-1");
     expect("accepted" in result).toBe(true);
     if (!("accepted" in result)) return;
     expect(result.task.id).not.toBe("job-1");
@@ -195,9 +232,9 @@ describe("preview task lifecycle", () => {
     expect(ctx.store.historyPage(0, 10).total).toBe(0);
   });
 
-  it("dispatches a GPU-less master to a capable worker and withholds work from an old worker", () => {
+  it("dispatches a GPU-less master to a capable worker and withholds work from an old worker", async () => {
     const ctx = harness();
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     expect("accepted" in requested).toBe(true);
     if (!("accepted" in requested)) return;
     expect(requested.task.status).toBe("queued");
@@ -216,7 +253,7 @@ describe("preview task lifecycle", () => {
     expect(ctx.store.reservationsForReview("rev-1")).toHaveLength(2);
   });
 
-  it("shares node slots with encodes and limits one pair per node and two globally", () => {
+  it("shares node slots with encodes and limits one pair per node and two globally", async () => {
     const ctx = harness();
     ctx.store.upsertNode({
       ...ctx.store.getNode("worker-1")!,
@@ -228,7 +265,7 @@ describe("preview task lifecycle", () => {
       id: "job-queued", itemId: ctx.itemId, suggestionId: null, status: "queued", phase: "queued", progress: 0,
       error: null, warning: null, runNow: true, createdAt: 2, plan: copyPlan(), assignedNodeId: "worker-1",
     });
-    const first = ctx.previews.request("rev-1");
+    const first = await ctx.previews.request("rev-1", { startMs: 0 });
     if (!("accepted" in first)) return;
     expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(0);
     expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(1);
@@ -245,8 +282,8 @@ describe("preview task lifecycle", () => {
       hardware: { backend: "vaapi", cuda: false, vaapi: true, av1: false, reason: null },
       concurrency: 1, enabled: true, version: "1", currentJobId: null, preview: previewCap,
     });
-    const second = ctx.previews.request("rev-1");
-    const third = ctx.previews.request("rev-1");
+    const second = await ctx.previews.request("rev-1", { startMs: 1_000 });
+    const third = await ctx.previews.request("rev-1", { startMs: 2_000 });
     if (!("accepted" in second) || !("accepted" in third)) return;
     expect(ctx.previews.claimForNode("worker-2", 1)).toHaveLength(1);
     expect(ctx.store.runningPreviewCount()).toBe(2);
@@ -256,52 +293,53 @@ describe("preview task lifecycle", () => {
     expect(leftover[0]?.waitReason).toBe("node");
   });
 
-  it("holds preview dispatch during playback and reports the playback wait reason", () => {
+  it("holds preview dispatch during playback and reports the playback wait reason", async () => {
     const ctx = harness({
       playback: {
         nodeAdmission: (nodeId) => nodeId === "worker-1" ? blockedPlay : PLAYBACK_ALLOWED,
         blockedNodeIds: () => ["worker-1"],
       },
     });
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
     expect(ctx.store.getPreviewTask(requested.task.id)?.waitReason).toBe("playback");
   });
 
-  it("waits for input lock or cache capacity instead of dispatching", () => {
+  it("waits for input lock or cache capacity instead of dispatching", async () => {
     const mutating = harness({ isMutating: () => true });
-    const locked = mutating.previews.request("rev-1");
+    const locked = await mutating.previews.request("rev-1");
     if (!("accepted" in locked)) return;
     expect(mutating.previews.claimForNode("worker-1", 1)).toHaveLength(0);
     expect(mutating.store.getPreviewTask(locked.task.id)?.waitReason).toBe("input_lock");
 
     const cache = harness({ cacheFits: () => false });
-    const waiting = cache.previews.request("rev-1");
+    const waiting = await cache.previews.request("rev-1");
     if (!("accepted" in waiting)) return;
     expect(cache.previews.claimForNode("worker-1", 1)).toHaveLength(0);
     expect(cache.store.getPreviewTask(waiting.task.id)?.waitReason).toBe("cache_capacity");
   });
 
-  it("admits ordinary work after one preview when both wait", () => {
+  it("admits ordinary work after one preview when both wait", async () => {
     const ctx = harness();
     ctx.store.insertJob({
       id: "job-queued", itemId: ctx.itemId, suggestionId: null, status: "queued", phase: "queued", progress: 0,
       error: null, warning: null, runNow: true, createdAt: 2, plan: copyPlan(), assignedNodeId: "worker-1",
     });
-    const first = ctx.previews.request("rev-1");
+    const first = await ctx.previews.request("rev-1");
     if (!("accepted" in first)) return;
     const previewDoc = ctx.previews.claimForNode("worker-1", 1);
     expect(previewDoc).toHaveLength(1);
     expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(0);
+    publishPair(ctx.dir, first.task.id);
     expect(ctx.previews.complete(first.task.id, previewDoc[0]!.leaseToken)).toEqual({ ok: true });
-    const second = ctx.previews.request("rev-1");
+    const second = await ctx.previews.request("rev-1");
     if (!("accepted" in second)) return;
     expect(ctx.previews.claimForNode("worker-1", 1)).toHaveLength(0);
     expect(ctx.jobs.claimForNode("worker-1", 1)).toHaveLength(1);
   });
 
-  it("does not pin previews to an ordinary job's node", () => {
+  it("does not pin previews to an ordinary job's node", async () => {
     const ctx = harness();
     ctx.store.upsertNode({
       id: "worker-2", name: "4070", role: "worker", lastSeen: 1_000,
@@ -310,16 +348,16 @@ describe("preview task lifecycle", () => {
     });
     ctx.store.updateJob("job-1", { status: "queued" });
     ctx.store.setJobAssignedNode("job-1", "worker-1");
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     const claimed = ctx.previews.claimForNode("worker-2", 1);
     expect(claimed[0]?.nodeId).toBe("worker-2");
   });
 
-  it("rejects stale leases and revoked publication on late completion", () => {
+  it("rejects stale leases and revoked publication on late completion", async () => {
     let now = 1_000;
     const ctx = harness({ clock: () => now });
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     const claimed = ctx.previews.claimForNode("worker-1", 1);
     const token = claimed[0]!.leaseToken;
@@ -328,7 +366,7 @@ describe("preview task lifecycle", () => {
     expect(ctx.previews.complete(requested.task.id, token)).toMatchObject({ error: PREVIEW_LEASE_INVALID, status: 409 });
     expect(ctx.store.getPreviewTask(requested.task.id)?.status).toBe("failed");
 
-    const again = ctx.previews.request("rev-1");
+    const again = await ctx.previews.request("rev-1");
     if (!("accepted" in again)) return;
     now = 1_000 + PREVIEW_LEASE_MS + 2;
     const claimedAgain = ctx.previews.claimForNode("worker-1", 1);
@@ -340,10 +378,10 @@ describe("preview task lifecycle", () => {
     expect(ctx.store.getPreviewTask(again.task.id)?.status).not.toBe("ready");
   });
 
-  it("cancels a preview without cancelling the optimize job or changing Review counts", () => {
+  it("cancels a preview without cancelling the optimize job or changing Review counts", async () => {
     const ctx = harness();
     ctx.store.updateJob("job-1", { status: "succeeded" });
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     expect(ctx.previews.cancel(requested.task.id)).toEqual({ ok: true });
     expect(ctx.store.getPreviewTask(requested.task.id)?.status).toBe("cancelled");
@@ -361,7 +399,7 @@ describe("preview task lifecycle", () => {
         waiters.push(resolve);
       }),
     });
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     ctx.previews.claimForNode("worker-1", 1);
     now = 1_000 + PREVIEW_LEASE_MS + 1;
@@ -386,7 +424,7 @@ describe("preview task lifecycle", () => {
         now += ms;
       },
     });
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     ctx.previews.claimForNode("worker-1", 1);
     expect(ctx.store.reservationsForReview("rev-1").length).toBeGreaterThan(0);
@@ -404,7 +442,7 @@ describe("preview task lifecycle", () => {
         waiters.push(resolve);
       }),
     });
-    const requested = ctx.previews.request("rev-1");
+    const requested = await ctx.previews.request("rev-1");
     if (!("accepted" in requested)) return;
     const claimed = ctx.previews.claimForNode("worker-1", 1);
     const discarding = ctx.jobs.discard("rev-1");
@@ -415,5 +453,43 @@ describe("preview task lifecycle", () => {
     for (const wake of waiters) wake();
     await discarding;
     expect(ctx.store.getReview("rev-1")).toBeUndefined();
+  });
+
+  it("reuses one task for the same interval and tracks, and makes a new pair when audio changes", async () => {
+    const ctx = harness();
+    const first = await ctx.previews.request("rev-1", { startMs: 1_000, originalAudioIndex: 1, sidecarAudioIndex: 1 });
+    const again = await ctx.previews.request("rev-1", { startMs: 1_000, originalAudioIndex: 1, sidecarAudioIndex: 1 });
+    if (!("accepted" in first) || !("accepted" in again)) return;
+    expect(again.task.id).toBe(first.task.id);
+    const other = await ctx.previews.request("rev-1", { startMs: 1_000, originalAudioIndex: 1, sidecarAudioIndex: 2 });
+    if (!("accepted" in other)) return;
+    expect(other.task.id).not.toBe(first.task.id);
+  });
+
+  it("returns 400 for an invalid timestamp and unavailable for HDR", async () => {
+    const ctx = harness();
+    const invalid = await ctx.previews.request("rev-1", { startMs: 60_000 });
+    expect(invalid).toMatchObject({ status: 400 });
+    const hdr = harness({ probeMedia: async () => sdrMedia({ hdr: "hdr10" }) });
+    const blocked = await hdr.previews.request("rev-1");
+    if (!("accepted" in blocked)) return;
+    expect(blocked.task.status).toBe("failed");
+    expect(blocked.task.error).toBe(PREVIEW_HDR_UNAVAILABLE);
+  });
+
+  it("serves published clips from a server-owned path and invalidates after a source change", async () => {
+    const ctx = harness();
+    const requested = await ctx.previews.request("rev-1");
+    if (!("accepted" in requested)) return;
+    const claimed = ctx.previews.claimForNode("worker-1", 1);
+    publishPair(ctx.dir, requested.task.id, "ORIGCLIP!!", "FINCLIP!!!");
+    expect(ctx.previews.complete(requested.task.id, claimed[0]!.leaseToken)).toEqual({ ok: true });
+    const clip = ctx.previews.openClip("rev-1", requested.task.id, "original");
+    if ("error" in clip) throw new Error(clip.error);
+    expect(readFileSync(clip.path, "utf8")).toBe("ORIGCLIP!!");
+    clip.release();
+    writeFileSync(ctx.sourcePath, "CHANGED!!");
+    const stale = ctx.previews.openClip("rev-1", requested.task.id, "original");
+    expect(stale).toMatchObject({ error: PREVIEW_STALE, status: 409 });
   });
 });

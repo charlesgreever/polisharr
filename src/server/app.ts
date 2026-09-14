@@ -4,10 +4,11 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import argon2 from "argon2";
 import { readAppVersion, type Env } from "./env.ts";
@@ -98,9 +99,14 @@ import { WorkerLoop } from "./worker-loop.ts";
 import {
   PreviewService,
   publicPreviewStatus,
-  stubPreviewRenderer,
   type PreviewRenderer,
 } from "./review-previews.ts";
+import {
+  createPreviewRenderer,
+  parseByteRange,
+  probePreviewMedia,
+  type PreviewMediaInfo,
+} from "./preview-render.ts";
 
 const execFileAsync = promisify(execFile);
 const SESSION_TTL = 14 * 24 * 60 * 60 * 1000;
@@ -147,6 +153,7 @@ export type AppOptions = {
   previewRenderer?: PreviewRenderer;
   previewSmoke?: PreviewSmokeCheck;
   previewCacheFits?: () => boolean;
+  previewProbe?: (path: string) => Promise<PreviewMediaInfo>;
 };
 
 export function createApp(opts: AppOptions) {
@@ -201,6 +208,12 @@ export function createApp(opts: AppOptions) {
   async function resolvePreviewCapability() {
     return previewCapabilityFn();
   }
+  const previewRenderer = opts.previewRenderer ?? createPreviewRenderer({
+    ffmpeg: opts.env.ffmpeg,
+    ffprobe: opts.env.ffprobe,
+    encoder: async () => (await resolvePreviewCapability())?.h264Encoder ?? null,
+    vaapiDevice: async () => (await hardware()).vaapiDevice,
+  });
   const previews = new PreviewService({
     store,
     clock: opts.clock,
@@ -210,8 +223,10 @@ export function createApp(opts: AppOptions) {
     },
     isMutating: (path) => jobs.isPathMutating(path),
     cacheFits: opts.previewCacheFits,
-    renderer: opts.previewRenderer ?? stubPreviewRenderer,
+    renderer: previewRenderer,
     localNodeId: () => store.localNodeId(),
+    probeMedia: opts.previewProbe ?? ((path) => probePreviewMedia(opts.env.ffprobe, path)),
+    reviewPath: () => store.getSettings().reviewPath,
   });
   jobs.attachPreviews(previews);
   const isWorker = opts.env.role === "worker";
@@ -258,7 +273,7 @@ export function createApp(opts: AppOptions) {
     optimizer,
     tools: { ffmpeg: opts.env.ffmpeg, ffprobe: opts.env.ffprobe, mkvmerge: opts.env.mkvmerge },
     previewCapability: resolvePreviewCapability,
-    previewRenderer: opts.previewRenderer ?? stubPreviewRenderer,
+    previewRenderer,
   });
 
   const app = new Hono();
@@ -1629,10 +1644,11 @@ export function createApp(opts: AppOptions) {
   app.post("/api/review/:id/previews", async (c) => {
     const blocked = gateOptimize();
     if (blocked) return c.json({ error: blocked }, 403);
-    const result = previews.request(c.req.param("id"), await readJson(c));
-    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    const result = await previews.request(c.req.param("id"), await readJson(c));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
     const node = result.task.nodeId ? store.getNode(result.task.nodeId) : undefined;
-    return c.json(publicPreviewStatus(result.task, node?.name ?? null), 202);
+    const body = publicPreviewStatus(result.task, node?.name ?? null);
+    return c.json(body, result.task.status === "ready" ? 200 : 202);
   });
 
   app.get("/api/review/:id/previews/:taskId", (c) => {
@@ -1641,6 +1657,16 @@ export function createApp(opts: AppOptions) {
     const task = previews.status(c.req.param("taskId"));
     if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
     return c.json(publicPreviewStatus(task, task.nodeName));
+  });
+
+  app.delete("/api/review/:id/previews/:previewId", (c) => {
+    const review = store.getReview(c.req.param("id"));
+    if (!review) return c.json({ error: "That review item is gone." }, 404);
+    const task = store.getPreviewTask(c.req.param("previewId"));
+    if (!task || task.reviewId !== review.id) return c.json({ error: "That preview task does not exist." }, 404);
+    const result = task.status === "ready" ? previews.evict(task.id) : previews.cancel(task.id);
+    if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
+    return c.json({ ok: true });
   });
 
   app.post("/api/review/:id/previews/:taskId/cancel", (c) => {
@@ -1652,6 +1678,47 @@ export function createApp(opts: AppOptions) {
     if ("error" in result) return c.json({ error: result.error }, result.status as 404 | 409);
     return c.json({ ok: true });
   });
+
+  const servePreviewClip = async (c: Context) => {
+    const user = await currentUser(c);
+    if (!user) return c.json({ error: "Sign in to continue." }, 401);
+    const handle = previews.openClip(c.req.param("id") ?? "", c.req.param("previewId") ?? "", c.req.param("side") ?? "");
+    if ("error" in handle) return c.json({ error: handle.error }, handle.status as 404 | 409 | 429);
+    const range = parseByteRange(c.req.header("range"), handle.size);
+    if (!range.ok) {
+      handle.release();
+      return c.body(null, 416, {
+        "Content-Range": `bytes */${handle.size}`,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+      });
+    }
+    const length = range.end - range.start + 1;
+    const headers: Record<string, string> = {
+      "Content-Type": "video/mp4",
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, no-store",
+      "Content-Length": String(length),
+    };
+    const partial = Boolean(c.req.header("range"));
+    if (partial) headers["Content-Range"] = `bytes ${range.start}-${range.end}/${handle.size}`;
+    if (c.req.method === "HEAD") {
+      handle.release();
+      return c.body(null, partial ? 206 : 200, headers);
+    }
+    const file = createReadStream(handle.path, { start: range.start, end: range.end });
+    const release = () => handle.release();
+    file.on("close", release);
+    file.on("error", release);
+    c.req.raw.signal?.addEventListener("abort", () => {
+      file.destroy();
+      release();
+    });
+    return new Response(Readable.toWeb(file) as ReadableStream, { status: partial ? 206 : 200, headers });
+  };
+
+  app.get("/api/review/:id/previews/:previewId/clips/:side", (c) => servePreviewClip(c));
+  app.on("HEAD", "/api/review/:id/previews/:previewId/clips/:side", (c) => servePreviewClip(c));
 
   app.post("/api/review/:id/requeue", async (c) => {
     const blocked = gateOptimize();

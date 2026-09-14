@@ -2434,6 +2434,17 @@ describe("public HTTP behavior", () => {
       env,
       hardware: async () => hw,
       previewCapability: async () => null,
+      previewProbe: async () => ({
+        durationMs: 60_000,
+        width: 1920,
+        height: 1080,
+        sarNum: 1,
+        sarDen: 1,
+        hdr: "none",
+        videoIndex: 0,
+        audio: [{ index: 1, language: "eng", channels: 6, codec: "ac3", default: true }],
+        hasVideo: true,
+      }),
     });
     created.jobs.stop();
     created.previews.stop();
@@ -2527,6 +2538,11 @@ describe("public HTTP behavior", () => {
       body: JSON.stringify({ leaseToken: claimedBody.previews[0]?.leaseToken, sidecarPath: "/nope.mkv", output: {} }),
     });
     expect(done.status).toBe(400);
+    const pairDir = join(dir, "review", ".previews", queuedBody.id);
+    mkdirSync(pairDir, { recursive: true });
+    writeFileSync(join(pairDir, "original.mp4"), "ORIGCLIP!!");
+    writeFileSync(join(pairDir, "finished.mp4"), "FINCLIP!!!");
+    writeFileSync(join(pairDir, ".published"), "");
     const ready = await created.app.request(`/api/cluster/previews/${queuedBody.id}/complete`, {
       method: "POST",
       headers: { Authorization: "Bearer cluster-secret" },
@@ -2536,6 +2552,35 @@ describe("public HTTP behavior", () => {
     const status = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}`, { headers });
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({ status: "ready", nodeId: "worker-1", nodeName: "5090" });
+    const clip = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, { headers });
+    expect(clip.status).toBe(200);
+    expect(clip.headers.get("content-type")).toBe("video/mp4");
+    expect(clip.headers.get("cache-control")).toBe("private, no-store");
+    expect(await clip.text()).toBe("ORIGCLIP!!");
+    const ranged = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, {
+      headers: { ...headers, Range: "bytes=0-3" },
+    });
+    expect(ranged.status).toBe(206);
+    expect(await ranged.text()).toBe("ORIG");
+    const head = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/finished`, {
+      method: "HEAD",
+      headers,
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String("FINCLIP!!!".length));
+    expect(await head.text()).toBe("");
+    const badRange = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, {
+      headers: { ...headers, Range: "bytes=500-600" },
+    });
+    expect(badRange.status).toBe(416);
+    const anon = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`);
+    expect(anon.status).toBe(401);
+    const traversal = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/secret`, { headers });
+    expect(traversal.status).toBe(404);
+    const loggedOut = await created.app.request("/api/auth/logout", { method: "POST", headers });
+    expect(loggedOut.status).toBe(200);
+    const afterLogout = await created.app.request(`/api/review/rev-1/previews/${queuedBody.id}/clips/original`, { headers });
+    expect(afterLogout.status).toBe(401);
   });
 
   it("removes a dead worker and refuses to remove this computer or a node with waiting work", async () => {

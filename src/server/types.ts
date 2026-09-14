@@ -18,11 +18,38 @@ export type PreviewWaitReason = "node" | "playback" | "input_lock" | "cache_capa
 export type PreviewH264Encoder = "h264_nvenc" | "h264_vaapi" | "h264_videotoolbox";
 export type PreviewAdmissionKind = "optimize" | "preview";
 
+export type PreviewPreset = "start" | "middle" | "end" | "custom";
+
 export type PreviewRequest = {
   startMs: number;
   durationMs: number;
   originalAudioIndex: number | null;
   sidecarAudioIndex: number | null;
+  preset?: PreviewPreset | null;
+};
+
+export type PreviewTransformLabels = {
+  scale: string;
+  audio: string;
+  color: string;
+  warnings: string[];
+};
+
+export type PreviewArtifact = {
+  originalClipId: string;
+  finishedClipId: string;
+  originalFile: string;
+  finishedFile: string;
+  interval: { startMs: number; durationMs: number };
+  originalAudioIndex: number;
+  sidecarAudioIndex: number;
+  originalVideoIndex?: number;
+  sidecarVideoIndex?: number;
+  width: number;
+  height: number;
+  finishedWidth: number;
+  finishedHeight: number;
+  labels: PreviewTransformLabels;
 };
 
 export type PreviewTask = {
@@ -38,6 +65,11 @@ export type PreviewTask = {
   request: PreviewRequest;
   sourceRevision: PlaybackFileRevision | null;
   sidecarRevision: PlaybackFileRevision | null;
+  cacheKey: string | null;
+  bytes: number;
+  expiresAt: number | null;
+  lastUsedAt: number | null;
+  artifact: PreviewArtifact | null;
   createdAt: number;
   startedAt: number | null;
   updatedAt: number;

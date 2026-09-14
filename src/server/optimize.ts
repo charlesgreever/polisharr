@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readdir, rmdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, rmdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
@@ -34,6 +34,18 @@ export async function removeReviewArtifact(path: string): Promise<void> {
 }
 
 export const WORK_DIR_GUARD = ".in-progress";
+export const PREVIEW_DIR_NAME = ".previews";
+export const PREVIEW_PUBLISHED_MARKER = ".published";
+export const PREVIEW_ORIGINAL_FILE = "original.mp4";
+export const PREVIEW_FINISHED_FILE = "finished.mp4";
+
+export function previewRoot(reviewDir: string): string {
+  return join(reviewDir, PREVIEW_DIR_NAME);
+}
+
+export function previewPairDir(reviewDir: string, pairId: string): string {
+  return join(previewRoot(reviewDir), pairId);
+}
 
 export async function claimOptimizerWorkDir(workDir: string): Promise<void> {
   // Write the guard before any encode output so a sibling leftover sweep cannot rmdir this empty folder.
@@ -64,6 +76,41 @@ export async function cleanReviewLeftovers(reviewDir: string): Promise<void> {
   if (!reviewDir) return;
   await sweepOrphanAppleDoubles(reviewDir);
   await cleanWorkTree(join(reviewDir, ".work"));
+  await cleanPreviewTree(previewRoot(reviewDir));
+}
+
+export async function removePreviewPairDir(dir: string): Promise<void> {
+  try {
+    await rm(dir, { recursive: true, force: true });
+  } catch {
+    // Pair directory may already be gone.
+  }
+  const fork = appleDoublePath(dir);
+  if (fork) await tryUnlink(fork);
+}
+
+async function cleanPreviewTree(root: string): Promise<void> {
+  let entries: Array<{ name: string; isDirectory: () => boolean }>;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await sweepOrphanAppleDoubles(root);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(root, entry.name);
+    let names: string[] = [];
+    try {
+      names = await readdir(dir);
+    } catch {
+      continue;
+    }
+    // In-progress renders keep WORK_DIR_GUARD. Published pairs keep the marker.
+    if (names.includes(WORK_DIR_GUARD) || names.includes(PREVIEW_PUBLISHED_MARKER)) continue;
+    await removePreviewPairDir(dir);
+  }
+  await removeEmptyDir(root);
 }
 
 async function sweepOrphanAppleDoubles(dir: string): Promise<void> {

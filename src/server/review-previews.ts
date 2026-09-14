@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
   nodeCanEncode,
   nodeCanPreview,
@@ -12,13 +14,42 @@ import {
   PREVIEW_SDR_1080P_PROFILE,
   encodeNeedFromPlan,
   parsePreviewRequest,
+  type PreviewRenderPlan,
   type RemotePreviewDocument,
 } from "./cluster.ts";
-import { canonicalFilePath, readFileRevision } from "./file-revision.ts";
+import { canonicalFilePath, readFileRevision, revisionsMatch } from "./file-revision.ts";
 import { isIsoPath } from "./inspect.ts";
+import {
+  PREVIEW_CACHE_MAX_BYTES,
+  PREVIEW_CACHE_TTL_MS,
+  PREVIEW_MAX_STREAM_PINS,
+  PREVIEW_MIN_DURATION_MS,
+  PREVIEW_MISSING_STREAMS,
+  PREVIEW_PAIR_INCOMPLETE,
+  PREVIEW_PAIR_RESERVE_BYTES,
+  PREVIEW_SHORT_DURATION,
+  defaultPreviewAudio,
+  matchedPreviewSize,
+  mediaFromInspection,
+  normalizePreviewInterval,
+  ownedPreviewPath,
+  previewCacheKey,
+  previewColorDecision,
+  previewFileName,
+  publishedPairBytesSync,
+  publishedPairValidSync,
+  resolvePreviewAudioIndex,
+  revisionKey,
+  transformLabels,
+  type PreviewMediaInfo,
+  type PreviewRenderer,
+  type PreviewRendererControl,
+} from "./preview-render.ts";
+import { previewPairDir, previewRoot, removePreviewPairDir } from "./optimize.ts";
 import type { Store } from "./store.ts";
 import type {
   PreviewAdmissionKind,
+  PreviewArtifact,
   PreviewTask,
   PreviewTaskStatus,
   PreviewWaitReason,
@@ -35,17 +66,12 @@ export const PREVIEW_PUBLICATION_REVOKED = "Preview publication was withdrawn.";
 export const PREVIEW_REVIEW_BUSY = "This result is being replaced or discarded.";
 export const PREVIEW_REVIEW_GONE = "That review item is gone.";
 export const PREVIEW_ISO_UNAVAILABLE = "ISO sources cannot generate preview clips in this release.";
+export const PREVIEW_CLIP_GONE = "That preview clip is gone.";
+export const PREVIEW_CLIP_BUSY = "That preview is still generating.";
+export const PREVIEW_STALE = "The original or finished copy changed. Request a new preview.";
+export const PREVIEW_EVICT_PINNED = "That preview is still playing.";
 
-export type PreviewRendererControl = {
-  isCancelled: () => boolean;
-  onProgress: (progress: number) => void;
-  registerChild: (child: { kill: (signal?: NodeJS.Signals | number) => boolean | void }) => void;
-};
-
-export type PreviewRenderer = (
-  task: RemotePreviewDocument,
-  control: PreviewRendererControl,
-) => Promise<{ ok: true } | { ok: false; error: string }>;
+export type { PreviewRenderer, PreviewRendererControl };
 
 export async function stubPreviewRenderer(): Promise<{ ok: true }> {
   return { ok: true };
@@ -75,6 +101,8 @@ export type PreviewServiceOptions = {
   cacheFits?: () => boolean;
   renderer?: PreviewRenderer;
   localNodeId?: () => string;
+  probeMedia?: (path: string) => Promise<PreviewMediaInfo>;
+  reviewPath?: () => string;
 };
 
 export function nextAdmissionKind(input: {
@@ -93,11 +121,20 @@ export class PreviewService {
   private stopped = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private localRunning = new Set<string>();
+  private cacheReservations = new Map<string, number>();
+  private streamPins = new Map<string, number>();
+  private renderPlans = new Map<string, PreviewRenderPlan>();
 
   constructor(private readonly opts: PreviewServiceOptions) {}
 
   start(): void {
     this.opts.store.expirePreviewLeases(this.now());
+    const interrupted = this.opts.store.recoverInterruptedPreviews();
+    for (const id of interrupted) {
+      this.cacheReservations.delete(id);
+      void removePreviewPairDir(this.pairDir(id));
+    }
+    void this.reconcileCache();
     void this.tick();
     this.timer = setInterval(() => void this.tick(), 500);
     this.timer.unref?.();
@@ -138,33 +175,94 @@ export class PreviewService {
     this.opts.store.recordAdmissionKind(nodeId, kind, this.now());
   }
 
-  request(
+  async request(
     reviewId: string,
     rawRequest: unknown = {},
-  ): { accepted: true; task: PreviewTask } | { error: string; status: number } {
+  ): Promise<{ accepted: true; task: PreviewTask } | { error: string; status: number }> {
     const review = this.opts.store.getReview(reviewId);
     if (!review) return { error: PREVIEW_REVIEW_GONE, status: 404 };
     if (review.status === "keeping" || review.status === "discarding") {
       return { error: PREVIEW_REVIEW_BUSY, status: 409 };
     }
-    if (isIsoPath(review.sourcePath)) {
-      const id = randomUUID();
-      const now = this.now();
-      this.opts.store.insertPreviewTask({
-        id,
-        reviewId,
-        status: "failed",
-        error: PREVIEW_ISO_UNAVAILABLE,
-        request: parsePreviewRequest(rawRequest),
-        createdAt: now,
-      });
-      return { accepted: true, task: this.opts.store.getPreviewTask(id)! };
+    const parsed = parsePreviewRequest(rawRequest);
+    if (isIsoPath(review.sourcePath) || isIsoPath(review.sidecarPath)) {
+      return this.failClosed(reviewId, parsed, PREVIEW_ISO_UNAVAILABLE);
     }
-    const request = parsePreviewRequest(rawRequest);
+    const media = await this.probePair(review.sourcePath, review.sidecarPath, review);
+    if ("error" in media) return this.failClosed(reviewId, parsed, media.error);
+    const commonDurationMs = Math.min(media.original.durationMs, media.finished.durationMs);
+    if (commonDurationMs < PREVIEW_MIN_DURATION_MS) {
+      return this.failClosed(reviewId, parsed, PREVIEW_SHORT_DURATION);
+    }
+    if (!media.original.hasVideo || !media.finished.hasVideo || media.original.audio.length === 0 || media.finished.audio.length === 0) {
+      return this.failClosed(reviewId, parsed, PREVIEW_MISSING_STREAMS);
+    }
+    const color = previewColorDecision(media.original, media.finished);
+    if (!color.ok) return this.failClosed(reviewId, parsed, color.error);
+    const interval = normalizePreviewInterval(parsed, commonDurationMs);
+    if (!interval.ok) return { error: interval.error, status: 400 };
+    const fallback = defaultPreviewAudio(media.original.audio, media.finished.audio);
+    const originalAudioIndex = resolvePreviewAudioIndex(media.original.audio, parsed.originalAudioIndex, fallback.originalAudioIndex);
+    const sidecarAudioIndex = resolvePreviewAudioIndex(media.finished.audio, parsed.sidecarAudioIndex, fallback.sidecarAudioIndex);
+    if (parsed.originalAudioIndex != null && originalAudioIndex == null) return { error: "That audio track is not on the original copy.", status: 400 };
+    if (parsed.sidecarAudioIndex != null && sidecarAudioIndex == null) return { error: "That audio track is not on the finished copy.", status: 400 };
+    if (originalAudioIndex == null || sidecarAudioIndex == null) {
+      return this.failClosed(reviewId, parsed, PREVIEW_MISSING_STREAMS);
+    }
     const sourceRevision = readFileRevision(review.sourcePath);
     const sidecarRevision = readFileRevision(review.sidecarPath);
+    const request = { ...parsed, startMs: interval.startMs, durationMs: interval.durationMs, originalAudioIndex, sidecarAudioIndex };
+    const cacheKey = previewCacheKey({
+      reviewId,
+      sourceRevision: revisionKey(sourceRevision),
+      sidecarRevision: revisionKey(sidecarRevision),
+      startMs: interval.startMs,
+      durationMs: interval.durationMs,
+      originalAudioIndex,
+      sidecarAudioIndex,
+    });
+    const reusable = this.opts.store.findReusablePreview(reviewId, cacheKey);
+    if (reusable) {
+      if (reusable.status === "ready" && !this.pairStillValid(reusable)) {
+        this.expirePair(reusable.id, "The cached preview is no longer valid.");
+      } else {
+        this.touch(reusable.id);
+        return { accepted: true, task: this.opts.store.getPreviewTask(reusable.id)! };
+      }
+    }
+    const size = matchedPreviewSize(media.original, media.finished);
+    const labels = transformLabels({ size, color: "sdr" });
+    const artifact: PreviewArtifact = {
+      originalClipId: randomUUID(),
+      finishedClipId: randomUUID(),
+      originalFile: previewFileName("original"),
+      finishedFile: previewFileName("finished"),
+      interval: { startMs: interval.startMs, durationMs: interval.durationMs },
+      originalAudioIndex,
+      sidecarAudioIndex,
+      originalVideoIndex: media.original.videoIndex,
+      sidecarVideoIndex: media.finished.videoIndex,
+      width: size.original.width,
+      height: size.original.height,
+      finishedWidth: size.finished.width,
+      finishedHeight: size.finished.height,
+      labels,
+    };
     const id = randomUUID();
     const now = this.now();
+    this.renderPlans.set(id, {
+      cacheDir: this.pairDir(id),
+      startMs: interval.startMs,
+      durationMs: interval.durationMs,
+      originalVideoIndex: media.original.videoIndex,
+      sidecarVideoIndex: media.finished.videoIndex,
+      originalAudioIndex,
+      sidecarAudioIndex,
+      originalWidth: size.original.width,
+      originalHeight: size.original.height,
+      finishedWidth: size.finished.width,
+      finishedHeight: size.finished.height,
+    });
     if (!this.hasCapablePreviewNode(now)) {
       this.opts.store.insertPreviewTask({
         id,
@@ -174,6 +272,8 @@ export class PreviewService {
         request,
         sourceRevision,
         sidecarRevision,
+        cacheKey,
+        artifact,
         createdAt: now,
       });
       return { accepted: true, task: this.opts.store.getPreviewTask(id)! };
@@ -184,6 +284,8 @@ export class PreviewService {
       request,
       sourceRevision,
       sidecarRevision,
+      cacheKey,
+      artifact,
       createdAt: now,
     });
     this.refreshQueuedWaitReasons();
@@ -194,16 +296,24 @@ export class PreviewService {
   cancel(id: string): { ok: true } | { error: string; status: number } {
     const task = this.opts.store.getPreviewTask(id);
     if (!task) return { error: "That preview task does not exist.", status: 404 };
-    if (task.status === "ready" || task.status === "failed" || task.status === "cancelled" || task.status === "expired") {
+    if (task.status === "ready") return this.evict(id);
+    if (task.status === "failed" || task.status === "cancelled" || task.status === "expired") {
       return { error: "Finished preview tasks cannot be cancelled.", status: 409 };
     }
     const now = this.now();
-    if (task.status === "queued") {
-      this.opts.store.updatePreviewTask(id, { status: "cancelled", waitReason: null, updatedAt: now });
-      this.opts.store.releasePreviewReservations(id);
-    } else {
-      this.opts.store.updatePreviewTask(id, { status: "cancelled", waitReason: null, updatedAt: now });
-    }
+    this.opts.store.updatePreviewTask(id, { status: "cancelled", waitReason: null, updatedAt: now });
+    this.opts.store.releasePreviewReservations(id);
+    this.releaseReservation(id);
+    void this.removePairFiles(id);
+    return { ok: true };
+  }
+
+  evict(id: string): { ok: true } | { error: string; status: number } {
+    const task = this.opts.store.getPreviewTask(id);
+    if (!task) return { error: "That preview task does not exist.", status: 404 };
+    if (task.status !== "ready") return { error: "Only an idle cached preview can be removed.", status: 409 };
+    if ((this.streamPins.get(id) ?? 0) > 0) return { error: PREVIEW_EVICT_PINNED, status: 409 };
+    this.expirePair(id, null);
     return { ok: true };
   }
 
@@ -233,7 +343,7 @@ export class PreviewService {
       this.opts.store.updatePreviewTask(queued.id, { waitReason: "input_lock", updatedAt: this.now() });
       return [];
     }
-    if (this.opts.cacheFits && !this.opts.cacheFits()) {
+    if (!this.cacheHasRoom()) {
       this.opts.store.updatePreviewTask(queued.id, { waitReason: "cache_capacity", updatedAt: this.now() });
       return [];
     }
@@ -245,7 +355,9 @@ export class PreviewService {
     );
     if (!claimed) return [];
     this.recordAdmission(nodeId, "preview");
+    this.reserveCache(claimed.id);
     const leaseUntil = claimed.leaseUntil ?? this.now() + PREVIEW_LEASE_MS;
+    const render = this.renderPlans.get(claimed.id) ?? this.planFromTask(claimed);
     return [{
       kind: "preview",
       protocolVersion: PREVIEW_PROTOCOL_VERSION,
@@ -258,6 +370,8 @@ export class PreviewService {
       request: claimed.request,
       profileId: PREVIEW_SDR_1080P_PROFILE,
       nodeId,
+      cacheDir: this.pairDir(claimed.id),
+      render,
     }];
   }
 
@@ -289,15 +403,26 @@ export class PreviewService {
     }
     if (!this.opts.store.previewLeaseMatches(id, leaseToken)) return { error: PREVIEW_LEASE_INVALID, status: 409 };
     if (task.status !== "running") return { error: PREVIEW_LEASE_INVALID, status: 409 };
+    const dir = this.pairDir(id);
+    if (!publishedPairValidSync(dir)) {
+      this.fail(id, leaseToken, PREVIEW_PAIR_INCOMPLETE);
+      return { error: PREVIEW_PAIR_INCOMPLETE, status: 409 };
+    }
+    const now = this.now();
+    const bytes = publishedPairBytesSync(dir);
     this.opts.store.updatePreviewTask(id, {
       status: "ready",
       waitReason: null,
       leaseToken: null,
       leaseUntil: null,
       error: null,
-      updatedAt: this.now(),
+      bytes,
+      expiresAt: now + PREVIEW_CACHE_TTL_MS,
+      lastUsedAt: now,
+      updatedAt: now,
     });
     this.opts.store.releasePreviewReservations(id);
+    this.cacheReservations.set(id, bytes);
     return { ok: true };
   }
 
@@ -320,6 +445,8 @@ export class PreviewService {
       updatedAt: this.now(),
     });
     this.opts.store.releasePreviewReservations(id);
+    this.releaseReservation(id);
+    void this.removePairFiles(id);
     return { ok: true };
   }
 
@@ -327,6 +454,7 @@ export class PreviewService {
     const now = this.now();
     this.opts.store.revokePreviewPublication(reviewId, now);
     this.opts.store.cancelPreviewTasksForReview(reviewId, now);
+    this.invalidateReviewPairs(reviewId);
   }
 
   async withdrawAndWait(reviewId: string): Promise<void> {
@@ -346,6 +474,7 @@ export class PreviewService {
   }
 
   forgetReview(reviewId: string): void {
+    this.invalidateReviewPairs(reviewId);
     this.opts.store.deletePreviewTasksForReview(reviewId);
   }
 
@@ -452,7 +581,7 @@ export class PreviewService {
       let reason: PreviewWaitReason = "node";
       if (this.opts.isMutating?.(canonicalFilePath(review.sourcePath)) || this.opts.isMutating?.(canonicalFilePath(review.sidecarPath))) {
         reason = "input_lock";
-      } else if (this.opts.cacheFits && !this.opts.cacheFits()) {
+      } else if (!this.cacheHasRoom()) {
         reason = "cache_capacity";
       } else if (this.opts.store.runningPreviewCount() >= PREVIEW_MAX_GLOBAL) {
         reason = "node";
@@ -476,6 +605,197 @@ export class PreviewService {
   private now(): number {
     return this.opts.clock?.() ?? Date.now();
   }
+
+  openClip(
+    reviewId: string,
+    previewId: string,
+    side: string,
+  ): { path: string; size: number; release: () => void } | { error: string; status: number } {
+    if (side !== "original" && side !== "finished") return { error: PREVIEW_CLIP_GONE, status: 404 };
+    const review = this.opts.store.getReview(reviewId);
+    if (!review) return { error: PREVIEW_REVIEW_GONE, status: 404 };
+    const task = this.opts.store.getPreviewTask(previewId);
+    if (!task || task.reviewId !== reviewId) return { error: "That preview task does not exist.", status: 404 };
+    if (task.status === "queued" || task.status === "running") return { error: PREVIEW_CLIP_BUSY, status: 409 };
+    if (task.status !== "ready" || !task.publicationAllowed) return { error: PREVIEW_CLIP_GONE, status: 404 };
+    if (!this.pairStillValid(task)) {
+      this.expirePair(task.id, PREVIEW_STALE);
+      return { error: PREVIEW_STALE, status: 409 };
+    }
+    const root = previewRoot(this.reviewDir());
+    const owned = ownedPreviewPath(root, join(this.pairDir(task.id), previewFileName(side)));
+    if (!owned) return { error: PREVIEW_CLIP_GONE, status: 404 };
+    const totalPins = [...this.streamPins.values()].reduce((sum, count) => sum + count, 0);
+    if (totalPins >= PREVIEW_MAX_STREAM_PINS) return { error: "Too many preview clips are open.", status: 429 };
+    this.streamPins.set(task.id, (this.streamPins.get(task.id) ?? 0) + 1);
+    this.touch(task.id);
+    let released = false;
+    return {
+      path: owned,
+      size: statSync(owned).size,
+      release: () => {
+        if (released) return;
+        released = true;
+        const next = (this.streamPins.get(task.id) ?? 1) - 1;
+        if (next <= 0) this.streamPins.delete(task.id);
+        else this.streamPins.set(task.id, next);
+      },
+    };
+  }
+
+  private failClosed(
+    reviewId: string,
+    request: ReturnType<typeof parsePreviewRequest>,
+    error: string,
+  ): { accepted: true; task: PreviewTask } {
+    const id = randomUUID();
+    const now = this.now();
+    this.opts.store.insertPreviewTask({
+      id,
+      reviewId,
+      status: "failed",
+      error,
+      request,
+      createdAt: now,
+    });
+    return { accepted: true, task: this.opts.store.getPreviewTask(id)! };
+  }
+
+  private async probePair(
+    sourcePath: string,
+    sidecarPath: string,
+    review: { itemId: string; source: { durationSec: number }; sidecar: { durationSec: number } },
+  ): Promise<{ original: PreviewMediaInfo; finished: PreviewMediaInfo } | { error: string }> {
+    try {
+      if (this.opts.probeMedia) {
+        return { original: await this.opts.probeMedia(sourcePath), finished: await this.opts.probeMedia(sidecarPath) };
+      }
+      const report = this.opts.store.getInspection(review.itemId);
+      if (!report) return { error: PREVIEW_MISSING_STREAMS };
+      return {
+        original: mediaFromInspection(report, review.source.durationSec),
+        finished: mediaFromInspection(report, review.sidecar.durationSec),
+      };
+    } catch {
+      return { error: PREVIEW_MISSING_STREAMS };
+    }
+  }
+
+  private pairDir(taskId: string): string {
+    return previewPairDir(this.reviewDir(), taskId);
+  }
+
+  private reviewDir(): string {
+    return this.opts.reviewPath?.() ?? this.opts.store.getSettings().reviewPath;
+  }
+
+  private cacheHasRoom(): boolean {
+    if (this.opts.cacheFits) return this.opts.cacheFits();
+    this.evictIdle();
+    return this.cacheBytes() + PREVIEW_PAIR_RESERVE_BYTES <= PREVIEW_CACHE_MAX_BYTES;
+  }
+
+  private cacheBytes(): number {
+    const published = this.opts.store.previewCacheBytes();
+    let reserved = 0;
+    for (const [id, bytes] of this.cacheReservations) {
+      const task = this.opts.store.getPreviewTask(id);
+      if (task?.status === "ready") continue;
+      reserved += bytes;
+    }
+    return published + reserved;
+  }
+
+  private reserveCache(taskId: string): void {
+    this.evictIdle();
+    this.cacheReservations.set(taskId, PREVIEW_PAIR_RESERVE_BYTES);
+  }
+
+  private releaseReservation(taskId: string): void {
+    this.cacheReservations.delete(taskId);
+  }
+
+  private evictIdle(): void {
+    const now = this.now();
+    for (const task of this.opts.store.readyPreviewTasks()) {
+      if ((this.streamPins.get(task.id) ?? 0) > 0) continue;
+      if (task.expiresAt != null && task.expiresAt <= now) this.expirePair(task.id, null);
+    }
+    if (this.opts.cacheFits) return;
+    while (this.cacheBytes() + PREVIEW_PAIR_RESERVE_BYTES > PREVIEW_CACHE_MAX_BYTES) {
+      const idle = this.opts.store.readyPreviewTasks().find((task) => (this.streamPins.get(task.id) ?? 0) === 0);
+      if (!idle) break;
+      this.expirePair(idle.id, null);
+    }
+  }
+
+  private expirePair(id: string, error: string | null): void {
+    this.opts.store.updatePreviewTask(id, {
+      status: "expired",
+      error,
+      waitReason: null,
+      bytes: 0,
+      expiresAt: null,
+      updatedAt: this.now(),
+    });
+    this.releaseReservation(id);
+    void this.removePairFiles(id);
+  }
+
+  private touch(id: string): void {
+    this.opts.store.updatePreviewTask(id, { lastUsedAt: this.now(), updatedAt: this.now() });
+  }
+
+  private pairStillValid(task: PreviewTask): boolean {
+    const review = this.opts.store.getReview(task.reviewId);
+    if (!review) return false;
+    if (task.sourceRevision && !revisionsMatch(task.sourceRevision, readFileRevision(review.sourcePath))) return false;
+    if (task.sidecarRevision && !revisionsMatch(task.sidecarRevision, readFileRevision(review.sidecarPath))) return false;
+    return publishedPairValidSync(this.pairDir(task.id));
+  }
+
+  private async removePairFiles(id: string): Promise<void> {
+    this.renderPlans.delete(id);
+    await removePreviewPairDir(this.pairDir(id));
+  }
+
+  private invalidateReviewPairs(reviewId: string): void {
+    for (const task of this.opts.store.listPreviewTasks(reviewId)) {
+      this.releaseReservation(task.id);
+      void this.removePairFiles(task.id);
+      if (task.status === "ready") {
+        this.opts.store.updatePreviewTask(task.id, { status: "expired", bytes: 0, updatedAt: this.now() });
+      }
+    }
+  }
+
+  private async reconcileCache(): Promise<void> {
+    const root = previewRoot(this.reviewDir());
+    for (const task of this.opts.store.listPreviewTasks()) {
+      if (task.status !== "ready") continue;
+      if (publishedPairValidSync(this.pairDir(task.id))) continue;
+      this.expirePair(task.id, "The cached preview is no longer valid.");
+    }
+    if (!existsSync(root)) return;
+  }
+
+  private planFromTask(task: PreviewTask): PreviewRenderPlan | null {
+    const artifact = task.artifact;
+    if (!artifact) return null;
+    return {
+      cacheDir: this.pairDir(task.id),
+      startMs: artifact.interval.startMs,
+      durationMs: artifact.interval.durationMs,
+      originalVideoIndex: artifact.originalVideoIndex ?? 0,
+      sidecarVideoIndex: artifact.sidecarVideoIndex ?? 0,
+      originalAudioIndex: artifact.originalAudioIndex,
+      sidecarAudioIndex: artifact.sidecarAudioIndex,
+      originalWidth: artifact.width,
+      originalHeight: artifact.height,
+      finishedWidth: artifact.finishedWidth,
+      finishedHeight: artifact.finishedHeight,
+    };
+  }
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -494,7 +814,12 @@ export function publicPreviewStatus(task: PreviewTask, nodeName: string | null):
   nodeId: string | null;
   nodeName: string | null;
   error: string | null;
+  interval: { startMs: number; durationMs: number } | null;
+  tracks: { originalAudioIndex: number | null; sidecarAudioIndex: number | null };
+  clips: { original: string; finished: string } | null;
+  transform: PreviewArtifact["labels"] | null;
 } {
+  const ready = task.status === "ready" && task.artifact;
   return {
     id: task.id,
     reviewId: task.reviewId,
@@ -503,5 +828,14 @@ export function publicPreviewStatus(task: PreviewTask, nodeName: string | null):
     nodeId: task.nodeId,
     nodeName,
     error: task.error,
+    interval: task.artifact?.interval ?? { startMs: task.request.startMs, durationMs: task.request.durationMs },
+    tracks: {
+      originalAudioIndex: task.artifact?.originalAudioIndex ?? task.request.originalAudioIndex,
+      sidecarAudioIndex: task.artifact?.sidecarAudioIndex ?? task.request.sidecarAudioIndex,
+    },
+    clips: ready
+      ? { original: task.artifact!.originalClipId, finished: task.artifact!.finishedClipId }
+      : null,
+    transform: task.artifact?.labels ?? null,
   };
 }

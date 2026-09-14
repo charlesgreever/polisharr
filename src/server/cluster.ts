@@ -177,6 +177,20 @@ export type ClusterHeartbeat = {
   runningPreviewIds: string[];
 };
 
+export type PreviewRenderPlan = {
+  cacheDir: string;
+  startMs: number;
+  durationMs: number;
+  originalVideoIndex: number;
+  sidecarVideoIndex: number;
+  originalAudioIndex: number;
+  sidecarAudioIndex: number;
+  originalWidth: number;
+  originalHeight: number;
+  finishedWidth: number;
+  finishedHeight: number;
+};
+
 export type RemotePreviewDocument = {
   kind: "preview";
   protocolVersion: number;
@@ -189,6 +203,8 @@ export type RemotePreviewDocument = {
   request: PreviewRequest;
   profileId: string;
   nodeId: string;
+  cacheDir: string;
+  render: PreviewRenderPlan | null;
 };
 
 export function parseClusterHello(value: unknown): { ok: true; hello: ClusterHello } | { ok: false; error: string } {
@@ -376,11 +392,13 @@ export function parsePreviewRequest(value: unknown): PreviewRequest {
   const raw = record(value);
   const startMs = finiteNumber(raw.startMs);
   const durationMs = finiteNumber(raw.durationMs);
+  const preset = raw.preset;
   return {
     startMs: startMs != null && startMs >= 0 ? startMs : 0,
     durationMs: durationMs != null && durationMs > 0 ? durationMs : 15_000,
     originalAudioIndex: integerOrNull(raw.originalAudioIndex),
     sidecarAudioIndex: integerOrNull(raw.sidecarAudioIndex),
+    preset: preset === "start" || preset === "middle" || preset === "end" || preset === "custom" ? preset : null,
   };
 }
 
@@ -418,7 +436,52 @@ export function parseRemotePreviewDocument(
       request: parsePreviewRequest(raw.request),
       profileId,
       nodeId,
+      cacheDir: trimString(raw.cacheDir),
+      render: parsePreviewRenderPlan(raw.render),
     },
+  };
+}
+
+function parsePreviewRenderPlan(value: unknown): PreviewRenderPlan | null {
+  const raw = record(value);
+  const cacheDir = trimString(raw.cacheDir);
+  const startMs = finiteNumber(raw.startMs);
+  const durationMs = finiteNumber(raw.durationMs);
+  const originalVideoIndex = integerOrNull(raw.originalVideoIndex);
+  const sidecarVideoIndex = integerOrNull(raw.sidecarVideoIndex);
+  const originalAudioIndex = integerOrNull(raw.originalAudioIndex);
+  const sidecarAudioIndex = integerOrNull(raw.sidecarAudioIndex);
+  const originalWidth = integerOrNull(raw.originalWidth);
+  const originalHeight = integerOrNull(raw.originalHeight);
+  const finishedWidth = integerOrNull(raw.finishedWidth);
+  const finishedHeight = integerOrNull(raw.finishedHeight);
+  if (
+    !cacheDir
+    || startMs == null
+    || durationMs == null
+    || originalVideoIndex == null
+    || sidecarVideoIndex == null
+    || originalAudioIndex == null
+    || sidecarAudioIndex == null
+    || originalWidth == null
+    || originalHeight == null
+    || finishedWidth == null
+    || finishedHeight == null
+  ) {
+    return null;
+  }
+  return {
+    cacheDir,
+    startMs,
+    durationMs,
+    originalVideoIndex,
+    sidecarVideoIndex,
+    originalAudioIndex,
+    sidecarAudioIndex,
+    originalWidth,
+    originalHeight,
+    finishedWidth,
+    finishedHeight,
   };
 }
 

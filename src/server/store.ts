@@ -16,6 +16,7 @@ import type {
   PlaybackMatchOutcome,
   PlaybackOccurrence,
   PreviewAdmissionKind,
+  PreviewArtifact,
   PreviewRequest,
   PreviewTask,
   PreviewTaskStatus,
@@ -316,7 +317,12 @@ export class Store {
         sidecar_revision TEXT,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        cache_key TEXT,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER,
+        last_used_at INTEGER,
+        artifact TEXT
       );
       CREATE INDEX IF NOT EXISTS preview_tasks_review ON preview_tasks (review_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS preview_tasks_status ON preview_tasks (status);
@@ -344,6 +350,12 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS reviews_active_sidecar
         ON reviews (sidecar_path) WHERE status IN ('waiting', 'keeping');
     `);
+    this.ensureColumn("preview_tasks", "cache_key", "TEXT");
+    this.ensureColumn("preview_tasks", "bytes", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("preview_tasks", "expires_at", "INTEGER");
+    this.ensureColumn("preview_tasks", "last_used_at", "INTEGER");
+    this.ensureColumn("preview_tasks", "artifact", "TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS preview_tasks_cache ON preview_tasks (cache_key, status)");
     this.ensureColumn("library_items", "arr_series_id", "INTEGER");
     this.ensureColumn("library_items", "arr_episode_file_id", "INTEGER");
     this.ensureColumn("library_items", "first_seen_at", "INTEGER NOT NULL DEFAULT 0");
@@ -1821,13 +1833,19 @@ export class Store {
     request: PreviewRequest;
     sourceRevision?: PlaybackFileRevision | null;
     sidecarRevision?: PlaybackFileRevision | null;
+    cacheKey?: string | null;
+    artifact?: PreviewArtifact | null;
+    bytes?: number;
+    expiresAt?: number | null;
+    lastUsedAt?: number | null;
     createdAt: number;
   }): void {
     this.db.prepare(
       `INSERT INTO preview_tasks (
          id, review_id, status, wait_reason, node_id, lease_token, lease_until, publication_allowed,
-         error, request, source_revision, sidecar_revision, created_at, started_at, updated_at
-       ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, ?, ?, ?, ?, ?, NULL, ?)`,
+         error, request, source_revision, sidecar_revision, created_at, started_at, updated_at,
+         cache_key, bytes, expires_at, last_used_at, artifact
+       ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id,
       row.reviewId,
@@ -1839,6 +1857,11 @@ export class Store {
       row.sidecarRevision ? JSON.stringify(row.sidecarRevision) : null,
       row.createdAt,
       row.createdAt,
+      row.cacheKey ?? null,
+      row.bytes ?? 0,
+      row.expiresAt ?? null,
+      row.lastUsedAt ?? null,
+      row.artifact ? JSON.stringify(row.artifact) : null,
     );
   }
 
@@ -1870,12 +1893,18 @@ export class Store {
     error: string | null;
     startedAt: number | null;
     updatedAt: number;
+    cacheKey: string | null;
+    bytes: number;
+    expiresAt: number | null;
+    lastUsedAt: number | null;
+    artifact: PreviewArtifact | null;
   }>): void {
     const current = this.getPreviewTask(id);
     if (!current) return;
     this.db.prepare(
       `UPDATE preview_tasks SET status=?, wait_reason=?, node_id=?, lease_token=?, lease_until=?,
-         publication_allowed=?, error=?, started_at=?, updated_at=? WHERE id=?`,
+         publication_allowed=?, error=?, started_at=?, updated_at=?, cache_key=?, bytes=?, expires_at=?,
+         last_used_at=?, artifact=? WHERE id=?`,
     ).run(
       patch.status ?? current.status,
       patch.waitReason === undefined ? current.waitReason : patch.waitReason,
@@ -1886,8 +1915,53 @@ export class Store {
       patch.error === undefined ? current.error : patch.error,
       patch.startedAt === undefined ? current.startedAt : patch.startedAt,
       patch.updatedAt ?? current.updatedAt,
+      patch.cacheKey === undefined ? current.cacheKey : patch.cacheKey,
+      patch.bytes === undefined ? current.bytes : patch.bytes,
+      patch.expiresAt === undefined ? current.expiresAt : patch.expiresAt,
+      patch.lastUsedAt === undefined ? current.lastUsedAt : patch.lastUsedAt,
+      (patch.artifact === undefined ? current.artifact : patch.artifact)
+        ? JSON.stringify(patch.artifact === undefined ? current.artifact : patch.artifact)
+        : null,
       id,
     );
+  }
+
+  findReusablePreview(reviewId: string, cacheKey: string): PreviewTask | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM preview_tasks
+       WHERE review_id = ? AND cache_key = ? AND status IN ('queued', 'running', 'ready')
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    ).get(reviewId, cacheKey) as Record<string, unknown> | undefined;
+    return row ? mapPreviewTask(row) : undefined;
+  }
+
+  readyPreviewTasks(): PreviewTask[] {
+    return (this.db.prepare(
+      "SELECT * FROM preview_tasks WHERE status = 'ready' ORDER BY last_used_at ASC, created_at ASC, id ASC",
+    ).all() as Record<string, unknown>[]).map(mapPreviewTask);
+  }
+
+  previewCacheBytes(): number {
+    return Number((this.db.prepare(
+      "SELECT COALESCE(SUM(bytes), 0) AS n FROM preview_tasks WHERE status = 'ready'",
+    ).get() as { n: number }).n);
+  }
+
+  recoverInterruptedPreviews(): string[] {
+    const rows = this.db.prepare(
+      "SELECT id FROM preview_tasks WHERE status = 'running'",
+    ).all() as Array<{ id: string }>;
+    this.db.prepare(
+      `UPDATE preview_tasks SET status = 'queued', wait_reason = NULL, node_id = NULL, lease_token = NULL,
+         lease_until = NULL, error = NULL, artifact = NULL, bytes = 0, expires_at = NULL
+       WHERE status = 'running'`,
+    ).run();
+    const release = this.db.prepare("DELETE FROM preview_reservations WHERE task_id = ?");
+    const tx = this.db.transaction(() => {
+      for (const row of rows) release.run(row.id);
+    });
+    tx();
+    return rows.map((row) => row.id);
   }
 
   previewLeaseMatches(id: string, token: string): boolean {
@@ -2387,9 +2461,55 @@ function mapPreviewTask(row: Record<string, unknown>): PreviewTask {
     request: parsePreviewRequest(parseJson(row.request)),
     sourceRevision: parseFileRevision(row.source_revision),
     sidecarRevision: parseFileRevision(row.sidecar_revision),
+    cacheKey: row.cache_key == null || row.cache_key === "" ? null : String(row.cache_key),
+    bytes: Number(row.bytes ?? 0),
+    expiresAt: row.expires_at == null ? null : Number(row.expires_at),
+    lastUsedAt: row.last_used_at == null ? null : Number(row.last_used_at),
+    artifact: parsePreviewArtifact(parseJson(row.artifact)),
     createdAt: Number(row.created_at),
     startedAt: row.started_at == null ? null : Number(row.started_at),
     updatedAt: Number(row.updated_at),
+  };
+}
+
+function parsePreviewArtifact(value: unknown): PreviewArtifact | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const originalClipId = typeof raw.originalClipId === "string" ? raw.originalClipId : "";
+  const finishedClipId = typeof raw.finishedClipId === "string" ? raw.finishedClipId : "";
+  const originalFile = typeof raw.originalFile === "string" ? raw.originalFile : "";
+  const finishedFile = typeof raw.finishedFile === "string" ? raw.finishedFile : "";
+  const intervalRaw = raw.interval && typeof raw.interval === "object" && !Array.isArray(raw.interval)
+    ? raw.interval as Record<string, unknown>
+    : {};
+  const startMs = typeof intervalRaw.startMs === "number" ? intervalRaw.startMs : 0;
+  const durationMs = typeof intervalRaw.durationMs === "number" ? intervalRaw.durationMs : 0;
+  const labelsRaw = raw.labels && typeof raw.labels === "object" && !Array.isArray(raw.labels)
+    ? raw.labels as Record<string, unknown>
+    : {};
+  if (!originalClipId || !finishedClipId || !originalFile || !finishedFile) return null;
+  return {
+    originalClipId,
+    finishedClipId,
+    originalFile,
+    finishedFile,
+    interval: { startMs, durationMs },
+    originalAudioIndex: typeof raw.originalAudioIndex === "number" ? raw.originalAudioIndex : 0,
+    sidecarAudioIndex: typeof raw.sidecarAudioIndex === "number" ? raw.sidecarAudioIndex : 0,
+    originalVideoIndex: typeof raw.originalVideoIndex === "number" ? raw.originalVideoIndex : undefined,
+    sidecarVideoIndex: typeof raw.sidecarVideoIndex === "number" ? raw.sidecarVideoIndex : undefined,
+    width: typeof raw.width === "number" ? raw.width : 0,
+    height: typeof raw.height === "number" ? raw.height : 0,
+    finishedWidth: typeof raw.finishedWidth === "number" ? raw.finishedWidth : 0,
+    finishedHeight: typeof raw.finishedHeight === "number" ? raw.finishedHeight : 0,
+    labels: {
+      scale: typeof labelsRaw.scale === "string" ? labelsRaw.scale : "",
+      audio: typeof labelsRaw.audio === "string" ? labelsRaw.audio : "",
+      color: typeof labelsRaw.color === "string" ? labelsRaw.color : "",
+      warnings: Array.isArray(labelsRaw.warnings)
+        ? labelsRaw.warnings.filter((row): row is string => typeof row === "string")
+        : [],
+    },
   };
 }
 

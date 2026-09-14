@@ -1466,6 +1466,37 @@ export class Store {
     });
   }
 
+  clearWaitingIntent(id: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE reviews SET status = 'pending', intent_origin = NULL, intent_requested_at = NULL,
+         wait_reason = NULL, mutation_started = 0, error = NULL
+       WHERE id = ? AND status = 'waiting' AND mutation_started = 0`,
+    ).run(id);
+    return result.changes === 1;
+  }
+
+  claimReplacementMutation(id: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE reviews SET status = 'keeping', mutation_started = 1, error = NULL
+       WHERE id = ? AND mutation_started = 0 AND status IN ('waiting', 'keeping')`,
+    ).run(id);
+    return result.changes === 1;
+  }
+
+  claimReviewDiscard(id: string): ReviewItem | undefined {
+    return this.db.transaction(() => {
+      const current = this.getReview(id);
+      if (!current) return undefined;
+      const result = this.db.prepare(
+        `UPDATE reviews SET status = 'discarding', intent_origin = NULL, intent_requested_at = NULL,
+           wait_reason = NULL, mutation_started = 0
+         WHERE id = ? AND mutation_started = 0 AND status IN ('pending', 'waiting')`,
+      ).run(id);
+      if (result.changes !== 1) return undefined;
+      return current;
+    })();
+  }
+
   deleteReview(id: string): void {
     this.db.prepare("DELETE FROM reviews WHERE id = ?").run(id);
   }

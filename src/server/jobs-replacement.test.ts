@@ -78,6 +78,7 @@ function harness(opts: {
   playback?: JobPlaybackGate;
   clock?: () => number;
   promote?: ConstructorParameters<typeof JobService>[0]["promote"];
+  localNodeId?: string;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "opt-repl-"));
   const store = new Store(join(dir, "polisharr.db"));
@@ -154,6 +155,7 @@ function harness(opts: {
     clock: opts.clock,
     playback: opts.playback,
     promote: opts.promote,
+    localNodeId: opts.localNodeId ? () => opts.localNodeId! : undefined,
   });
   services.push(jobs);
   return { dir, store, jobs, itemId, sourcePath, sidecarPath, instanceId };
@@ -561,5 +563,197 @@ describe("deferred replacement", () => {
     expect(ctx.store.getReview("rev-1")).toBeUndefined();
     expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
     expect(existsSync(ctx.sidecarPath)).toBe(false);
+  });
+
+  it("resumes a waiting Keep while encode admission is drained, full, and blocked on another title", async () => {
+    const file = { current: blockedPlay };
+    const ctx = harness({
+      localNodeId: "local",
+      playback: {
+        nodeAdmission: () => blockedPlay,
+        blockedNodeIds: () => ["local", "worker-1"],
+        fileReplacement: () => file.current,
+      },
+    });
+    ctx.store.upsertNode({
+      id: "local",
+      name: "This machine",
+      role: "standalone",
+      lastSeen: Date.now(),
+      hardware: { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null },
+      concurrency: 1,
+      enabled: false,
+      version: "1",
+      currentJobId: "busy-encode",
+    });
+    ctx.store.insertJob({
+      id: "busy-encode",
+      itemId: ctx.itemId,
+      suggestionId: null,
+      status: "running",
+      phase: "transcoding",
+      progress: 0.4,
+      error: null,
+      warning: null,
+      runNow: false,
+      createdAt: 0,
+      plan: copyPlan(),
+      assignedNodeId: "local",
+    });
+    ctx.store.updateJob("busy-encode", { nodeId: "local" });
+    insertPending(ctx);
+    ctx.jobs.start();
+    expect(await ctx.jobs.keep("rev-1")).toEqual({ accepted: true, disposition: "waiting" });
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    file.current = PLAYBACK_ALLOWED;
+    await vi.waitFor(() => expect(readFileSync(ctx.sourcePath, "utf8")).toBe("SIDECAR!!!"), { timeout: 3000 });
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+    expect(ctx.store.getNode("local")?.enabled).toBe(false);
+  });
+
+  it("leaves the original in place when Cancel wait wins the race before mutation", async () => {
+    let releaseBusy: () => void = () => undefined;
+    const busyHeld = new Promise<void>((resolve) => {
+      releaseBusy = resolve;
+    });
+    const file = { current: blockedPlay };
+    const ctx = harness({
+      playback: {
+        nodeAdmission: () => PLAYBACK_ALLOWED,
+        blockedNodeIds: () => [],
+        fileReplacement: (target) => (target.itemId === ctx.itemId ? file.current : PLAYBACK_ALLOWED),
+      },
+      promote: async (input) => {
+        if (input.item.id !== ctx.itemId) {
+          await busyHeld;
+          return { replaced: true, destPath: input.item.path, savedBytes: 1, warning: null, error: null };
+        }
+        writeFileSync(input.item.path, "SIDECAR!!!");
+        return { replaced: true, destPath: input.item.path, savedBytes: 1, warning: null, error: null };
+      },
+    });
+    const busyId = `${ctx.instanceId}:movie:11`;
+    const busyPath = join(ctx.dir, "busy.mkv");
+    const busySidecar = join(ctx.dir, "busy-sidecar.mkv");
+    writeFileSync(busyPath, "BUSY-ORIGINAL");
+    writeFileSync(busySidecar, "BUSY-SIDE");
+    ctx.store.upsertItem({
+      id: busyId,
+      instanceId: ctx.instanceId,
+      arrId: 11,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Busy",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: busyPath,
+      sizeBytes: 9,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    ctx.store.insertJob({
+      id: "job-busy",
+      itemId: busyId,
+      suggestionId: null,
+      status: "succeeded",
+      phase: "idle",
+      progress: 1,
+      error: null,
+      warning: null,
+      runNow: false,
+      createdAt: 2,
+      plan: copyPlan(),
+    });
+    ctx.store.insertReview({
+      id: "rev-busy",
+      jobId: "job-busy",
+      itemId: busyId,
+      displayTitle: "Busy",
+      status: "pending",
+      flagged: false,
+      flagReason: null,
+      sourcePath: busyPath,
+      sidecarPath: busySidecar,
+      ...compare(9, 6),
+      error: null,
+    });
+    insertPending(ctx);
+    expect(await ctx.jobs.keep("rev-busy")).toMatchObject({ accepted: true, disposition: "started" });
+    await vi.waitFor(() => expect(ctx.store.getReview("rev-busy")?.mutationStarted).toBe(true));
+    expect(await ctx.jobs.keep("rev-1")).toEqual({ accepted: true, disposition: "waiting" });
+    ctx.jobs.start();
+    file.current = PLAYBACK_ALLOWED;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(await ctx.jobs.cancelKeep("rev-1")).toEqual({ accepted: true });
+    expect(ctx.store.getReview("rev-1")).toMatchObject({ status: "pending", intentOrigin: null });
+    releaseBusy();
+    await vi.waitFor(() => expect(ctx.store.getReview("rev-busy")).toBeUndefined());
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    expect(existsSync(ctx.sidecarPath)).toBe(true);
+    expect(ctx.store.getReview("rev-1")?.status).toBe("pending");
+  });
+
+  it("re-drives a missing direct intent when a succeeded completion is retried", async () => {
+    const ctx = harness({
+      playback: {
+        nodeAdmission: () => PLAYBACK_ALLOWED,
+        blockedNodeIds: () => [],
+        fileReplacement: () => blockedPlay,
+      },
+    });
+    writeFileSync(ctx.sidecarPath, "SIDECAR!!!");
+    const queued = ctx.jobs.enqueueCustom(ctx.itemId, copyPlan("direct"), { assignedNodeId: "worker-1" });
+    expect("id" in queued).toBe(true);
+    if (!("id" in queued)) return;
+    const claimed = ctx.jobs.claimForNode("worker-1", 1);
+    const done = await ctx.jobs.completeRemote(queued.id, claimed[0]!.leaseToken, ctx.sidecarPath, {
+      ...reportFor(ctx.sidecarPath, 10),
+      sizeBytes: 10,
+    });
+    expect(done).toEqual({ ok: true });
+    const review = ctx.store.listReviews()[0]!;
+    ctx.store.updateReview(review.id, {
+      status: "pending",
+      intentOrigin: null,
+      intentRequestedAt: null,
+      waitReason: null,
+      mutationStarted: false,
+    });
+    expect(ctx.store.getJob(queued.id)?.status).toBe("succeeded");
+    const retry = await ctx.jobs.completeRemote(queued.id, claimed[0]!.leaseToken, ctx.sidecarPath, {
+      ...reportFor(ctx.sidecarPath, 10),
+      sizeBytes: 10,
+    });
+    expect(retry).toEqual({ ok: true });
+    expect(ctx.store.getReview(review.id)).toMatchObject({ status: "waiting", intentOrigin: "direct" });
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    expect(ctx.store.listReviews()).toHaveLength(1);
+  });
+
+  it("parks a local direct write as waiting without replacing the original", async () => {
+    const ctx = harness({
+      playback: {
+        nodeAdmission: () => PLAYBACK_ALLOWED,
+        blockedNodeIds: () => [],
+        fileReplacement: () => blockedPlay,
+      },
+    });
+    writeFileSync(ctx.sidecarPath, "SIDECAR!!!");
+    ctx.jobs.start();
+    const queued = ctx.jobs.enqueueCustom(ctx.itemId, copyPlan("direct"));
+    expect("id" in queued).toBe(true);
+    if (!("id" in queued)) return;
+    await vi.waitFor(() => expect(ctx.store.getJob(queued.id)?.status).toBe("succeeded"));
+    expect(ctx.store.listReviews()[0]).toMatchObject({ status: "waiting", intentOrigin: "direct" });
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    expect(existsSync(ctx.sidecarPath)).toBe(true);
+    expect(ctx.store.historyPage(0, 10).items.filter((row) => row.outcome === "kept")).toHaveLength(0);
   });
 });

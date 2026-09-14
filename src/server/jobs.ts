@@ -411,6 +411,7 @@ export class JobService {
     if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
     if (job.status === "succeeded") {
       this.opts.store.releaseJobLease(id);
+      await this.resumeDirectIntent(id);
       return { ok: true };
     }
     if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
@@ -436,16 +437,25 @@ export class JobService {
           settings,
         });
       }
-      this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
-      this.opts.store.releaseJobLease(id);
+      let startedKeep = false;
       const review = this.opts.store.getReviewForJob(id);
       if (review && writeMode === "direct") {
         const result = await this.requestPromotion(review.id, "direct");
-        if ("accepted" in result && result.disposition === "started") void this.performKeep(review.id);
+        startedKeep = "accepted" in result && result.disposition === "started";
       }
+      this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
+      this.opts.store.releaseJobLease(id);
+      if (startedKeep && review) void this.performKeep(review.id);
       await this.sweepReviewLeftovers();
       return { ok: true };
     } catch (error) {
+      if (this.opts.store.getReviewForJob(id)) {
+        this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1, nodeId: job.nodeId });
+        this.opts.store.releaseJobLease(id);
+        await this.resumeDirectIntent(id);
+        await this.sweepReviewLeftovers();
+        return { ok: true };
+      }
       const message = error instanceof Error ? error.message : "The job failed.";
       this.opts.store.updateJob(id, { status: "failed", error: message, nodeId: job.nodeId });
       this.opts.store.releaseJobLease(id);
@@ -496,6 +506,8 @@ export class JobService {
       const settings = this.opts.store.getSettings();
       this.applySchedule(settings);
       this.opts.store.expireLeases(this.now());
+      // Replacement is master disk work. It must not wait for encode admission, slots, or node enablement.
+      void this.dispatchWaitingIntents();
       const localId = this.localNodeId();
       const localNode = this.opts.store.getNode(localId);
       if (localNode && !localNode.enabled) return;
@@ -525,7 +537,6 @@ export class JobService {
         this.blockedNodeIds(),
       );
       for (const job of [...takePinned, ...pool.slice(0, poolBudget)]) void this.run(job.id, settings);
-      void this.dispatchWaitingIntents();
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
       console.error(`The job runner skipped a tick because ${message}`);
@@ -607,13 +618,13 @@ export class JobService {
         settings,
       });
       if (this.stopped) return;
-      this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1 });
+      let startedKeep = false;
       if (plan.writeMode === "direct" && reviewId) {
         const started = await this.requestPromotion(reviewId, "direct");
-        if ("accepted" in started && started.disposition === "started") {
-          await this.performKeep(reviewId);
-        }
+        startedKeep = "accepted" in started && started.disposition === "started";
       }
+      this.opts.store.updateJob(id, { status: "succeeded", phase: "idle", progress: 1 });
+      if (startedKeep && reviewId) await this.performKeep(reviewId);
     } catch (error) {
       if (this.stopped || isClosedDb(error)) return;
       if (error instanceof CancelledError || this.cancelled.has(id)) {
@@ -688,15 +699,25 @@ export class JobService {
   async cancelKeep(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
     const review = this.opts.store.getReview(reviewId);
     if (!review) return { error: "That review item is gone.", status: 404 };
-    if (review.status === "keeping" || review.mutationStarted) {
-      return { error: REPLACEMENT_STARTED, status: 409 };
-    }
     if (review.status !== "waiting") {
+      if (review.status === "keeping" || review.mutationStarted) {
+        return { error: REPLACEMENT_STARTED, status: 409 };
+      }
       return { error: "This result is not waiting to replace.", status: 409 };
     }
-    this.opts.store.clearReplacementIntent(reviewId);
-    this.opts.store.updateReview(reviewId, { error: null });
+    if (!this.opts.store.clearWaitingIntent(reviewId)) {
+      return { error: REPLACEMENT_STARTED, status: 409 };
+    }
     return { accepted: true };
+  }
+
+  private async resumeDirectIntent(jobId: string): Promise<void> {
+    const job = this.opts.store.getJob(jobId);
+    if (!job || (job.dispatchedWriteMode ?? "sidecar") !== "direct") return;
+    const review = this.opts.store.getReviewForJob(jobId);
+    if (!review || review.status !== "pending") return;
+    const result = await this.requestPromotion(review.id, "direct");
+    if ("accepted" in result && result.disposition === "started") void this.performKeep(review.id);
   }
 
   private async requestPromotion(reviewId: string, origin: ReplacementOrigin): Promise<KeepRequestResult> {
@@ -846,7 +867,7 @@ export class JobService {
           return;
         }
         const expectedSource = latest.sourceRevision ?? job?.sourceRevision ?? null;
-        const mustMatchSource = latest.intentOrigin === "direct" || Boolean(latest.waitReason);
+        const mustMatchSource = latest.intentOrigin === "direct" || latest.status === "waiting";
         if (mustMatchSource && isTrustedRevision(expectedSource) && !revisionsMatch(expectedSource, readFileRevision(item.path))) {
           this.failReplacement(reviewId, SOURCE_CHANGED);
           return;
@@ -859,12 +880,14 @@ export class JobService {
         const keys = this.mutationKeys(item, destPath, latest.sidecarPath);
         await this.acquireMutation(keys);
         try {
-          this.opts.store.updateReview(reviewId, { status: "keeping", mutationStarted: true, error: null });
+          if (!this.opts.store.claimReplacementMutation(reviewId)) return;
+          const claimed = this.opts.store.getReview(reviewId);
+          if (!claimed) return;
           const outcome = await this.promoteOutput(
             item,
-            latest.sidecarPath,
-            latest.source.sizeBytes ?? 0,
-            latest.sidecar.sizeBytes ?? 0,
+            claimed.sidecarPath,
+            claimed.source.sizeBytes ?? 0,
+            claimed.sidecar.sizeBytes ?? 0,
             plan,
           );
           if (!outcome.replaced) {
@@ -873,11 +896,11 @@ export class JobService {
           }
           if (job && outcome.placeMethod) this.opts.store.appendJobLog(job.id, placeMethodSentence(outcome.placeMethod));
           const saved = outcome.savedBytes;
-          if (this.opts.store.recordKeptEvent(latest.sidecarPath, latest.id, item.id, saved, this.now())) {
+          if (this.opts.store.recordKeptEvent(claimed.sidecarPath, claimed.id, item.id, saved, this.now())) {
             this.opts.store.addHistory(item.id, "kept", saved, this.now());
           }
-          const synced = await this.syncLibraryFile(item, outcome.destPath, latest.sidecar.sizeBytes ?? item.sizeBytes);
-          this.deleteReviewsForSidecar(latest.sidecarPath);
+          const synced = await this.syncLibraryFile(item, outcome.destPath, claimed.sidecar.sizeBytes ?? item.sizeBytes);
+          this.deleteReviewsForSidecar(claimed.sidecarPath);
           const warning = appendWarning(outcome.warning, synced.warning);
           if (warning && job) this.opts.store.updateJob(job.id, { promoteError: warning });
           await this.sweepReviewLeftovers();
@@ -989,7 +1012,7 @@ export class JobService {
   async requeueFlagged(reviewId: string): Promise<{ id: string } | { error: string; status: number }> {
     const review = this.opts.store.getReview(reviewId);
     if (!review) return { error: "That review item is gone.", status: 404 };
-    if (review.status !== "pending") return { error: "Only a waiting sidecar can be encoded smaller.", status: 409 };
+    if (review.status !== "pending") return { error: "Only a pending sidecar can be encoded smaller.", status: 409 };
     if (!review.flagged) return { error: "Only a flagged sidecar can be encoded smaller.", status: 409 };
     const job = this.opts.store.getJob(review.jobId);
     const item = this.opts.store.getItem(review.itemId);
@@ -1026,17 +1049,15 @@ export class JobService {
   }
 
   async discard(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
-    const review = this.opts.store.getReview(reviewId);
-    if (!review) return { error: "That review item is gone.", status: 404 };
-    if (review.status === "keeping" || review.mutationStarted) {
+    const claimed = this.opts.store.claimReviewDiscard(reviewId);
+    if (!claimed) {
+      const review = this.opts.store.getReview(reviewId);
+      if (!review) return { error: "That review item is gone.", status: 404 };
       return { error: REPLACEMENT_STARTED, status: 409 };
     }
-    if (review.status === "waiting") this.opts.store.clearReplacementIntent(reviewId);
-    const latest = this.opts.store.getReview(reviewId) ?? review;
-    this.opts.store.updateReview(reviewId, { status: "discarding" });
-    await this.unlinkSidecarIfLast(latest);
+    await this.unlinkSidecarIfLast(claimed);
     this.opts.store.deleteReview(reviewId);
-    this.opts.store.addHistory(review.itemId, "discarded", 0, this.now());
+    this.opts.store.addHistory(claimed.itemId, "discarded", 0, this.now());
     await this.sweepReviewLeftovers();
     return { accepted: true };
   }

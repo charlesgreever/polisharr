@@ -314,6 +314,8 @@ export type HardwareInfo = {
   reason: string | null;
   vaapiDevice?: string | null;
   gpuName?: string | null;
+  /** Intel Quick Sync encoders are listed; encode uses QSV under the VAAPI backend. */
+  qsv?: boolean;
 };
 
 export type HomePayload = {

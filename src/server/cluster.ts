@@ -30,6 +30,7 @@ export function parseHardwareInfo(value: unknown): HardwareInfo {
     reason: typeof raw.reason === "string" ? raw.reason : backend === "none" ? "No hardware encoder is visible." : null,
     vaapiDevice: typeof raw.vaapiDevice === "string" ? raw.vaapiDevice : raw.vaapiDevice === null ? null : undefined,
     gpuName: typeof raw.gpuName === "string" ? raw.gpuName : raw.gpuName === null ? null : undefined,
+    qsv: raw.qsv === true,
   };
 }
 

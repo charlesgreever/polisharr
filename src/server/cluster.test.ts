@@ -37,6 +37,7 @@ describe("cluster node identity", () => {
       reason: null,
       vaapiDevice: undefined,
       gpuName: undefined,
+      qsv: false,
     });
     expect(parseHardwareInfo({ backend: "videotoolbox", videotoolbox: true, av1: false })).toMatchObject({
       backend: "videotoolbox",
@@ -152,7 +153,7 @@ describe("cluster node identity", () => {
       concurrency: 2,
     })).toEqual({
       ok: true,
-      hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, videotoolbox: false, vaapiDevice: undefined, gpuName: undefined }, concurrency: 2 },
+      hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, videotoolbox: false, vaapiDevice: undefined, gpuName: undefined, qsv: false }, concurrency: 2 },
     });
     expect(parseClusterHello({ name: "5090" }).ok).toBe(false);
     expect(parseClusterHeartbeat({

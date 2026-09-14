@@ -14,6 +14,7 @@ export type EncoderListing = {
   nvencAv1: boolean;
   vaapiAv1: boolean;
   videotoolboxAv1: boolean;
+  qsv: boolean;
 };
 
 export type EncodeDevices = {
@@ -32,6 +33,7 @@ export function parseEncoders(text: string): EncoderListing {
     nvencAv1: /\bav1_nvenc\b/.test(lower),
     vaapiAv1: /\b(av1_vaapi|av1_qsv)\b/.test(lower),
     videotoolboxAv1: /\bav1_videotoolbox\b/.test(lower),
+    qsv: /\b(h264_qsv|hevc_qsv|av1_qsv)\b/.test(lower),
   };
 }
 
@@ -65,6 +67,7 @@ export function chooseBackend(encoders: EncoderListing, devices: EncodeDevices):
           : false,
     reason: noneReason(encoders, devices, backend),
     vaapiDevice: backend === "vaapi" ? devices.vaapiDevice : null,
+    qsv: Boolean(encoders.qsv && vaapi && !cuda),
   };
 }
 
@@ -84,6 +87,7 @@ export function detectHardware(ffmpeg = "ffmpeg", devices: () => EncodeDevices =
         reason: error instanceof Error ? error.message : "ffmpeg is not available.",
         vaapiDevice: null,
         gpuName: null,
+        qsv: false,
       };
     }
   };

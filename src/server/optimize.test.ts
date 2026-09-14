@@ -561,17 +561,16 @@ describe("ffmpeg encode arguments", () => {
     expect(args.indexOf("-hwaccel")).toBeLessThan(args.indexOf("-i"));
     expect(args[args.indexOf("-hwaccel") + 1]).toBe("cuda");
     expect(args[args.indexOf("-hwaccel_output_format") + 1]).toBe("cuda");
-    expect(args.join(" ")).toContain("scale_cuda=format=p010");
-    expect(args).toContain("-noauto_conversion_filters");
+    expect(args.join(" ")).toContain("scale_cuda=format=p010,hwdownload,format=p010le");
     expect(args).not.toContain("-auto_conversion_filters");
+    expect(args).not.toContain("-noauto_conversion_filters");
     expect(args).toContain("-reinit_filter:v");
     expect(args[args.indexOf("-reinit_filter:v") + 1]).toBe("0");
     expect(args.indexOf("-reinit_filter:v")).toBeLessThan(args.indexOf("-i"));
-    expect(args).not.toContain("p010le");
     expect(args).not.toContain("yuv420p");
   });
 
-  it("disables ffmpeg 7 auto_scale with a flag so 0 is not an output filename", () => {
+  it("downloads CUDA frames after scale so ffmpeg 7 can rebuild the graph when color tags arrive late", () => {
     const plan = planFromSuggestion({ ...suggestion, actions: ["transcode"] });
     const args = encodeArgs(source, "/tmp/out.mkv", {
       sourcePath: source,
@@ -605,9 +604,8 @@ describe("ffmpeg encode arguments", () => {
       conservative: false,
     });
     expect(args).toContain("av1_nvenc");
-    expect(args.join(" ")).toContain("scale_cuda=format=nv12");
-    expect(args).toContain("-noauto_conversion_filters");
-    expect(args).not.toContain("-auto_conversion_filters");
+    expect(args.join(" ")).toContain("scale_cuda=format=nv12,hwdownload,format=nv12");
+    expect(args).not.toContain("-noauto_conversion_filters");
     expect(args[args.indexOf("-reinit_filter:v") + 1]).toBe("0");
     expect(args.indexOf("-reinit_filter:v")).toBeLessThan(args.indexOf("-i"));
   });
@@ -799,8 +797,7 @@ describe("ffmpeg encode arguments", () => {
       conservative: false,
     });
     expect(args).toContain("av1_nvenc");
-    expect(args.join(" ")).toContain("scale_cuda=format=p010");
-    expect(args).not.toContain("p010le");
+    expect(args.join(" ")).toContain("scale_cuda=format=p010,hwdownload,format=p010le");
     expect(args).not.toContain("main10");
   });
 
@@ -841,7 +838,7 @@ describe("ffmpeg encode arguments", () => {
     const args = encodeArgs(source, "/tmp/out.mkv", qualityReq);
     expect(args).toContain("-cq");
     expect(args).not.toContain("-b:v");
-    expect(args).toContain("scale_cuda=w=1920:h=1080:format=p010");
+    expect(args).toContain("scale_cuda=w=1920:h=1080:format=p010,hwdownload,format=p010le");
     expect(args).not.toContain("scale=1920:1080");
   });
 
@@ -1004,6 +1001,52 @@ describe("ffmpeg encode arguments", () => {
     expect(args).toContain("hevc_vaapi");
     expect(args).not.toContain("-hwaccel");
     expect(args.join(" ")).toContain("format=nv12,hwupload=extra_hw_frames=64");
+  });
+
+  it("uses Quick Sync on an Intel VAAPI node so late H.264 color tags do not rebuild a VAAPI graph", () => {
+    const plan = planFromSuggestion({ ...suggestion, actions: ["transcode"] });
+    const args = encodeArgs(source, "/tmp/out.mkv", {
+      sourcePath: source,
+      reviewDir: "/tmp/review",
+      plan: {
+        ...plan,
+        video: { kind: "size", codec: "av1", targetBytes: 400_000_000, downscale1080p: false, bitDepth: 8 },
+      },
+      report: {
+        sourceSig: "p|1",
+        sourceMethod: "ffprobe",
+        listingState: "complete",
+        durationSec: 1320,
+        sizeBytes: 800_000_000,
+        sizePerHourGb: 2,
+        videoCodec: "h264",
+        width: 1920,
+        height: 1080,
+        bitDepth: 8,
+        hdr: "none",
+        audio: [],
+        subtitles: [],
+        hasChapters: false,
+        hasAttachments: false,
+      },
+      target: "av1",
+      backend: "vaapi",
+      qsv: true,
+      vaapiDevice: "/dev/dri/renderD128",
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      mkvmerge: "mkvmerge",
+      conservative: false,
+    });
+    expect(args).toContain("av1_qsv");
+    expect(args).not.toContain("av1_vaapi");
+    expect(args[args.indexOf("-hwaccel") + 1]).toBe("qsv");
+    expect(args[args.indexOf("-hwaccel_output_format") + 1]).toBe("qsv");
+    expect(args.indexOf("-hwaccel")).toBeLessThan(args.indexOf("-i"));
+    expect(args.indexOf("-reinit_filter:v")).toBeLessThan(args.indexOf("-i"));
+    expect(args.join(" ")).toContain("vpp_qsv=format=nv12");
+    expect(args).toContain("-qsv_device");
+    expect(args[args.indexOf("-qsv_device") + 1]).toBe("/dev/dri/renderD128");
   });
 
   it("builds a VideoToolbox encode graph instead of NVENC on the Apple media engine", () => {

@@ -58,6 +58,7 @@ describe("hardware backend choice", () => {
     expect(hw.cuda).toBe(false);
     expect(hw.vaapi).toBe(true);
     expect(hw.av1).toBe(true);
+    expect(hw.qsv).toBe(true);
     expect(hw.vaapiDevice).toBe("/dev/dri/renderD128");
     expect(hw.reason).toBeNull();
   });
@@ -72,6 +73,7 @@ describe("hardware backend choice", () => {
     expect(hw.backend).toBe("cuda");
     expect(hw.cuda).toBe(true);
     expect(hw.av1).toBe(true);
+    expect(hw.qsv).toBe(false);
   });
 
   it("uses VideoToolbox on macOS when ffmpeg lists the Apple media engine", () => {

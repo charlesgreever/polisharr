@@ -523,6 +523,7 @@ export class JobService {
         target: this.opts.store.videoTargetForItem(item) ?? settings.videoTarget,
         backend: hardware.backend,
         vaapiDevice: hardware.vaapiDevice,
+        qsv: hardware.qsv === true,
         ffmpeg: this.opts.tools.ffmpeg,
         ffprobe: this.opts.tools.ffprobe,
         mkvmerge: this.opts.tools.mkvmerge,

@@ -117,6 +117,8 @@ export type OptimizeRequest = {
   target: "hevc" | "av1";
   backend: "cuda" | "vaapi" | "videotoolbox" | "none";
   vaapiDevice?: string | null;
+  /** Intel Quick Sync path under the VAAPI backend. AMD VAAPI nodes leave this unset. */
+  qsv?: boolean;
   ffmpeg: string;
   ffprobe: string;
   mkvmerge: string;
@@ -786,12 +788,26 @@ function usesVideotoolboxDecode(backend: OptimizeRequest["backend"], codec: stri
   return backend === "videotoolbox" && VIDEOTOOLBOX_DECODE_CODECS.has(codec.toLowerCase());
 }
 
-function cudaVideoFilter(downscale: boolean, tenBit: boolean): string {
-  const format = tenBit ? "p010" : "nv12";
-  return downscale ? `scale_cuda=w=1920:h=1080:format=${format}` : `scale_cuda=format=${format}`;
+function usesQsvDecode(qsv: boolean, codec: string): boolean {
+  return qsv && VAAPI_DECODE_CODECS.has(codec.toLowerCase());
 }
 
-function videoEncoder(backend: OptimizeRequest["backend"], codec: "hevc" | "av1"): string {
+function cudaVideoFilter(downscale: boolean, tenBit: boolean): string {
+  const hw = tenBit ? "p010" : "nv12";
+  const sw = tenBit ? "p010le" : "nv12";
+  const scale = downscale ? `scale_cuda=w=1920:h=1080:format=${hw}` : `scale_cuda=format=${hw}`;
+  // ffmpeg 7 rebuilds the CUDA graph when H.264 VUI color tags arrive after the first frames.
+  // hwdownload gives scaler_out a software format; leaving frames on the GPU fails with ENOSYS.
+  return `${scale},hwdownload,format=${sw}`;
+}
+
+function qsvVideoFilter(downscale: boolean, tenBit: boolean): string {
+  const format = tenBit ? "p010le" : "nv12";
+  return downscale ? `vpp_qsv=w=1920:h=1080:format=${format}` : `vpp_qsv=format=${format}`;
+}
+
+function videoEncoder(backend: OptimizeRequest["backend"], codec: "hevc" | "av1", qsv = false): string {
+  if (qsv) return codec === "av1" ? "av1_qsv" : "hevc_qsv";
   if (codec === "av1") {
     if (backend === "vaapi") return "av1_vaapi";
     if (backend === "videotoolbox") return "av1_videotoolbox";
@@ -811,19 +827,22 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   const plan = req.plan ?? (req.suggestion ? planFromSuggestion(req.suggestion) : undefined);
   const video = plan?.video;
   const codec = video && video.kind !== "copy" ? video.codec : req.target;
-  const encoder = videoEncoder(req.backend, codec);
+  const qsv = Boolean(req.qsv);
+  const encoder = videoEncoder(req.backend, codec, qsv);
   const tenBit = (video && video.kind !== "copy" ? video.bitDepth : req.report.bitDepth) >= 10;
   const downscale = video?.kind !== "copy" && Boolean(video?.downscale1080p);
   const nvdec = usesNvdec(req.backend, req.report.videoCodec);
-  const vaapiDecode = usesVaapiDecode(req.backend, req.report.videoCodec);
+  const vaapiDecode = !qsv && usesVaapiDecode(req.backend, req.report.videoCodec);
+  const qsvDecode = usesQsvDecode(qsv, req.report.videoCodec);
   const videotoolboxDecode = usesVideotoolboxDecode(req.backend, req.report.videoCodec);
   const args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y"];
-  if (req.backend === "cuda" || req.backend === "vaapi") {
-    // ffmpeg 7 inserts software auto_scale after scale_cuda/scale_vaapi, which fails with ENOSYS.
-    // jellyfin-ffmpeg treats this as a flag: `-auto_conversion_filters 0` opens an output named "0".
-    args.push("-noauto_conversion_filters");
-  }
-  if (req.backend === "vaapi") {
+  if (qsv) {
+    const device = req.vaapiDevice || "/dev/dri/renderD128";
+    args.push("-qsv_device", device);
+    if (qsvDecode) {
+      args.push("-hwaccel", "qsv", "-hwaccel_output_format", "qsv");
+    }
+  } else if (req.backend === "vaapi") {
     const device = req.vaapiDevice || "/dev/dri/renderD128";
     args.push("-init_hw_device", `vaapi=va:${device}`, "-filter_hw_device", "va");
     if (vaapiDecode) {
@@ -836,14 +855,23 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   } else if (videotoolboxDecode) {
     args.push("-hwaccel", "videotoolbox");
   }
-  if (nvdec || vaapiDecode) {
+  if (nvdec || vaapiDecode || qsvDecode) {
     // WEB-DLs can change SPS mid-file. Reinit of a CUDA/VAAPI graph fails with "Error reinitializing filters".
     // Input option: after -i ffmpeg applies it to the output file.
     args.push("-reinit_filter:v", "0");
   }
   const videoMap = req.report.videoIndex == null ? "0:v:0" : `0:${req.report.videoIndex}`;
   args.push("-i", source, "-map", videoMap, "-map", "0:a?", "-map", "0:s?", "-map", "0:t?");
-  if (req.backend === "vaapi") {
+  if (qsv) {
+    const format = tenBit ? "p010le" : "nv12";
+    if (qsvDecode) {
+      args.push("-vf", qsvVideoFilter(downscale, tenBit));
+    } else {
+      const filters = [`format=${format}`, "hwupload=extra_hw_frames=64"];
+      if (downscale) filters.push(qsvVideoFilter(true, tenBit));
+      args.push("-vf", filters.join(","));
+    }
+  } else if (req.backend === "vaapi") {
     const format = tenBit ? "p010" : "nv12";
     if (vaapiDecode) {
       args.push("-vf", downscale ? `scale_vaapi=w=1920:h=1080:format=${format}` : `scale_vaapi=format=${format}`);
@@ -865,14 +893,15 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   }
   if (tenBit && codec !== "av1") args.push("-profile:v", "main10");
   if (video?.kind === "quality") {
-    if (req.backend === "vaapi") args.push("-qp", String(video.quality));
+    if (qsv) args.push("-global_quality", String(video.quality));
+    else if (req.backend === "vaapi") args.push("-qp", String(video.quality));
     else if (req.backend === "videotoolbox") args.push("-q:v", String(videotoolboxQuality(video.quality)));
     else args.push("-cq", String(video.quality), "-rc", "vbr");
   } else {
-    args.push(...sizeModeRateControl(req.backend, String(nvencBitrate(req, video))));
+    args.push(...sizeModeRateControl(req.backend, String(nvencBitrate(req, video)), qsv));
   }
   if (req.backend === "videotoolbox") args.push("-pix_fmt", tenBit ? "p010le" : "nv12");
-  else if (req.backend !== "vaapi" && !nvdec) args.push("-pix_fmt", tenBit ? "p010le" : "yuv420p");
+  else if (req.backend !== "vaapi" && !nvdec && !qsv) args.push("-pix_fmt", tenBit ? "p010le" : "yuv420p");
   args.push("-c:a", "copy", ...subtitleEncodeArgs(req.report), dest);
   return args;
 }
@@ -901,13 +930,13 @@ export function subtitleEncodeArgs(report: InspectionReport): string[] {
   return converts.flatMap((convert, index) => ["-c:s:" + String(index), convert ? "srt" : "copy"]);
 }
 
-function sizeModeRateControl(backend: OptimizeRequest["backend"], bitrate: string): string[] {
+function sizeModeRateControl(backend: OptimizeRequest["backend"], bitrate: string, qsv = false): string[] {
   const bufsize = String(Number(bitrate) * 2);
+  if (qsv || backend === "videotoolbox") {
+    return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
+  }
   if (backend === "vaapi") {
     return ["-rc_mode", "CBR", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
-  }
-  if (backend === "videotoolbox") {
-    return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
   }
   return ["-rc", "cbr", "-multipass", "qres", "-rc-lookahead", "32", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
 }

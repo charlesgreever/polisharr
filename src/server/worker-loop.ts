@@ -186,6 +186,7 @@ export class WorkerLoop {
         target: job.target,
         backend: hardware.backend,
         vaapiDevice: hardware.vaapiDevice,
+        qsv: hardware.qsv === true,
         ffmpeg: tools.ffmpeg,
         ffprobe: tools.ffprobe,
         mkvmerge: tools.mkvmerge,

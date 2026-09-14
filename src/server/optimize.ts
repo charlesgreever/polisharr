@@ -836,6 +836,11 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
   } else if (videotoolboxDecode) {
     args.push("-hwaccel", "videotoolbox");
   }
+  if (nvdec || vaapiDecode) {
+    // WEB-DLs can change SPS mid-file. Reinit of a CUDA/VAAPI graph fails with "Error reinitializing filters".
+    // Input option: after -i ffmpeg applies it to the output file.
+    args.push("-reinit_filter:v", "0");
+  }
   const videoMap = req.report.videoIndex == null ? "0:v:0" : `0:${req.report.videoIndex}`;
   args.push("-i", source, "-map", videoMap, "-map", "0:a?", "-map", "0:s?", "-map", "0:t?");
   if (req.backend === "vaapi") {
@@ -853,10 +858,6 @@ export function encodeArgs(source: string, dest: string, req: OptimizeRequest): 
     args.push("-vf", "scale=1920:1080");
   }
   args.push("-c:v", encoder);
-  if (nvdec || vaapiDecode) {
-    // WEB-DLs can change SPS mid-file. Reinit of a CUDA/VAAPI graph fails with "Error reinitializing filters".
-    args.push("-reinit_filter:v", "0");
-  }
   if (req.backend === "videotoolbox") {
     // allow_sw=0 fails closed if the media engine is missing instead of a CPU encode.
     args.push("-allow_sw", "0", "-realtime", "0");

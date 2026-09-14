@@ -566,6 +566,7 @@ describe("ffmpeg encode arguments", () => {
     expect(args).not.toContain("-auto_conversion_filters");
     expect(args).toContain("-reinit_filter:v");
     expect(args[args.indexOf("-reinit_filter:v") + 1]).toBe("0");
+    expect(args.indexOf("-reinit_filter:v")).toBeLessThan(args.indexOf("-i"));
     expect(args).not.toContain("p010le");
     expect(args).not.toContain("yuv420p");
   });
@@ -608,6 +609,7 @@ describe("ffmpeg encode arguments", () => {
     expect(args).toContain("-noauto_conversion_filters");
     expect(args).not.toContain("-auto_conversion_filters");
     expect(args[args.indexOf("-reinit_filter:v") + 1]).toBe("0");
+    expect(args.indexOf("-reinit_filter:v")).toBeLessThan(args.indexOf("-i"));
   });
 
   it("uses CBR so CUDA size-mode AV1 and HEVC share a hard bitrate cap", () => {
@@ -957,6 +959,7 @@ describe("ffmpeg encode arguments", () => {
     expect(args.indexOf("-hwaccel")).toBeLessThan(args.indexOf("-i"));
     expect(args[args.indexOf("-hwaccel") + 1]).toBe("vaapi");
     expect(args[args.indexOf("-hwaccel_output_format") + 1]).toBe("vaapi");
+    expect(args.indexOf("-reinit_filter:v")).toBeLessThan(args.indexOf("-i"));
     expect(args.join(" ")).toContain("scale_vaapi=w=1920:h=1080:format=nv12");
     expect(args.join(" ")).not.toContain("hwupload");
     expect(args).toContain("-qp");

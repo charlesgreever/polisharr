@@ -349,6 +349,19 @@ describe("playback diagnostic decisions", () => {
       deviceId: "living-room",
       before,
       later: [occurrence({
+        id: "after-stereo",
+        playMethod: "DirectPlay",
+        rawReasons: [],
+        reasonFamily: null,
+        selectedTracks: { audioStreamIndex: 2, subtitleStreamIndex: null },
+        lastSeenAt: NOW,
+      })],
+    }).sentence).toBe(AFTER_KEEP_OBSERVED);
+    expect(describeAfterKeep({
+      keptAt,
+      deviceId: "living-room",
+      before,
+      later: [occurrence({
         id: "after",
         playMethod: "DirectPlay",
         selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: 2 },
@@ -369,6 +382,45 @@ describe("playback diagnostic decisions", () => {
         lastSeenAt: NOW,
       })],
     }).sentence).toContain("was local");
+  });
+
+  it("includes mixed audio-plus-bitrate problems in the audio filter", async () => {
+    const db = store();
+    db.upsertInstance({ id: "radarr", kind: "radarr", name: "Radarr", url: "http://radarr", enabled: true });
+    db.upsertInstance({ id: "jf", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin", enabled: true });
+    db.upsertItem(movie());
+    db.saveInspection("film-1080", report());
+    const revision = occurrence().revision;
+    db.savePlaybackOccurrence(occurrence({
+      id: "mixed",
+      sessionId: "mixed",
+      reasonFamily: "mixed",
+      rawReasons: ["AudioCodecNotSupported", "ContainerBitrateExceedsLimit"],
+      revision,
+    }));
+    db.savePlaybackOccurrence(occurrence({
+      id: "video",
+      sessionId: "video",
+      deviceId: "bedroom",
+      deviceLabel: "Bedroom TV",
+      reasonFamily: "video",
+      rawReasons: ["VideoCodecNotSupported"],
+      revision,
+    }));
+    const diagnostics = createPlaybackDiagnostics({
+      store: db,
+      clock: () => NOW,
+      statFile: async () => revision,
+    });
+    const audio = diagnostics.listDiagnostics({ offset: 0, limit: 50, days: 7, reasonFamily: "audio" });
+    expect(audio.items.map((row) => row.reasonFamily)).toEqual(["mixed"]);
+    expect(audio.items[0]?.recommendation.kind).toBe("add_stereo");
+    const bitrate = diagnostics.listDiagnostics({ offset: 0, limit: 50, days: 7, reasonFamily: "bitrate" });
+    expect(bitrate.items.map((row) => row.reasonFamily)).toEqual(["mixed"]);
+    const mixed = diagnostics.listDiagnostics({ offset: 0, limit: 50, days: 7, reasonFamily: "mixed" });
+    expect(mixed.items.map((row) => row.reasonFamily)).toEqual(["mixed"]);
+    const video = diagnostics.listDiagnostics({ offset: 0, limit: 50, days: 7, reasonFamily: "video" });
+    expect(video.items.map((row) => row.reasonFamily)).toEqual(["video"]);
   });
 
   it("omits after-Keep copy when a title was kept without a playback problem", async () => {

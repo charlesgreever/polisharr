@@ -248,12 +248,15 @@ export function createPlaybackDiagnostics(opts: {
     return store.queryPlaybackOccurrences({
       connectionId: query.connectionId,
       deviceId: query.deviceId,
-      reasonFamily: query.reasonFamily,
       unmatched: query.unmatched,
       libraryItemId: query.itemId,
       since: windowStart(query.days),
       limit: PLAYBACK_HISTORY_MAX,
-    }).filter((row) => matchesClient(row, query.client) && matchesTitle(store, row, query.title));
+    }).filter((row) =>
+      matchesClient(row, query.client)
+      && matchesTitle(store, row, query.title)
+      && occurrenceMatchesFamily(row, query.reasonFamily)
+    );
   }
 
   function diagnosticFromGroup(rows: PlaybackOccurrence[]): PlaybackDiagnostic {
@@ -329,7 +332,7 @@ export function createPlaybackDiagnostics(opts: {
       if (!isPlaybackProblem(row)) continue;
       const family = problemReasonFamily(row);
       if (!family) continue;
-      if (query.reasonFamily && family !== query.reasonFamily) continue;
+      if (query.reasonFamily && !occurrenceMatchesFamily(row, query.reasonFamily)) continue;
       const id = playbackDiagnosticId({
         connectionId: row.connectionId,
         deviceId: row.deviceId,
@@ -699,7 +702,6 @@ function noneFromReasons(rawReasons: string[]): PlaybackRecommendation {
 
 function contextCompatible(before: PlaybackOccurrence, after: PlaybackOccurrence): boolean {
   return streamIndex(before.selectedTracks.subtitleStreamIndex) === streamIndex(after.selectedTracks.subtitleStreamIndex)
-    && streamIndex(before.selectedTracks.audioStreamIndex) === streamIndex(after.selectedTracks.audioStreamIndex)
     && (before.match === "remote") === (after.match === "remote");
 }
 
@@ -717,10 +719,16 @@ function contextChangeSentence(before: PlaybackOccurrence, after: PlaybackOccurr
   if (streamIndex(before.selectedTracks.subtitleStreamIndex) !== streamIndex(after.selectedTracks.subtitleStreamIndex)) {
     return "Later playback on this device used different subtitles, so this is not a direct comparison.";
   }
-  if (streamIndex(before.selectedTracks.audioStreamIndex) !== streamIndex(after.selectedTracks.audioStreamIndex)) {
-    return "Later playback on this device used a different soundtrack, so this is not a direct comparison.";
-  }
   return "Later playback on this device used different settings, so this is not a direct comparison.";
+}
+
+export function occurrenceMatchesFamily(row: PlaybackOccurrence, family: PlaybackReasonFamily | undefined): boolean {
+  if (!family) return true;
+  const stored = problemReasonFamily(row);
+  if (stored === family) return true;
+  const fromReasons = familiesFromEvidence(stored ?? "unknown", row.rawReasons);
+  if (fromReasons.includes(family)) return true;
+  return family === "mixed" && fromReasons.length > 1;
 }
 
 function matchesClient(row: PlaybackOccurrence, client: string | undefined): boolean {

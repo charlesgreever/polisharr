@@ -7,7 +7,7 @@ import { FilterChip } from "../components/ui";
 import { playbackFamilyLabel } from "../settings-copy";
 import { usePagedList } from "../use-paged-list";
 
-const FAMILIES = ["audio", "video", "subtitle", "container", "bitrate", "unknown"] as const;
+const FAMILIES = ["audio", "video", "subtitle", "container", "bitrate", "mixed", "unknown"] as const;
 
 export function problemWindowLabel(total: number, days: number): string {
   const noun = total === 1 ? "problem" : "problems";

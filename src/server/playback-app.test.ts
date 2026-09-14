@@ -359,6 +359,20 @@ describe("playback HTTP", () => {
     expect(filtered.items).toHaveLength(1);
     expect(filtered.items[0]?.deviceId).toBe("living-room");
     expect(filtered.items[0]?.occurrenceCount).toBe(3);
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "mixed",
+      sessionId: "mixed",
+      deviceId: "den",
+      deviceLabel: "Den TV",
+      reasonFamily: "mixed",
+      rawReasons: ["AudioCodecNotSupported", "ContainerBitrateExceedsLimit"],
+      lastSeenAt: Date.now(),
+      revision,
+    }));
+    const mixedUnderAudio = await (await ctx.app.request("/api/playback/diagnostics?reasonFamily=audio", { headers: ctx.headers })).json() as {
+      items: Array<{ deviceId: string; reasonFamily: string }>;
+    };
+    expect(mixedUnderAudio.items.some((row) => row.deviceId === "den" && row.reasonFamily === "mixed")).toBe(true);
     const bad = await ctx.app.request("/api/playback/diagnostics?days=14", { headers: ctx.headers });
     expect(bad.status).toBe(400);
     const page = await ctx.app.request("/api/playback/observations?limit=100", { headers: ctx.headers });

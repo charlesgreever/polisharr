@@ -132,6 +132,12 @@ export const api = {
   keepAll: () => req<{ accepted: number; skipped: number; started?: number; waiting?: number }>("/api/review/keep-all", { method: "POST" }),
   discard: (id: string) => req(`/api/review/${id}/discard`, { method: "POST" }),
   requeueFlagged: (id: string) => req<{ ok: true; id: string }>(`/api/review/${id}/requeue`, { method: "POST" }),
+  requestReviewPreview: (reviewId: string, body: PreviewRequestBody) =>
+    req<PreviewStatus>(`/api/review/${encodeURIComponent(reviewId)}/previews`, { method: "POST", body: JSON.stringify(body) }),
+  reviewPreviewStatus: (reviewId: string, taskId: string, init?: RequestInit) =>
+    req<PreviewStatus>(`/api/review/${encodeURIComponent(reviewId)}/previews/${encodeURIComponent(taskId)}`, init),
+  cancelReviewPreview: (reviewId: string, taskId: string) =>
+    req<{ ok: true }>(`/api/review/${encodeURIComponent(reviewId)}/previews/${encodeURIComponent(taskId)}/cancel`, { method: "POST" }),
   history: (offset = 0, limit = 50) => req<LibraryPage<HistoryRow>>(`/api/history?offset=${offset}&limit=${limit}`),
   home: () => req<HomePayload>("/api/home"),
   search: (q: string) => req<{ items: SearchHit[] }>(`/api/search?q=${encodeURIComponent(q)}`),
@@ -428,14 +434,29 @@ export type PlaybackSettingsPayload = {
   historyDays: number;
   historyMaxOccurrences: number;
 };
+export type ReviewAudioTrack = {
+  index: number;
+  language: string;
+  channels: number;
+  codec: string;
+  default?: boolean;
+};
+export type ReviewCompareFrame = {
+  codec: string | null;
+  sizeBytes: number | null;
+  sizePerHourGb: number | null;
+  durationSec: number;
+  tracks: string;
+  audio?: ReviewAudioTrack[];
+};
 export type ReviewRow = {
   id: string;
   displayTitle: string;
   status: "pending" | "waiting" | "keeping" | "discarding";
   flagged: boolean;
   flagReason: string | null;
-  source: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
-  sidecar: { codec: string | null; sizeBytes: number | null; sizePerHourGb: number | null; durationSec: number; tracks: string };
+  source: ReviewCompareFrame;
+  sidecar: ReviewCompareFrame;
   error: string | null;
   nodeName?: string | null;
   encodeApi?: string | null;
@@ -444,6 +465,28 @@ export type ReviewRow = {
   intentOrigin?: "keep" | "direct" | null;
   waitReason?: string | null;
   cancellable?: boolean;
+};
+export type PreviewTaskStatus = "queued" | "running" | "ready" | "failed" | "cancelled" | "expired";
+export type PreviewWaitReason = "node" | "playback" | "input_lock" | "cache_capacity";
+export type PreviewRequestBody = {
+  startMs?: number;
+  durationMs?: number;
+  originalAudioIndex?: number | null;
+  sidecarAudioIndex?: number | null;
+  preset?: "start" | "middle" | "end" | "custom" | null;
+};
+export type PreviewStatus = {
+  id: string;
+  reviewId: string;
+  status: PreviewTaskStatus;
+  waitReason: PreviewWaitReason | null;
+  nodeId: string | null;
+  nodeName: string | null;
+  error: string | null;
+  interval: { startMs: number; durationMs: number } | null;
+  tracks: { originalAudioIndex: number | null; sidecarAudioIndex: number | null };
+  clips: { original: string; finished: string } | null;
+  transform: { scale: string; audio: string; color: string; warnings: string[] } | null;
 };
 export type HistoryRow = { id: string; displayTitle: string; outcome: "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched"; bytesSaved: number; createdAt: number };
 export type HomePayload = {

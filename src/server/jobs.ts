@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, stat } from "node:fs/promises";
 import type { Store } from "./store.ts";
-import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewItem, Settings, Suggestion } from "./types.ts";
+import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewAudioTrack, ReviewItem, Settings, Suggestion } from "./types.ts";
 import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
 import { CancelledError, cleanReviewLeftovers, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
@@ -1189,6 +1189,7 @@ export class JobService {
         sizePerHourGb: input.report.sizePerHourGb,
         durationSec: input.report.durationSec,
         tracks: `${input.report.audio.length} audio / ${input.report.subtitles.length} subtitles`,
+        audio: reviewAudioTracks(input.report),
       },
       sidecar: {
         codec: input.output.videoCodec,
@@ -1197,6 +1198,7 @@ export class JobService {
         sizePerHourGb: input.output.sizePerHourGb,
         durationSec: input.output.durationSec,
         tracks: `${input.output.audio.length} audio / ${input.output.subtitles.length} subtitles`,
+        audio: reviewAudioTracks(input.output),
       },
       error: null,
       ...this.reviewProvenance(input.job),
@@ -1259,6 +1261,16 @@ export class JobService {
 
 export function assignedToNode(assignedNodeId: string | null | undefined, localNodeId: string): boolean {
   return !assignedNodeId || assignedNodeId === localNodeId;
+}
+
+function reviewAudioTracks(report: InspectionReport): ReviewAudioTrack[] {
+  return report.audio.map((track) => ({
+    index: track.index,
+    language: track.language,
+    channels: track.channels,
+    codec: track.codec,
+    default: Boolean(track.default),
+  }));
 }
 
 function isClosedDb(error: unknown): boolean {

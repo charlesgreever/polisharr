@@ -342,6 +342,20 @@ export type Job = {
   sourceRevision?: PlaybackFileRevision | null;
 };
 
+export type ReviewAudioTrack = {
+  index: number;
+  language: string;
+  channels: number;
+  codec: string;
+  default?: boolean;
+};
+
+export type ReviewCompareFrame = SuggestionNowAfter & {
+  durationSec: number;
+  tracks: string;
+  audio?: ReviewAudioTrack[];
+};
+
 export type ReviewItem = {
   id: string;
   jobId: string;
@@ -352,8 +366,8 @@ export type ReviewItem = {
   flagReason: string | null;
   sourcePath: string;
   sidecarPath: string;
-  source: SuggestionNowAfter & { durationSec: number; tracks: string };
-  sidecar: SuggestionNowAfter & { durationSec: number; tracks: string };
+  source: ReviewCompareFrame;
+  sidecar: ReviewCompareFrame;
   error: string | null;
   nodeName?: string | null;
   encodeApi?: string | null;

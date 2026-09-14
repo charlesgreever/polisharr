@@ -4,7 +4,7 @@ import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
-import { FIELD_CONTROL, hardwareBackendLabel, PLAYBACK_HISTORY_CLEARED, PLAYBACK_OBSERVE_HELP, SIZE_CAP_GRID } from "../settings-copy";
+import { FIELD_CONTROL, hardwareBackendLabel, PLAYBACK_HISTORY_CLEARED, PLAYBACK_HISTORY_CONFIRM, PLAYBACK_OBSERVE_HELP, playbackHealthLabel, SIZE_CAP_GRID } from "../settings-copy";
 import { ANY_OPEN_NODE_ID } from "../encode-node";
 
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
@@ -434,7 +434,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             {playback.connections.map((row) => (
               <li key={row.connectionId} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
                 <div className="font-medium text-ink">{row.name}</div>
-                <div className="text-muted">{row.health.status}{row.health.stale ? " · stale" : ""}</div>
+                <div className="text-muted">{playbackHealthLabel(row.health.status, row.health.stale)}</div>
                 <label className="flex min-h-11 items-center gap-2">
                   <input
                     type="checkbox"
@@ -482,9 +482,12 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <button
             className="btn-secondary"
             type="button"
-            onClick={() => void api.clearPlaybackHistory().then(() => {
-              setMsg(PLAYBACK_HISTORY_CLEARED);
-            }).catch((error: Error) => setMsg(error.message))}
+            onClick={() => {
+              if (!window.confirm(PLAYBACK_HISTORY_CONFIRM)) return;
+              void api.clearPlaybackHistory().then(() => {
+                setMsg(PLAYBACK_HISTORY_CLEARED);
+              }).catch((error: Error) => setMsg(error.message));
+            }}
           >
             Clear viewing history
           </button>

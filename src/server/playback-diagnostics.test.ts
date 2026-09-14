@@ -191,7 +191,7 @@ describe("playback diagnostic decisions", () => {
       excluded: false,
     });
     expect(subtitle.kind).toBe("subtitle_guidance");
-    expect(subtitle.draft?.subtitles ?? []).toEqual([]);
+    expect(subtitle.draft).toBeNull();
     expect(subtitle.explanation).toContain("will not remove");
 
     const video = recommendPlaybackRepair({
@@ -206,8 +206,7 @@ describe("playback diagnostic decisions", () => {
       excluded: false,
     });
     expect(video.kind).toBe("video_constraint");
-    expect(video.draft).toEqual({ video: { mode: "copy" } });
-    expect(video.draft).not.toEqual(expect.objectContaining({ video: expect.objectContaining({ codec: "hevc" }) }));
+    expect(video.draft).toBeNull();
     expect(video.canRepair).toBe(false);
     expect(video.explanation).toContain("will not pick HEVC or AV1");
   });
@@ -226,7 +225,8 @@ describe("playback diagnostic decisions", () => {
     });
     expect(rec.kind).toBe("bitrate_suggestion");
     expect(rec.suggestionId).toBe("sug-1");
-    expect(rec.draft?.video).toEqual({ mode: "copy" });
+    expect(rec.draft).toBeNull();
+    expect(rec.openEditor).toBe(false);
     expect(rec.explanation).toContain("will not invent a bitrate target");
   });
 
@@ -246,8 +246,52 @@ describe("playback diagnostic decisions", () => {
     expect(rec.explanation).toContain("not a universal playback fix");
   });
 
+  it("walks mixed audio and bitrate reasons instead of dropping the table", () => {
+    const rec = recommendPlaybackRepair({
+      family: "mixed",
+      rawReasons: ["AudioCodecNotSupported", "ContainerBitrateExceedsLimit"],
+      selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: null },
+      match: "matched",
+      path: "/mnt/nas/movies/film-1080.mkv",
+      report: report(),
+      preferredLanguage: "eng",
+      suggestion: suggestion(),
+      excluded: false,
+    });
+    expect(rec.kind).toBe("add_stereo");
+    expect(rec.canRepair).toBe(true);
+    expect(rec.suggestionId).toBe("sug-1");
+    expect(rec.explanation).toContain("keeps the original mix");
+    expect(rec.explanation).toContain("size-reduction suggestion");
+  });
+
+  it("does not treat TrueHD stereo or mono as a suitable stereo track", () => {
+    const rec = recommendPlaybackRepair({
+      family: "audio",
+      rawReasons: ["AudioCodecNotSupported"],
+      selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: null },
+      match: "matched",
+      path: "/mnt/nas/movies/film-1080.mkv",
+      report: report({
+        audio: [
+          { index: 1, language: "eng", channels: 8, codec: "truehd", title: "Atmos", untagged: false, commentary: false },
+          { index: 2, language: "eng", channels: 2, codec: "truehd", title: "Stereo", untagged: false, commentary: false },
+          { index: 3, language: "eng", channels: 1, codec: "aac", title: "Mono", untagged: false, commentary: false },
+        ],
+      }),
+      preferredLanguage: "eng",
+      suggestion: null,
+      excluded: false,
+    });
+    expect(rec.kind).toBe("add_stereo");
+    expect(rec.draft).toEqual({
+      video: { mode: "copy" },
+      audio: [{ index: 1, action: "add_downmix", channels: 2 }],
+    });
+  });
+
   it("does not recommend a repair for unknown reasons or unmatched files", () => {
-    expect(recommendPlaybackRepair({
+    const unknown = recommendPlaybackRepair({
       family: "unknown",
       rawReasons: ["FutureReasonX"],
       selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: null },
@@ -257,7 +301,20 @@ describe("playback diagnostic decisions", () => {
       preferredLanguage: "eng",
       suggestion: null,
       excluded: false,
-    }).kind).toBe("none");
+    });
+    expect(unknown.kind).toBe("none");
+    expect(unknown.explanation).toBe("Polisharr will not guess a repair from this reason.");
+    expect(recommendPlaybackRepair({
+      family: "unknown",
+      rawReasons: [],
+      selectedTracks: { audioStreamIndex: 1, subtitleStreamIndex: null },
+      match: "matched",
+      path: "/mnt/nas/movies/film-1080.mkv",
+      report: report(),
+      preferredLanguage: "eng",
+      suggestion: null,
+      excluded: false,
+    }).explanation).toContain("Jellyfin did not report the reason");
     expect(recommendPlaybackRepair({
       family: "audio",
       rawReasons: ["AudioCodecNotSupported"],
@@ -299,6 +356,36 @@ describe("playback diagnostic decisions", () => {
       })],
     }).status).toBe("context_changed");
     expect(describeAfterKeep({ keptAt: null, deviceId: "living-room", before, later: [] }).status).toBe("none");
+    expect(describeAfterKeep({
+      keptAt,
+      deviceId: "living-room",
+      before: occurrence({ match: "remote", lastSeenAt: NOW - 10_000 }),
+      later: [occurrence({
+        id: "after",
+        playMethod: "DirectPlay",
+        match: "matched",
+        rawReasons: [],
+        reasonFamily: null,
+        lastSeenAt: NOW,
+      })],
+    }).sentence).toContain("was local");
+  });
+
+  it("omits after-Keep copy when a title was kept without a playback problem", async () => {
+    const db = store();
+    db.upsertInstance({ id: "radarr", kind: "radarr", name: "Radarr", url: "http://radarr", enabled: true });
+    db.upsertInstance({ id: "jf", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin", enabled: true });
+    db.upsertItem(movie());
+    db.addHistory("film-1080", "kept", 0, NOW - 5_000);
+    db.savePlaybackOccurrence(occurrence({
+      id: "direct",
+      playMethod: "DirectPlay",
+      rawReasons: [],
+      reasonFamily: null,
+      lastSeenAt: NOW,
+    }));
+    const diagnostics = createPlaybackDiagnostics({ store: db, clock: () => NOW, statFile: async () => occurrence().revision });
+    expect(diagnostics.titleSummary("film-1080").afterKeep).toEqual({ status: "none", sentence: null });
   });
 
   it("parses composed list filters and rejects invalid windows", () => {

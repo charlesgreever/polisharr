@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { languageDisplayName } from "./language-id.ts";
 import { observationSummary, statPlaybackRevision } from "./playback-monitor.ts";
+import { transcodeReasonFamilies } from "./jellyfin-playback.ts";
 import { normalizeLang } from "./inspect.ts";
 import type { Store } from "./store.ts";
 import type {
@@ -169,6 +170,15 @@ export function parsePlaybackListQuery(
   };
 }
 
+export function familiesFromEvidence(family: PlaybackReasonFamily, rawReasons: string[]): PlaybackReasonFamily[] {
+  const fromReasons = transcodeReasonFamilies(rawReasons).filter((row): row is PlaybackReasonFamily =>
+    (PLAYBACK_REASON_FAMILIES as readonly string[]).includes(row)
+  );
+  if (fromReasons.length > 0) return fromReasons;
+  if (family === "mixed") return [];
+  return [family];
+}
+
 export function recommendPlaybackRepair(input: {
   family: PlaybackReasonFamily;
   rawReasons: string[];
@@ -186,85 +196,17 @@ export function recommendPlaybackRepair(input: {
   if (input.excluded) {
     return none("This title is excluded. Playback repair stays off until you remove the exclusion.");
   }
-  if (input.family === "unknown" || input.family === "other" || input.family === "mixed") {
-    return none("Jellyfin did not report a usable reason. Polisharr will not guess a repair.");
+  const families = new Set(familiesFromEvidence(input.family, input.rawReasons));
+  const parts: PlaybackRecommendation[] = [];
+  if (families.has("audio")) parts.push(audioRecommendation(input));
+  if (families.has("bitrate")) parts.push(bitrateRecommendation(input.suggestion));
+  if (families.has("video")) parts.push(videoRecommendation(input.rawReasons));
+  if (families.has("subtitle")) {
+    parts.push(subtitleRecommendation(input.rawReasons, input.report, input.selectedTracks.subtitleStreamIndex));
   }
-  if (input.family === "subtitle") {
-    return {
-      kind: "subtitle_guidance",
-      explanation: subtitleExplanation(input.rawReasons, input.report, input.selectedTracks.subtitleStreamIndex),
-      canRepair: false,
-      openEditor: true,
-      draft: { video: { mode: "copy" } },
-      suggestionId: null,
-    };
-  }
-  if (input.family === "video") {
-    return {
-      kind: "video_constraint",
-      explanation: videoExplanation(input.rawReasons),
-      canRepair: false,
-      openEditor: true,
-      draft: { video: { mode: "copy" } },
-      suggestionId: null,
-    };
-  }
-  if (input.family === "container") {
-    return {
-      kind: "container_guidance",
-      explanation: containerExplanation(input.path),
-      canRepair: false,
-      openEditor: true,
-      draft: { video: { mode: "copy" } },
-      suggestionId: null,
-    };
-  }
-  if (input.family === "bitrate") {
-    const suggestionId = input.suggestion?.id ?? null;
-    const hasSize = Boolean(input.suggestion?.actions.includes("transcode"));
-    return {
-      kind: "bitrate_suggestion",
-      explanation: hasSize
-        ? "Jellyfin hit a bitrate limit. There is already a size-reduction suggestion for this file. A smaller file may still convert if the player or network is the limit. Polisharr will not invent a bitrate target."
-        : "Jellyfin hit a bitrate limit. Polisharr will not invent a bitrate target from this observation.",
-      canRepair: false,
-      openEditor: true,
-      draft: { video: { mode: "copy" } },
-      suggestionId: hasSize ? suggestionId : null,
-    };
-  }
-  if (input.family !== "audio") return none("Jellyfin did not report a usable reason. Polisharr will not guess a repair.");
-  if (!input.report || input.report.listingState !== "complete") {
-    return none("This file has not been inspected yet, so Polisharr cannot recommend an audio change.");
-  }
-  const selected = selectedAudio(input.report, input.selectedTracks.audioStreamIndex);
-  if (!selected) {
-    return none("Polisharr cannot tell which soundtrack Jellyfin selected. Inspect the file before choosing a repair.");
-  }
-  const lang = normalizeLang(input.preferredLanguage || "eng");
-  const stereo = suitableStereo(input.report, lang);
-  if (selected.channels <= 2 || stereo) {
-    const track = stereo ?? selected;
-    return {
-      kind: "try_existing_stereo",
-      explanation: `This file already has a ${trackLabel(track)} track. In Jellyfin, choose that stereo soundtrack. Polisharr will not add another copy.`,
-      canRepair: false,
-      openEditor: false,
-      draft: null,
-      suggestionId: null,
-    };
-  }
-  return {
-    kind: "add_stereo",
-    explanation: "Jellyfin converted the audio because this file has surround sound and no stereo track in the preferred language. This plan adds an AAC stereo track and keeps the original mix. Conversion on one device does not prove stereo will play everywhere.",
-    canRepair: true,
-    openEditor: true,
-    draft: {
-      video: { mode: "copy" },
-      audio: [{ index: selected.index, action: "add_downmix", channels: 2 }],
-    },
-    suggestionId: null,
-  };
+  if (families.has("container")) parts.push(containerRecommendation(input.path));
+  if (parts.length === 0) return noneFromReasons(input.rawReasons);
+  return mergeRecommendations(parts);
 }
 
 export function describeAfterKeep(input: {
@@ -502,7 +444,7 @@ export function createPlaybackDiagnostics(opts: {
       const checked = await revalidate(id);
       if (!("ok" in checked)) return checked;
       const rec = checked.diagnostic.recommendation;
-      if (!rec.openEditor || !rec.draft || !checked.diagnostic.href) {
+      if (!rec.canRepair || !rec.draft || !checked.diagnostic.href) {
         return { error: rec.explanation, status: 400 };
       }
       return {
@@ -533,15 +475,12 @@ export function createPlaybackDiagnostics(opts: {
         libraryItemId: itemId,
         limit: PLAYBACK_HISTORY_MAX,
       });
-      const latestProblem = keptAt == null
-        ? history.find((row) => isPlaybackProblem(row))
-        : history.find((row) => isPlaybackProblem(row) && row.lastSeenAt <= keptAt)
-          ?? history.find((row) => isPlaybackProblem(row));
-      const afterKeep = latestProblem
-        ? describeAfterKeep({ keptAt, deviceId: latestProblem.deviceId, before: latestProblem, later: history })
-        : keptAt != null
-          ? { status: "not_yet_observed" as const, sentence: AFTER_KEEP_NOT_YET }
-          : { status: "none" as const, sentence: null };
+      const beforeProblem = keptAt == null
+        ? undefined
+        : history.find((row) => isPlaybackProblem(row) && row.lastSeenAt <= keptAt);
+      const afterKeep = beforeProblem
+        ? describeAfterKeep({ keptAt, deviceId: beforeProblem.deviceId, before: beforeProblem, later: history })
+        : { status: "none" as const, sentence: null };
       return {
         windowDays: days,
         observations: rows.slice(0, 20).map((row) => ({ ...row, summary: observationSummary(row) })),
@@ -570,18 +509,151 @@ function pageWindow<T>(items: T[], query: PlaybackListQuery, windowStartAt: numb
   };
 }
 
+function audioRecommendation(input: {
+  selectedTracks: PlaybackOccurrence["selectedTracks"];
+  report: InspectionReport | null;
+  preferredLanguage: string;
+}): PlaybackRecommendation {
+  if (!input.report || input.report.listingState !== "complete") {
+    return none("This file has not been inspected yet, so Polisharr cannot recommend an audio change.");
+  }
+  const selected = selectedAudio(input.report, input.selectedTracks.audioStreamIndex);
+  if (!selected) {
+    return none("Polisharr cannot tell which soundtrack Jellyfin selected. Inspect the file before choosing a repair.");
+  }
+  const lang = normalizeLang(input.preferredLanguage || "eng");
+  if (isPlayableStereo(selected, lang) || (selected.channels === 2 && isPlayableStereoCodec(selected.codec))) {
+    return tryExistingStereo(selected);
+  }
+  const stereo = suitableStereo(input.report, lang);
+  if (stereo) return tryExistingStereo(stereo);
+  if (selected.channels > 2) {
+    return {
+      kind: "add_stereo",
+      explanation: "Jellyfin converted the audio because this file has surround sound and no stereo track in the preferred language. This plan adds an AAC stereo track and keeps the original mix. Conversion on one device does not prove stereo will play everywhere.",
+      canRepair: true,
+      openEditor: true,
+      draft: {
+        video: { mode: "copy" },
+        audio: [{ index: selected.index, action: "add_downmix", channels: 2 }],
+      },
+      suggestionId: null,
+    };
+  }
+  if (selected.channels === 2) {
+    return none(`The selected soundtrack is already two channels in ${selected.codec}, which this player converted. Polisharr will not guess a codec replace from this observation.`);
+  }
+  return none("The selected soundtrack is not surround, so Polisharr will not add a stereo mix from this observation.");
+}
+
+function bitrateRecommendation(suggestion: Suggestion | null): PlaybackRecommendation {
+  const hasSize = Boolean(suggestion?.actions.includes("transcode"));
+  return {
+    kind: "bitrate_suggestion",
+    explanation: hasSize
+      ? "Jellyfin hit a bitrate limit. There is already a size-reduction suggestion for this file. A smaller file may still convert if the player or network is the limit. Polisharr will not invent a bitrate target."
+      : "Jellyfin hit a bitrate limit. Polisharr will not invent a bitrate target from this observation.",
+    canRepair: false,
+    openEditor: false,
+    draft: null,
+    suggestionId: hasSize ? suggestion?.id ?? null : null,
+  };
+}
+
+function videoRecommendation(rawReasons: string[]): PlaybackRecommendation {
+  return {
+    kind: "video_constraint",
+    explanation: videoExplanation(rawReasons),
+    canRepair: false,
+    openEditor: false,
+    draft: null,
+    suggestionId: null,
+  };
+}
+
+function subtitleRecommendation(
+  rawReasons: string[],
+  report: InspectionReport | null,
+  index: number | null,
+): PlaybackRecommendation {
+  return {
+    kind: "subtitle_guidance",
+    explanation: subtitleExplanation(rawReasons, report, index),
+    canRepair: false,
+    openEditor: false,
+    draft: null,
+    suggestionId: null,
+  };
+}
+
+function containerRecommendation(path: string | null): PlaybackRecommendation {
+  return {
+    kind: "container_guidance",
+    explanation: containerExplanation(path),
+    canRepair: false,
+    openEditor: false,
+    draft: null,
+    suggestionId: null,
+  };
+}
+
+function tryExistingStereo(track: AudioTrack): PlaybackRecommendation {
+  return {
+    kind: "try_existing_stereo",
+    explanation: `This file already has a ${trackLabel(track)} track. In Jellyfin, choose that stereo soundtrack. Polisharr will not add another copy.`,
+    canRepair: false,
+    openEditor: false,
+    draft: null,
+    suggestionId: null,
+  };
+}
+
+function mergeRecommendations(parts: PlaybackRecommendation[]): PlaybackRecommendation {
+  const ranked = [...parts].sort((left, right) => recommendationRank(left.kind) - recommendationRank(right.kind));
+  const primary = ranked[0]!;
+  const repair = parts.find((part) => part.canRepair && part.draft);
+  return {
+    kind: primary.kind,
+    explanation: unique(parts.map((part) => part.explanation)).join(" "),
+    canRepair: Boolean(repair),
+    openEditor: Boolean(repair),
+    draft: repair?.draft ?? null,
+    suggestionId: parts.find((part) => part.suggestionId)?.suggestionId ?? null,
+  };
+}
+
+function recommendationRank(kind: PlaybackRecommendationKind): number {
+  const order: PlaybackRecommendationKind[] = [
+    "add_stereo",
+    "try_existing_stereo",
+    "video_constraint",
+    "bitrate_suggestion",
+    "subtitle_guidance",
+    "container_guidance",
+    "none",
+  ];
+  const index = order.indexOf(kind);
+  return index < 0 ? order.length : index;
+}
+
 function selectedAudio(report: InspectionReport, index: number | null): AudioTrack | undefined {
   if (index == null || index < 0) return undefined;
   return report.audio.find((track) => track.index === index);
 }
 
 function suitableStereo(report: InspectionReport, lang: string): AudioTrack | undefined {
-  return report.audio.find((track) =>
-    track.channels > 0
-    && track.channels <= 2
-    && !track.commentary
-    && (track.language === lang || track.language === "und" || track.untagged)
-  );
+  return report.audio.find((track) => isPlayableStereo(track, lang));
+}
+
+function isPlayableStereo(track: AudioTrack, lang: string): boolean {
+  if (track.channels !== 2 || track.commentary) return false;
+  if (!isPlayableStereoCodec(track.codec)) return false;
+  return track.language === lang || track.language === "und" || track.untagged;
+}
+
+function isPlayableStereoCodec(codec: string): boolean {
+  const value = codec.toLowerCase().replace(/[-_]/g, "");
+  return value === "aac" || value === "ac3" || value === "mp3" || value === "opus" || value.startsWith("aac");
 }
 
 function trackLabel(track: AudioTrack): string {
@@ -618,21 +690,35 @@ function none(explanation: string): PlaybackRecommendation {
   };
 }
 
-function contextCompatible(before: PlaybackOccurrence, after: PlaybackOccurrence): boolean {
-  return subtitleOn(before) === subtitleOn(after) && (before.match === "remote") === (after.match === "remote");
+function noneFromReasons(rawReasons: string[]): PlaybackRecommendation {
+  if (rawReasons.length === 0) {
+    return none("Jellyfin did not report the reason. Polisharr will not guess a repair.");
+  }
+  return none("Polisharr will not guess a repair from this reason.");
 }
 
-function subtitleOn(row: PlaybackOccurrence): boolean {
-  const index = row.selectedTracks.subtitleStreamIndex;
-  return index != null && index >= 0;
+function contextCompatible(before: PlaybackOccurrence, after: PlaybackOccurrence): boolean {
+  return streamIndex(before.selectedTracks.subtitleStreamIndex) === streamIndex(after.selectedTracks.subtitleStreamIndex)
+    && streamIndex(before.selectedTracks.audioStreamIndex) === streamIndex(after.selectedTracks.audioStreamIndex)
+    && (before.match === "remote") === (after.match === "remote");
+}
+
+function streamIndex(index: number | null): number | null {
+  if (index == null || index < 0) return null;
+  return index;
 }
 
 function contextChangeSentence(before: PlaybackOccurrence, after: PlaybackOccurrence): string {
   if ((before.match === "remote") !== (after.match === "remote")) {
-    return "Later playback on this device was remote, so this is not a direct comparison.";
+    return after.match === "remote"
+      ? "Later playback on this device was remote, so this is not a direct comparison."
+      : "Later playback on this device was local, so this is not a direct comparison.";
   }
-  if (subtitleOn(before) !== subtitleOn(after)) {
+  if (streamIndex(before.selectedTracks.subtitleStreamIndex) !== streamIndex(after.selectedTracks.subtitleStreamIndex)) {
     return "Later playback on this device used different subtitles, so this is not a direct comparison.";
+  }
+  if (streamIndex(before.selectedTracks.audioStreamIndex) !== streamIndex(after.selectedTracks.audioStreamIndex)) {
+    return "Later playback on this device used a different soundtrack, so this is not a direct comparison.";
   }
   return "Later playback on this device used different settings, so this is not a direct comparison.";
 }

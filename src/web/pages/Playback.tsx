@@ -4,9 +4,10 @@ import { api, type PlaybackDiagnostic, type PlaybackObservation } from "../api";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
 import { FilterChip } from "../components/ui";
+import { playbackFamilyLabel } from "../settings-copy";
 import { usePagedList } from "../use-paged-list";
 
-const FAMILIES = ["", "audio", "video", "subtitle", "container", "bitrate", "unknown"] as const;
+const FAMILIES = ["audio", "video", "subtitle", "container", "bitrate", "unknown"] as const;
 
 export function problemWindowLabel(total: number, days: number): string {
   const noun = total === 1 ? "problem" : "problems";
@@ -80,8 +81,8 @@ export function PlaybackPage() {
           </select>
           <select value={reasonFamily} onChange={(event) => setReasonFamily(event.target.value)}>
             <option value="">Any reason</option>
-            {FAMILIES.filter(Boolean).map((family) => (
-              <option key={family} value={family}>{family}</option>
+            {FAMILIES.map((family) => (
+              <option key={family} value={family}>{playbackFamilyLabel(family)}</option>
             ))}
           </select>
           <select value={String(days)} onChange={(event) => setDays(event.target.value === "30" ? 30 : 7)}>
@@ -143,8 +144,31 @@ export function PlaybackProblemList({
   );
 }
 
+export function playbackProblemActions(row: PlaybackDiagnostic): Array<{ label: string; to: string }> {
+  if (!row.href) return [];
+  const actions: Array<{ label: string; to: string }> = [];
+  if (row.recommendation.canRepair) {
+    actions.push({ label: "Open repair plan", to: `${row.href}?repair=${encodeURIComponent(row.id)}` });
+  }
+  if (row.recommendation.suggestionId) {
+    actions.push({ label: "Open suggestion", to: row.href });
+  }
+  if (actions.length === 0) {
+    if (row.recommendation.kind === "subtitle_guidance") {
+      actions.push({ label: "Inspect tracks", to: row.href });
+    } else if (
+      row.recommendation.kind === "video_constraint"
+      || row.recommendation.kind === "container_guidance"
+      || row.recommendation.kind === "try_existing_stereo"
+    ) {
+      actions.push({ label: "Open title", to: row.href });
+    }
+  }
+  return actions;
+}
+
 export function PlaybackProblemCard({ row, onDismiss }: { row: PlaybackDiagnostic; onDismiss?: (id: string) => void }) {
-  const href = row.href ? `${row.href}?repair=${encodeURIComponent(row.id)}` : "";
+  const actions = playbackProblemActions(row);
   return (
     <article className="space-y-2">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
@@ -159,7 +183,7 @@ export function PlaybackProblemCard({ row, onDismiss }: { row: PlaybackDiagnosti
       <p className="m-0 text-sm text-ink">{row.summary}</p>
       <p className="m-0 text-sm text-muted">{row.recommendation.explanation}</p>
       {row.afterKeep.sentence && <p className="m-0 text-sm text-ink">{row.afterKeep.sentence}</p>}
-      {row.stale && <p className="m-0 text-sm text-warn">This Jellyfin connection looks stale.</p>}
+      {row.stale && <p className="m-0 text-sm text-warn">Last check is stale.</p>}
       <details className="text-sm text-muted">
         <summary className="min-h-11 cursor-pointer py-2">Show details</summary>
         <p className="m-0">Playback method: {row.playMethod || "unknown"}</p>
@@ -167,9 +191,9 @@ export function PlaybackProblemCard({ row, onDismiss }: { row: PlaybackDiagnosti
         <p className="m-0">Reported reason: {row.rawReasons.length ? row.rawReasons.join(", ") : "Jellyfin did not report the reason."}</p>
       </details>
       <div className="flex flex-wrap gap-2">
-        {row.recommendation.openEditor && href && (
-          <Link className="btn min-h-11" to={href}>Open repair plan</Link>
-        )}
+        {actions.map((action) => (
+          <Link key={action.label} className="btn min-h-11" to={action.to}>{action.label}</Link>
+        ))}
         {onDismiss && (
           <button className="btn-secondary min-h-11" type="button" onClick={() => onDismiss(row.id)}>
             Dismiss

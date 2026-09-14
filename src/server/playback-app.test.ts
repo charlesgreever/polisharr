@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -434,10 +434,9 @@ describe("playback HTTP", () => {
     const video = listed.items.find((row) => row.reasonFamily === "video");
     const subtitle = listed.items.find((row) => row.reasonFamily === "subtitle");
     expect(video?.recommendation.kind).toBe("video_constraint");
-    expect(video?.recommendation.draft.video?.mode).toBe("copy");
-    expect(video?.recommendation.draft).not.toEqual(expect.objectContaining({ codec: "hevc" }));
+    expect(video?.recommendation.draft).toBeNull();
     expect(subtitle?.recommendation.kind).toBe("subtitle_guidance");
-    expect(subtitle?.recommendation.draft.subtitles ?? []).toEqual([]);
+    expect(subtitle?.recommendation.draft).toBeNull();
   });
 
   it("shows Direct Play after Keep on the title page and Not yet observed without a later play", async () => {
@@ -465,6 +464,51 @@ describe("playback HTTP", () => {
       playback: { afterKeep: { sentence: string | null } };
     };
     expect(observed.playback.afterKeep.sentence).toBe("Direct playback observed on this device after Keep.");
+  });
+
+  it("omits after-Keep copy on a kept title that never had a conversion problem", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    ctx.store.addHistory("film-1080", "kept", 0, Date.now() - 1_000);
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "direct",
+      sessionId: "direct",
+      playMethod: "DirectPlay",
+      reasonFamily: null,
+      rawReasons: [],
+    }));
+    const body = await (await ctx.app.request("/api/library/items/film-1080", { headers: ctx.headers })).json() as {
+      playback: { afterKeep: { sentence: string | null } };
+    };
+    expect(body.playback.afterKeep.sentence).toBeNull();
+  });
+
+  it("rejects queueing a stale playback draft and leaves the queue empty", async () => {
+    const ctx = await playbackApp(jellyfinFetch({ sessions: () => [] }));
+    ctx.store.saveInspection("film-1080", surroundReport());
+    const revision = { canonicalPath: "/mnt/nas/movies/film-1080.mkv", sizeBytes: 8, mtimeMs: 8, fileId: "8:8" };
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, { id: "stale-q", sessionId: "stale-q", revision }));
+    const listed = await (await ctx.app.request("/api/playback/diagnostics", { headers: ctx.headers })).json() as {
+      items: Array<{ id: string; recommendation: { draft: unknown } }>;
+    };
+    expect(listed.items[0]?.id).toBeTruthy();
+    const reviewPath = join(ctx.store.db.name, "..", "review");
+    mkdirSync(reviewPath, { recursive: true });
+    await ctx.app.request("/api/settings", {
+      method: "PUT",
+      headers: ctx.headers,
+      body: JSON.stringify({ languageConfirmed: true, preferredLanguage: "eng", reviewPath }),
+    });
+    const queued = await ctx.app.request("/api/library/items/film-1080/queue", {
+      method: "POST",
+      headers: ctx.headers,
+      body: JSON.stringify({
+        draft: listed.items[0]?.recommendation.draft ?? { video: { mode: "copy" }, audio: [{ index: 1, action: "add_downmix", channels: 2 }] },
+        playbackDiagnosticId: listed.items[0]!.id,
+      }),
+    });
+    expect(queued.status).toBe(409);
+    const jobs = await (await ctx.app.request("/api/jobs", { headers: ctx.headers })).json() as { items: unknown[] };
+    expect(jobs.items).toEqual([]);
   });
 
   it("blocks playback routes on a worker", async () => {

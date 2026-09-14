@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { SIZE_CAP_GRID, hardwareBackendLabel, PLAYBACK_HISTORY_CLEARED, PLAYBACK_OBSERVE_HELP, sizeCapLabel, transcodeBelowTargetLabel } from "./settings-copy";
+import {
+  SIZE_CAP_GRID,
+  hardwareBackendLabel,
+  PLAYBACK_HISTORY_CLEARED,
+  PLAYBACK_HISTORY_CONFIRM,
+  PLAYBACK_OBSERVE_HELP,
+  playbackFamilyLabel,
+  playbackHealthLabel,
+  sizeCapLabel,
+  transcodeBelowTargetLabel,
+} from "./settings-copy";
 
 describe("settings copy", () => {
   it("names size caps in everyday words", () => {
@@ -23,6 +33,11 @@ describe("settings copy", () => {
     expect(PLAYBACK_OBSERVE_HELP).toContain("device name");
     expect(PLAYBACK_OBSERVE_HELP).toContain("not usernames or IP addresses");
     expect(PLAYBACK_HISTORY_CLEARED).toBe("Viewing history cleared. Live playback coverage is unchanged.");
+    expect(PLAYBACK_HISTORY_CONFIRM).toContain("dismissed recommendations");
+    expect(playbackFamilyLabel("audio")).toBe("Audio conversion");
+    expect(playbackFamilyLabel("bitrate")).toBe("Bitrate limit");
+    expect(playbackHealthLabel("playing")).toBe("Jellyfin is playing");
+    expect(playbackHealthLabel("playing", true)).toBe("Last check is stale");
   });
 
   it("names encode APIs the same way Review does", () => {

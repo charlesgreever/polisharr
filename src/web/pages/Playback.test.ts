@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { PlaybackObservationList, PlaybackProblemCard, PlaybackProblemList, problemWindowLabel } from "./Playback";
+import { PlaybackObservationList, PlaybackProblemCard, PlaybackProblemList, playbackProblemActions, problemWindowLabel } from "./Playback";
 import type { PlaybackDiagnostic, PlaybackObservation } from "../api";
 
 function diagnostic(over: Partial<PlaybackDiagnostic> = {}): PlaybackDiagnostic {
@@ -75,6 +75,52 @@ describe("Playback page copy", () => {
     })));
     expect(html).not.toContain("Open repair plan");
     expect(html).toContain("Direct playback observed on this device after Keep.");
+  });
+
+  it("links a size suggestion and opens the title for guidance, not a copy repair draft", () => {
+    expect(playbackProblemActions(diagnostic({
+      recommendation: {
+        kind: "bitrate_suggestion",
+        explanation: "Jellyfin hit a bitrate limit.",
+        canRepair: false,
+        openEditor: false,
+        draft: null,
+        suggestionId: "sug-1",
+      },
+    }))).toEqual([{ label: "Open suggestion", to: "/movies/film-1080" }]);
+    expect(playbackProblemActions(diagnostic({
+      recommendation: {
+        kind: "subtitle_guidance",
+        explanation: "Jellyfin converted the subtitles.",
+        canRepair: false,
+        openEditor: false,
+        draft: null,
+        suggestionId: null,
+      },
+    }))).toEqual([{ label: "Inspect tracks", to: "/movies/film-1080" }]);
+    expect(playbackProblemActions(diagnostic({
+      recommendation: {
+        kind: "video_constraint",
+        explanation: "Jellyfin could not play this video as-is.",
+        canRepair: false,
+        openEditor: false,
+        draft: null,
+        suggestionId: null,
+      },
+    }))).toEqual([{ label: "Open title", to: "/movies/film-1080" }]);
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(PlaybackProblemCard, {
+      row: diagnostic({
+        recommendation: {
+          kind: "bitrate_suggestion",
+          explanation: "Jellyfin hit a bitrate limit.",
+          canRepair: false,
+          openEditor: false,
+          draft: null,
+          suggestionId: null,
+        },
+      }),
+    })));
+    expect(html).not.toContain("Open repair plan");
   });
 
   it("lists observations separately from file-inspection errors", () => {

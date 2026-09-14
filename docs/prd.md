@@ -2,6 +2,8 @@
 
 Canonical v1 product spec. This document replaces GitHub issue #20. v2 is [v2 prd.md](v2%20prd.md) (issue #26).
 
+Proposed extension: [Playback Diagnostics, Playback Protection, and Review Previews](playback-and-review-prd.md). It defines Jellyfin observations, playback-aware scheduling and replacement, and matching Review clips. Its [implementation plan](../plans/playback-and-review.md) lists delivery phases and acceptance tests. These documents describe planned behavior, not shipped features.
+
 ## Problem Statement
 
 I run a Plex and Jellyfin library with Radarr, Sonarr, and a large NAS. A lot of the media is wasteful or awkward to play: huge files, H.264 that could be HEVC, dozens of subtitle and audio tracks that are not in my language, and surround or Atmos tracks that TVs cannot play without a sound system.

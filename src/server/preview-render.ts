@@ -49,7 +49,7 @@ export const PREVIEW_PRESENTATION_SLACK_MS = 250;
 
 export const PREVIEW_SHORT_DURATION = "Both copies need at least one second of video to compare.";
 export const PREVIEW_MISSING_STREAMS = "A preview needs playable video and audio on both copies.";
-export const PREVIEW_HDR_UNAVAILABLE = "HDR10 previews are unavailable until Polisharr can convert both copies the same way.";
+export const PREVIEW_HDR_UNAVAILABLE = "HDR10 previews need the same HDR on both copies so Polisharr can convert them the same way.";
 export const PREVIEW_DV_UNAVAILABLE = "Dolby Vision previews are unavailable in this release.";
 export const PREVIEW_HDR10PLUS_UNAVAILABLE = "HDR10+ previews are unavailable in this release.";
 export const PREVIEW_NO_SOFTWARE_ENCODE = "No hardware H.264 encoder is available. Polisharr will not fall back to a software encode.";
@@ -63,6 +63,7 @@ export const PREVIEW_SAR_WARNING = "The original and finished copies have differ
 export const PREVIEW_SIZE_CAP = "A preview clip exceeded the 128 MiB pair limit.";
 export const PREVIEW_AUDIO_LABEL = "AAC stereo (downmixed for browser playback)";
 export const PREVIEW_COLOR_SDR = "SDR";
+export const PREVIEW_COLOR_HDR10_TO_SDR = "HDR10 converted to SDR with the same BT.2390 tonemap on both copies";
 
 export { PREVIEW_DIR_NAME, PREVIEW_FINISHED_FILE, PREVIEW_ORIGINAL_FILE, PREVIEW_PUBLISHED_MARKER };
 
@@ -104,8 +105,10 @@ export type NormalizedInterval =
   | { ok: true; startMs: number; durationMs: number }
   | { ok: false; error: string };
 
+export type PreviewColor = "sdr" | "hdr10-to-sdr";
+
 export type ColorDecision =
-  | { ok: true; color: "sdr" }
+  | { ok: true; color: PreviewColor }
   | { ok: false; error: string };
 
 export type RunFile = (
@@ -163,6 +166,7 @@ export function previewColorDecision(
   const kinds = [original.hdr, finished.hdr];
   if (kinds.some((kind) => kind === "dolby_vision")) return { ok: false, error: PREVIEW_DV_UNAVAILABLE };
   if (kinds.some((kind) => kind === "hdr10plus")) return { ok: false, error: PREVIEW_HDR10PLUS_UNAVAILABLE };
+  if (original.hdr === "hdr10" && finished.hdr === "hdr10") return { ok: true, color: "hdr10-to-sdr" };
   if (kinds.some((kind) => kind === "hdr10")) return { ok: false, error: PREVIEW_HDR_UNAVAILABLE };
   return { ok: true, color: "sdr" };
 }
@@ -267,12 +271,12 @@ export function revisionKey(revision: { canonicalPath: string; sizeBytes: number
 
 export function transformLabels(input: {
   size: MatchedPreviewSize;
-  color: "sdr";
+  color: PreviewColor;
 }): PreviewTransformLabels {
   return {
     scale: input.size.label,
     audio: PREVIEW_AUDIO_LABEL,
-    color: PREVIEW_COLOR_SDR,
+    color: input.color === "hdr10-to-sdr" ? PREVIEW_COLOR_HDR10_TO_SDR : PREVIEW_COLOR_SDR,
     warnings: input.size.sarMismatch ? [PREVIEW_SAR_WARNING] : [],
   };
 }
@@ -379,6 +383,7 @@ export function buildClipArgs(input: {
   audioIndex: number;
   width: number;
   height: number;
+  tonemap?: boolean;
 }): string[] {
   const startSec = (input.startMs / 1000).toFixed(3);
   const durationSec = (input.durationMs / 1000).toFixed(3);
@@ -399,7 +404,7 @@ export function buildClipArgs(input: {
     "-sn",
     "-dn",
     "-vf",
-    scaleFilter(input.encoder, input.width, input.height),
+    scaleFilter(input.encoder, input.width, input.height, input.tonemap === true),
     "-c:v",
     input.encoder,
   );
@@ -605,6 +610,7 @@ export async function renderPreviewPair(input: {
       audioIndex: plan.originalAudioIndex,
       width: plan.originalWidth,
       height: plan.originalHeight,
+      tonemap: plan.tonemap === true,
       siblingPath: finishedPartial,
       control: input.control,
       runFile,
@@ -623,6 +629,7 @@ export async function renderPreviewPair(input: {
       audioIndex: plan.sidecarAudioIndex,
       width: plan.finishedWidth,
       height: plan.finishedHeight,
+      tonemap: plan.tonemap === true,
       siblingPath: originalPartial,
       control: input.control,
       runFile,
@@ -696,10 +703,19 @@ function appendHwAccel(args: string[], encoder: PreviewH264Encoder, vaapiDevice?
   args.push("-hwaccel", "videotoolbox");
 }
 
-function scaleFilter(encoder: PreviewH264Encoder, width: number, height: number): string {
-  if (encoder === "h264_nvenc") return `scale_cuda=w=${width}:h=${height}:format=nv12,hwdownload,format=nv12`;
-  if (encoder === "h264_vaapi") return `scale_vaapi=w=${width}:h=${height}:format=nv12`;
-  return `scale=${width}:${height},format=nv12`;
+function scaleFilter(encoder: PreviewH264Encoder, width: number, height: number, tonemap = false): string {
+  if (encoder === "h264_nvenc") {
+    const map = tonemap ? "tonemap_cuda=tonemap=bt2390:desat=0:format=nv12," : "";
+    return `${map}scale_cuda=w=${width}:h=${height}:format=nv12,hwdownload,format=nv12`;
+  }
+  if (encoder === "h264_vaapi") {
+    const map = tonemap ? "tonemap_vaapi=format=nv12:p=bt709:t=bt709:m=bt709," : "";
+    return `${map}scale_vaapi=w=${width}:h=${height}:format=nv12`;
+  }
+  const map = tonemap
+    ? "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=nv12,"
+    : "";
+  return `${map}scale=${width}:${height},format=nv12`;
 }
 
 function appendEncoderSettings(args: string[], encoder: PreviewH264Encoder): void {
@@ -726,6 +742,7 @@ async function renderOneClip(input: {
   audioIndex: number;
   width: number;
   height: number;
+  tonemap?: boolean;
   siblingPath: string;
   control: PreviewRendererControl;
   runFile: RunFile;
@@ -742,6 +759,7 @@ async function renderOneClip(input: {
     audioIndex: input.audioIndex,
     width: input.width,
     height: input.height,
+    tonemap: input.tonemap === true,
   });
   let child: { kill: (signal?: NodeJS.Signals) => boolean | void } | undefined;
   const watch = setInterval(() => {

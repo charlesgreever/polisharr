@@ -478,12 +478,20 @@ describe("preview task lifecycle", () => {
     expect(other.task.id).not.toBe(first.task.id);
   });
 
-  it("returns 400 for an invalid timestamp and unavailable for HDR", async () => {
+  it("returns 400 for an invalid timestamp, queues matching HDR10, and blocks mixed HDR", async () => {
     const ctx = harness();
     const invalid = await ctx.previews.request("rev-1", { startMs: 60_000 });
     expect(invalid).toMatchObject({ status: 400 });
     const hdr = harness({ probeMedia: async () => sdrMedia({ hdr: "hdr10" }) });
-    const blocked = await hdr.previews.request("rev-1");
+    const queued = await hdr.previews.request("rev-1");
+    if (!("accepted" in queued)) return;
+    expect(queued.task.status).toBe("queued");
+    expect(queued.task.error).toBeNull();
+    expect(queued.task.artifact?.labels.color).toMatch(/HDR10 converted to SDR/);
+    const mixed = harness({
+      probeMedia: async (path) => sdrMedia({ hdr: path.includes("sidecar") ? "none" : "hdr10" }),
+    });
+    const blocked = await mixed.previews.request("rev-1");
     if (!("accepted" in blocked)) return;
     expect(blocked.task.status).toBe("failed");
     expect(blocked.task.error).toBe(PREVIEW_HDR_UNAVAILABLE);

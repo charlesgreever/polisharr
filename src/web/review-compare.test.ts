@@ -131,6 +131,12 @@ describe("preview status and labels", () => {
       "Polisharr converts HDR to SDR when it can generate a pair.",
       "The original and finished copies have different display aspect ratios. Neither image is stretched.",
     ]);
+    expect(previewTransformLines({
+      scale: "1920×800",
+      audio: "AAC stereo (downmixed for browser playback)",
+      color: "HDR10 converted to SDR with the same BT.2390 tonemap on both copies",
+      warnings: [],
+    })).toContain("HDR10 converted to SDR with the same BT.2390 tonemap on both copies.");
   });
 
   it("marks added and removed audio tracks and defaults to original surround plus added stereo", () => {

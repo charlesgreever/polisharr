@@ -189,6 +189,7 @@ export type PreviewRenderPlan = {
   originalHeight: number;
   finishedWidth: number;
   finishedHeight: number;
+  tonemap?: boolean;
 };
 
 export type RemotePreviewDocument = {
@@ -482,6 +483,7 @@ function parsePreviewRenderPlan(value: unknown): PreviewRenderPlan | null {
     originalHeight,
     finishedWidth,
     finishedHeight,
+    tonemap: raw.tonemap === true,
   };
 }
 

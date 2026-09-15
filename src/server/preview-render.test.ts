@@ -81,7 +81,8 @@ describe("preview scale and color", () => {
     expect(size.label).toContain("×");
   });
 
-  it("leaves HDR10, HDR10+, and Dolby Vision unavailable", () => {
+  it("converts matching HDR10 pairs and still blocks mixed HDR, HDR10+, and Dolby Vision", () => {
+    expect(previewColorDecision({ hdr: "hdr10" }, { hdr: "hdr10" })).toEqual({ ok: true, color: "hdr10-to-sdr" });
     expect(previewColorDecision({ hdr: "hdr10" }, { hdr: "none" })).toEqual({ ok: false, error: PREVIEW_HDR_UNAVAILABLE });
     expect(previewColorDecision({ hdr: "hdr10plus" }, { hdr: "none" })).toEqual({ ok: false, error: PREVIEW_HDR10PLUS_UNAVAILABLE });
     expect(previewColorDecision({ hdr: "dolby_vision" }, { hdr: "none" })).toEqual({ ok: false, error: PREVIEW_DV_UNAVAILABLE });
@@ -139,6 +140,25 @@ describe("preview ffmpeg commands", () => {
     expect(args).toContain("scale_cuda=w=1280:h=720:format=nv12,hwdownload,format=nv12");
     expect(args.at(-1)).toBe("/review/.previews/p/original.mp4");
     expect(() => assertHardwareVideoEncoder([...args.slice(0, -1), "libx264", "out.mp4"])).toThrow(PREVIEW_NO_SOFTWARE_ENCODE);
+  });
+
+  it("applies the same CUDA BT.2390 tonemap on HDR10 clips before scale", () => {
+    const args = buildClipArgs({
+      sourcePath: "/media/hdr.mkv",
+      destPath: "/review/.previews/p/original.mp4",
+      encoder: "h264_nvenc",
+      startMs: 0,
+      durationMs: 15_000,
+      videoIndex: 0,
+      audioIndex: 1,
+      width: 1920,
+      height: 800,
+      tonemap: true,
+    });
+    const vf = args[args.indexOf("-vf") + 1];
+    expect(vf).toContain("tonemap_cuda=tonemap=bt2390");
+    expect(vf).toContain("scale_cuda=w=1920:h=800:format=nv12");
+    expect(args.join(" ")).not.toMatch(/libx264/);
   });
 });
 

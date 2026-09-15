@@ -50,6 +50,7 @@ export type PreviewArtifact = {
   finishedWidth: number;
   finishedHeight: number;
   labels: PreviewTransformLabels;
+  tonemap?: boolean;
 };
 
 export type PreviewTask = {

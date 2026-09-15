@@ -142,9 +142,11 @@ export function previewTransformLines(transform: PreviewStatus["transform"] | nu
   const audio = transform?.audio
     ? (transform.audio.endsWith(".") ? transform.audio : `${transform.audio}.`)
     : "Audio is AAC stereo, downmixed for browser playback.";
-  const color = transform?.color && /hdr/i.test(transform.color)
-    ? `Color: ${transform.color}.`
-    : "Polisharr converts HDR to SDR when it can generate a pair.";
+  const color = transform?.color && /converted to SDR/i.test(transform.color)
+    ? (transform.color.endsWith(".") ? transform.color : `${transform.color}.`)
+    : transform?.color && /hdr/i.test(transform.color)
+      ? `Color: ${transform.color}.`
+      : "Polisharr converts HDR to SDR when it can generate a pair.";
   return [scale, audio, color, ...(transform?.warnings ?? [])];
 }
 

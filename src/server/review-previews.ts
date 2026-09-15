@@ -235,7 +235,8 @@ export class PreviewService {
       }
     }
     const size = matchedPreviewSize(media.original, media.finished);
-    const labels = transformLabels({ size, color: "sdr" });
+    const labels = transformLabels({ size, color: color.color });
+    const tonemap = color.color === "hdr10-to-sdr";
     const artifact: PreviewArtifact = {
       originalClipId: randomUUID(),
       finishedClipId: randomUUID(),
@@ -251,6 +252,7 @@ export class PreviewService {
       finishedWidth: size.finished.width,
       finishedHeight: size.finished.height,
       labels,
+      tonemap,
     };
     const id = randomUUID();
     const now = this.now();
@@ -266,6 +268,7 @@ export class PreviewService {
       originalHeight: size.original.height,
       finishedWidth: size.finished.width,
       finishedHeight: size.finished.height,
+      tonemap,
     });
     if (!this.hasCapablePreviewNode(now)) {
       this.opts.store.insertPreviewTask({
@@ -868,6 +871,7 @@ export class PreviewService {
       originalHeight: artifact.height,
       finishedWidth: artifact.finishedWidth,
       finishedHeight: artifact.finishedHeight,
+      tonemap: artifact.tonemap === true,
     };
   }
 }

@@ -9,6 +9,7 @@ import {
   nodeRoleLabel,
   parsePreviewCapability,
   parsePreviewComplete,
+  parsePreviewProgress,
   parseRemotePreviewDocument,
   pickOpenEncodeNode,
   pickOpenPreviewNode,
@@ -201,6 +202,17 @@ describe("cluster node identity", () => {
     expect(nodeCanPreview({
       preview: { protocolVersion: PREVIEW_PROTOCOL_VERSION, h264Encoder: "h264_nvenc", profiles: [PREVIEW_SDR_1080P_PROFILE] },
     })).toBe(true);
+  });
+
+  it("treats omitted or null preview progress as a lease heartbeat", () => {
+    expect(parsePreviewProgress({ leaseToken: "tok" })).toEqual({ ok: true, leaseToken: "tok", progress: null, log: "" });
+    expect(parsePreviewProgress({ leaseToken: "tok", progress: null })).toEqual({
+      ok: true,
+      leaseToken: "tok",
+      progress: null,
+      log: "",
+    });
+    expect(parsePreviewProgress({ leaseToken: "tok", progress: Number.NaN }).ok).toBe(false);
   });
 
   it("rejects optimize-job fields on preview completion and requires a preview kind", () => {

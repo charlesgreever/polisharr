@@ -229,7 +229,16 @@ export class WorkerLoop {
     if (!claimed.ok || !Array.isArray(claimed.data.previews)) return;
     for (const raw of claimed.data.previews) {
       const parsed = parseRemotePreviewDocument(raw);
-      if (!parsed.ok) continue;
+      if (!parsed.ok) {
+        const identity = previewClaimIdentity(raw);
+        if (identity) {
+          await this.postJson(`/api/cluster/previews/${identity.id}/fail`, {
+            leaseToken: identity.leaseToken,
+            error: parsed.error,
+          });
+        }
+        continue;
+      }
       const preview = parsed.preview;
       if (this.previewInflight.has(preview.id) || this.inflight.has(preview.id)) continue;
       const remaining = Math.max(0, PREVIEW_LEASE_MS - elapsed);
@@ -472,6 +481,16 @@ export class WorkerLoop {
       return { ok: false, status: 0, error: "unreachable" };
     }
   }
+}
+
+function previewClaimIdentity(value: unknown): { id: string; leaseToken: string } | null {
+  const raw = value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  const leaseToken = typeof raw.leaseToken === "string" ? raw.leaseToken.trim() : "";
+  if (!id || !leaseToken) return null;
+  return { id, leaseToken };
 }
 
 export function joinMasterPath(masterUrl: string, path: string): string | null {

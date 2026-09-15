@@ -2554,6 +2554,7 @@ function parsePreviewArtifact(value: unknown): PreviewArtifact | null {
     height: typeof raw.height === "number" ? raw.height : 0,
     finishedWidth: typeof raw.finishedWidth === "number" ? raw.finishedWidth : 0,
     finishedHeight: typeof raw.finishedHeight === "number" ? raw.finishedHeight : 0,
+    tonemap: raw.tonemap === true,
     labels: {
       scale: typeof labelsRaw.scale === "string" ? labelsRaw.scale : "",
       audio: typeof labelsRaw.audio === "string" ? labelsRaw.audio : "",

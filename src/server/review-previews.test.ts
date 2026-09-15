@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PREVIEW_LEASE_MS, PREVIEW_LEASE_SAFETY_MARGIN_MS, PREVIEW_PROTOCOL_VERSION, PREVIEW_SDR_1080P_PROFILE } from "./cluster.ts";
+import { parseRemotePreviewDocument, PREVIEW_LEASE_MS, PREVIEW_LEASE_SAFETY_MARGIN_MS, PREVIEW_PROTOCOL_VERSION, PREVIEW_SDR_1080P_PROFILE } from "./cluster.ts";
 import { JobService, type JobPlaybackGate } from "./jobs.ts";
 import { PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
 import {
@@ -263,6 +263,13 @@ describe("preview task lifecycle", () => {
     });
     expect(ctx.store.runningCountOnNode("worker-1")).toBe(1);
     expect(ctx.store.reservationsForReview("rev-1")).toHaveLength(2);
+    const parsed = parseRemotePreviewDocument(JSON.parse(JSON.stringify(claimed[0])));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.preview.render).toMatchObject({
+      originalWidth: expect.any(Number),
+      originalHeight: expect.any(Number),
+    });
   });
 
   it("shares node slots with encodes and limits one pair per node and two globally", async () => {

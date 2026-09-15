@@ -162,6 +162,51 @@ describe("worker loop", () => {
     expect(rendered).toBe(1);
   });
 
+  it("fails a claimed preview when the document cannot be parsed instead of leaving the lease running", async () => {
+    const calls: string[] = [];
+    const bodies: unknown[] = [];
+    const worker = loop({
+      previewCapability: async () => ({
+        protocolVersion: PREVIEW_PROTOCOL_VERSION,
+        h264Encoder: "h264_nvenc",
+        profiles: [PREVIEW_SDR_1080P_PROFILE],
+      }),
+      previewRenderer: async () => ({ ok: true as const }),
+      fetch: (async (url, init) => {
+        const path = String(url);
+        calls.push(path);
+        if (init?.body) bodies.push(JSON.parse(String(init.body)));
+        if (path.endsWith("/api/cluster/hello") || path.endsWith("/api/cluster/heartbeat")) {
+          return new Response(JSON.stringify({ ok: true, concurrency: 1 }), { status: 200 });
+        }
+        if (path.endsWith("/api/cluster/previews/claim")) {
+          return new Response(JSON.stringify({
+            previews: [{
+              kind: "preview",
+              id: "prv-bad",
+              leaseToken: "tok-bad",
+              leaseUntil: 31_000,
+              reviewId: "rev-1",
+              sourcePath: "/a.mkv",
+              sidecarPath: "/b.mkv",
+              nodeId: "worker-1",
+            }],
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch,
+    });
+    await worker.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.some((url) => url.endsWith("/api/cluster/previews/prv-bad/fail"))).toBe(true);
+    expect(bodies.some((body) => (
+      body
+      && typeof body === "object"
+      && (body as { leaseToken?: string }).leaseToken === "tok-bad"
+      && typeof (body as { error?: string }).error === "string"
+    ))).toBe(true);
+  });
+
   it("kills preview children when the master stays disconnected past the local lease deadline", async () => {
     let now = 0;
     let killed = false;

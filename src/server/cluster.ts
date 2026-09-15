@@ -493,7 +493,7 @@ export function parsePreviewProgress(
   const raw = record(value);
   const leaseToken = trimString(raw.leaseToken);
   if (!leaseToken) return { ok: false, error: "A lease token is required." };
-  if (raw.progress !== undefined && (typeof raw.progress !== "number" || !Number.isFinite(raw.progress))) {
+  if (raw.progress != null && (typeof raw.progress !== "number" || !Number.isFinite(raw.progress))) {
     return { ok: false, error: "Progress is invalid." };
   }
   return {

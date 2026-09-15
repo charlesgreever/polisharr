@@ -1108,6 +1108,7 @@ export class Store {
     phase: JobPhase;
     progress: number;
     error: string | null;
+    warning: string | null;
     runNow: boolean;
     position: number;
     promoteError: string | null;
@@ -1127,13 +1128,14 @@ export class Store {
       : patch.sourceRevision == null ? null : JSON.stringify(patch.sourceRevision);
     this.db
       .prepare(
-        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=?, dispatched_write_mode=?, source_revision=? WHERE id=?",
+        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, warning=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=?, dispatched_write_mode=?, source_revision=? WHERE id=?",
       )
       .run(
         patch.status ?? current.status,
         patch.phase ?? current.phase,
         patch.progress ?? current.progress,
         patch.error === undefined ? current.error : patch.error,
+        patch.warning === undefined ? current.warning : patch.warning,
         (patch.runNow ?? current.run_now === 1) ? 1 : 0,
         patch.position ?? current.position,
         patch.writeMode ?? current.write_mode ?? "sidecar",

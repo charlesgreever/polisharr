@@ -86,7 +86,8 @@ export async function defaultPreviewSmoke(input: {
     "-f",
     "lavfi",
     "-i",
-    "testsrc=size=64x64:rate=1:duration=1",
+    // Blackwell NVENC rejects frames below ~146px; 64x64 smoke would hide a working 5090.
+    "testsrc=size=256x256:rate=1:duration=1",
     "-f",
     "lavfi",
     "-i",

@@ -530,6 +530,7 @@ export function createApp(opts: AppOptions) {
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     const now = clusterNow();
     const existing = store.getNode(parsed.hello.nodeId);
+    const hardwareBefore = clusterHardware();
     const av1Before = clusterAv1();
     store.upsertNode({
       id: parsed.hello.nodeId,
@@ -543,7 +544,7 @@ export function createApp(opts: AppOptions) {
       currentJobId: null,
       preview: parsed.hello.preview,
     });
-    if (clusterAv1() !== av1Before) recomputeAllSuggestions();
+    if (clusterHardware() !== hardwareBefore || clusterAv1() !== av1Before) recomputeAllSuggestions();
     const node = store.getNode(parsed.hello.nodeId);
     return c.json({ ok: true, nodeId: parsed.hello.nodeId, concurrency: node?.concurrency ?? parsed.hello.concurrency });
   });
@@ -556,6 +557,8 @@ export function createApp(opts: AppOptions) {
     const existing = store.getNode(parsed.beat.nodeId);
     if (!existing) return c.json({ error: CLUSTER_UNKNOWN_NODE }, 404);
     const now = opts.clock?.() ?? Date.now();
+    const hardwareBefore = clusterHardware();
+    const av1Before = clusterAv1();
     store.upsertNode({
       ...existing,
       lastSeen: now,
@@ -566,6 +569,7 @@ export function createApp(opts: AppOptions) {
     });
     store.renewNodeLeases(parsed.beat.nodeId, parsed.beat.runningJobIds, now + LEASE_MS);
     store.renewPreviewLeases(parsed.beat.nodeId, parsed.beat.runningPreviewIds, now + PREVIEW_LEASE_MS);
+    if (clusterHardware() !== hardwareBefore || clusterAv1() !== av1Before) recomputeAllSuggestions();
     const node = store.getNode(parsed.beat.nodeId);
     return c.json({
       ok: true,
@@ -955,7 +959,18 @@ export function createApp(opts: AppOptions) {
       hardwareAvailable: clusterHardware(),
       audioMix: store.audioMixForItem(item),
     });
-    return store.saveSuggestion(itemId, suggestion) ?? null;
+    const saved = store.saveSuggestion(itemId, suggestion) ?? null;
+    syncOpenJobWarnings(itemId, saved?.warning ?? null);
+    return saved;
+  }
+
+  function syncOpenJobWarnings(itemId: string, warning: string | null): void {
+    for (const job of store.listJobs()) {
+      if (job.itemId !== itemId) continue;
+      if (job.status !== "queued" && job.status !== "held" && job.status !== "running" && job.status !== "paused") continue;
+      if (job.warning === warning) continue;
+      store.updateJob(job.id, { warning });
+    }
   }
 
   function recomputeAllSuggestions(): void {

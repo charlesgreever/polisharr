@@ -2917,6 +2917,81 @@ describe("public HTTP behavior", () => {
     expect(created.store.getJob(ok.id)?.assignedNodeId).toBe("5090");
   });
 
+  it("clears the hardware-unavailable warning when a GPU worker heartbeats after a bounce", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const none: HardwareInfo = { backend: "none", cuda: false, vaapi: false, av1: false, reason: "No GPU." };
+    const cuda: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null };
+    const created = createApp({ env, hardware: async () => none });
+    created.jobs.stop();
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "5090", name: "5090", version: "0.2.38", hardware: none, concurrency: 1 }),
+    });
+    const instanceId = created.store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: "k", enabled: true });
+    const itemId = `${instanceId}:movie:1`;
+    created.store.upsertItem({
+      id: itemId, instanceId, arrId: 1, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+      title: "War Machine", showTitle: null, season: null, episode: null, episodeTitle: null,
+      path: "/mnt/nas/movies/war.mkv", sizeBytes: 8_000_000_000, quality: "HD", resolution: "1080",
+      profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+    });
+    created.store.saveInspection(itemId, {
+      sourceSig: "p|1", sourceMethod: "ffprobe", listingState: "complete", durationSec: 3600,
+      sizeBytes: 8_000_000_000, sizePerHourGb: 8, videoCodec: "h264", width: 1920, height: 1080,
+      bitDepth: 8, hdr: "none", audio: [], subtitles: [], hasChapters: false, hasAttachments: false,
+    });
+    const hardwareWarning = "Hardware encode is unavailable. This transcode will fail until NVIDIA, Intel/AMD, or an Apple media engine is available.";
+    created.store.saveSuggestion(itemId, {
+      id: "sug-stale-hw",
+      itemId,
+      actions: ["transcode"],
+      reasons: ["This video is H.264. Re-encode to HEVC."],
+      warning: hardwareWarning,
+      category: "movie1080p",
+      estimatedSavingsBytes: 1,
+      now: { codec: "h264", quality: "HD", sizeBytes: 8_000_000_000, sizePerHourGb: 8 },
+      after: { codec: "hevc", quality: "HD", sizeBytes: 4_000_000_000, sizePerHourGb: 4 },
+      dismissed: false,
+      keepAudio: [],
+      stripAudio: [],
+      keepSubs: [],
+      stripSubs: [],
+    });
+    expect(created.store.openSuggestionForItem(itemId)?.warning).toMatch(/Hardware encode is unavailable/);
+    created.store.insertJob({
+      id: "job-stale-hw",
+      itemId,
+      suggestionId: "sug-stale-hw",
+      status: "running",
+      phase: "transcoding",
+      progress: 0.5,
+      error: null,
+      warning: hardwareWarning,
+      runNow: false,
+      createdAt: 1,
+      plan: {},
+    });
+    const beat = await created.app.request("/api/cluster/heartbeat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "5090", hardware: cuda, concurrency: 1, currentJobId: "job-stale-hw" }),
+    });
+    expect(beat.status).toBe(200);
+    expect(created.store.openSuggestionForItem(itemId)?.warning ?? "").not.toMatch(/Hardware encode is unavailable/);
+    expect(created.store.getJob("job-stale-hw")?.warning ?? "").not.toMatch(/Hardware encode is unavailable/);
+  });
+
   it("does not accept cluster hello on standalone", async () => {
     const ctx = await setup();
     apps.push(ctx);

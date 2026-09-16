@@ -23,7 +23,7 @@ This tree is a greenfield rewrite. Do not import the previous application code.
 - Home shows a Status strip, large files-optimized and space-saved tiles, and links into Suggestions, Queue, Review, and Errors. Direct write counts in the tallies the same way Keep does.
 - Settings uses stacked labels and everyday size-cap names. Title-page audio actions keep a fixed-width dropdown so Keep and Replace with downmix do not jump.
 - Series headers show episode total, how many are healthy, and how many still have suggestions. Movies shows the same three counts for the whole Radarr library, not just the loaded page.
-- Lets a movie or a whole show pick HEVC or AV1 for automatic Suggestions without changing the house Encode Target. A series header can Prefer stereo (replace surround with stereo only, including 5.1 kids shows) or Keep surround.
+- Lets a movie or a whole show pick HEVC or AV1 for automatic Suggestions without changing the house Encode Target. A series header can Prefer stereo (replace surround with a downmix and discard included stereo, including 5.1 kids shows) or Keep surround.
 - Suggestion, Errors, and Queue titles open the same detail page as Movies and Series
 - Queue pins running jobs in Working now, then waiting jobs, then finished jobs, so a long batch does not hide the encode in progress
 - Size-mode encode reserves room for copied audio. A file within 5% of its GB-per-hour cap counts as meeting it.
@@ -101,7 +101,7 @@ A series header has the same **Encode target**. It applies to every episode of t
 Series headers also have **Preferred audio**:
 
 - **House default** follows Settings **Add stereo from surround audio**. The house rule adds AAC stereo for Atmos, TrueHD, EAC3, or more than 5.1, and keeps the original mix.
-- **Prefer stereo** replaces surround with AAC stereo on every episode, including 5.1 kids shows, and drops the original mix. If the file already has stereo, Polisharr keeps that track and drops surround.
+- **Prefer stereo** replaces surround with AAC stereo on every episode, including 5.1 kids shows, and drops the original mix. When surround is present, Polisharr always builds that stereo from the surround mix and discards a stereo track that was already on the file (commentary or otherwise).
 - **Keep surround** turns automatic stereo off for that show.
 
 Add stereo on a row still works for one episode. Queue still writes a sidecar. Keep still replaces the library file.

@@ -141,7 +141,7 @@ The UI follows Arr information architecture with a Vision UI-inspired dark glass
 96. As a library owner, I want exemption to apply only to that movie or that episode, so that marking one Ted Lasso episode archival does not exempt the whole show.
 97. As a library owner, I want to clear an exemption from the same row, so that I can later decide the file should meet the cap after all.
 98. As a TV watcher, I want a stereo AAC track suggested when the file has Atmos or more than 5.1, so that a TV without surround can play dialogue.
-98a. As a TV watcher, I want Prefer stereo on a series to replace surround with AAC stereo and drop the original mix whenever the episode is surround (more than 2 channels), so that 5.1 kids shows become stereo-only.
+98a. As a TV watcher, I want Prefer stereo on a series to replace surround with AAC stereo built from the surround mix, drop the original surround, and discard a stereo track that was already on the file, so that commentary 2.0 is not kept as the TV mix.
 98b. As a TV watcher, I want Keep surround on a series to skip automatic stereo for that show, so that a surround-first title is not nagged.
 99. As a TV watcher, I want adding AAC stereo available on any file that is not already stereo, so that I can add it even when Polisharr did not auto-suggest it.
 100. As a TV watcher, I want house default and Keep surround to leave the original surround or Atmos track in the file, so that the living-room AVR still gets the fancy mix.

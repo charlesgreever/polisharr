@@ -245,7 +245,7 @@ describe("suggestion engine", () => {
     expect(surround?.actions ?? []).not.toContain("add_stereo");
   });
 
-  it("drops surround and keeps existing stereo when the series prefers stereo", () => {
+  it("replaces surround with a downmix and discards included stereo when the series prefers stereo", () => {
     const suggestion = buildSuggestion({
       item: movie,
       report: report({
@@ -264,11 +264,79 @@ describe("suggestion engine", () => {
       av1Available: false,
       audioMix: "stereo",
     });
-    expect(suggestion?.actions).toEqual(["tracks"]);
-    expect(suggestion?.keepAudio).toEqual([2]);
-    expect(suggestion?.stripAudio).toEqual([1]);
-    expect(suggestion?.actions).not.toContain("add_stereo");
-    expect(suggestion?.reasons.some((reason) => /Drop surround/i.test(reason))).toBe(true);
+    expect(suggestion?.actions).toEqual(["tracks", "add_stereo"]);
+    expect(suggestion?.keepAudio).toEqual([]);
+    expect(suggestion?.stripAudio).toEqual([1, 2]);
+    expect(suggestion?.stereoSource).toBe(1);
+    expect(suggestion?.reasons.some((reason) => /Replace surround/i.test(reason))).toBe(true);
+    expect(suggestion?.reasons.some((reason) => /preferred language/i.test(reason))).toBe(false);
+  });
+
+  it("discards titled commentary stereo and downmixes the main surround when the series prefers stereo", () => {
+    const suggestion = buildSuggestion({
+      item: movie,
+      report: report({
+        sizePerHourGb: 1,
+        videoCodec: "hevc",
+        audio: [
+          { index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false, default: true },
+          { index: 2, language: "eng", channels: 2, codec: "aac", title: "Director Commentary", untagged: false, commentary: true },
+        ],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+      audioMix: "stereo",
+    });
+    expect(suggestion?.stereoSource).toBe(1);
+    expect(suggestion?.stripAudio).toEqual([1, 2]);
+    expect(suggestion?.actions).toContain("add_stereo");
+  });
+
+  it("downmixes the default surround, not a wider commentary mix, when the series prefers stereo", () => {
+    const suggestion = buildSuggestion({
+      item: movie,
+      report: report({
+        sizePerHourGb: 1,
+        videoCodec: "hevc",
+        audio: [
+          { index: 1, language: "eng", channels: 8, codec: "truehd", title: "Commentary", untagged: false, commentary: true },
+          { index: 2, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false, default: true },
+          { index: 3, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
+        ],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+      audioMix: "stereo",
+    });
+    expect(suggestion?.stereoSource).toBe(2);
+    expect(suggestion?.stripAudio).toEqual([1, 2, 3]);
+  });
+
+  it("leaves a stereo-only file alone when the series prefers stereo", () => {
+    const suggestion = buildSuggestion({
+      item: movie,
+      report: report({
+        sizePerHourGb: 1,
+        videoCodec: "hevc",
+        audio: [{ index: 1, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false }],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+      audioMix: "stereo",
+    });
+    expect(suggestion).toBeNull();
   });
 
   it("keeps non-preferred audio when automatic audio cleanup is disabled", () => {

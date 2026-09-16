@@ -78,15 +78,17 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
     ? report.subtitles.filter((t) => t.language === lang || (t.untagged && report.subtitles.length === 1))
     : report.subtitles;
   const stripSubs = report.subtitles.filter((t) => !keepSubs.includes(t));
+  const languageStripCount = stripAudio.length;
   const surroundToReplace = input.audioMix === "stereo" ? keepAudio.filter((track) => track.channels > 2) : [];
   if (surroundToReplace.length) {
-    keepAudio = keepAudio.filter((track) => track.channels <= 2);
-    stripAudio = [...stripAudio, ...surroundToReplace];
+    const includedStereo = keepAudio.filter((track) => track.channels > 0 && track.channels <= 2);
+    keepAudio = keepAudio.filter((track) => !surroundToReplace.includes(track) && !includedStereo.includes(track));
+    stripAudio = [...stripAudio, ...surroundToReplace, ...includedStereo];
   }
   const extraTracks = stripAudio.length + stripSubs.length > 0;
   const alreadyStereo = keepAudio.some((t) => t.channels <= 2 && (t.language === lang || t.language === "und"));
   const addStereo = surroundToReplace.length
-    ? !alreadyStereo
+    ? true
     : shouldSuggestStereo({
       audio: report.audio,
       lang,
@@ -96,7 +98,10 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
       alreadyStereo,
     });
   const stereoSource = addStereo
-    ? surroundToReplace[0]?.index ?? keepAudio.find((track) => track.channels > 2)?.index ?? keepAudio[0]?.index
+    ? pickPreferStereoSource(surroundToReplace, lang)?.index
+      ?? surroundToReplace[0]?.index
+      ?? keepAudio.find((track) => track.channels > 2)?.index
+      ?? keepAudio[0]?.index
     : undefined;
   const extraAudioBitrateBps = addStereo ? typicalAudioBitrateBps({ codec: "aac", channels: 2 }) : 0;
   const hours = report.durationSec > 0 ? report.durationSec / 3600 : 0;
@@ -161,12 +166,10 @@ export function buildSuggestion(input: SuggestInput): Suggestion | null {
   }
   if (remux && /\.iso$/i.test(item.path)) reasons.push("Convert the disc image to MKV.");
   else if (remux) reasons.push("Convert the MP4 container to MKV before any video encode.");
-  if (stripAudio.length) reasons.push("Drop audio tracks that are not in your preferred language.");
+  if (languageStripCount) reasons.push("Drop audio tracks that are not in your preferred language.");
   if (stripSubs.length) reasons.push("Drop subtitle tracks that are not in your preferred language.");
   if (surroundToReplace.length && addStereo) {
     reasons.push("Replace surround audio with AAC stereo so a TV can play dialogue.");
-  } else if (surroundToReplace.length) {
-    reasons.push("Drop surround audio and keep the stereo track.");
   } else if (addStereo) {
     reasons.push("Add an AAC stereo track so a TV can play dialogue without surround.");
   }
@@ -281,6 +284,18 @@ export function codecLabel(codec: string): string {
   if (/vp8/.test(value)) return "VP8";
   if (/vp9/.test(value)) return "VP9";
   return codec || "unknown video";
+}
+
+function pickPreferStereoSource(
+  surround: InspectionReport["audio"],
+  lang: string,
+): InspectionReport["audio"][number] | undefined {
+  const program = surround.filter((track) => !track.commentary);
+  const preferred = program.filter((track) => track.language === lang || track.language === "und");
+  const pool = preferred.length ? preferred : program.length ? program : surround;
+  const flagged = pool.find((track) => track.default);
+  if (flagged) return flagged;
+  return [...pool].sort((left, right) => right.channels - left.channels || left.index - right.index)[0];
 }
 
 function shouldKeepAudio(

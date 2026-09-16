@@ -56,4 +56,20 @@ describe("suggestion track comparison", () => {
       stereoSource: 1,
     })).afterTracks).toEqual(["Audio: AAC 2.0 (replaced)"]);
   });
+
+  it("does not keep included stereo on a Prefer stereo replacement", () => {
+    const withStereo: InspectionReport = {
+      ...report,
+      audio: [
+        { index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false },
+        { index: 2, language: "eng", channels: 2, codec: "aac", title: "Commentary", untagged: false, commentary: true },
+      ],
+    };
+    expect(suggestionTrackComparison(withStereo, suggestion({
+      actions: ["tracks", "add_stereo"],
+      keepAudio: [],
+      stripAudio: [1, 2],
+      stereoSource: 1,
+    })).afterTracks).toEqual(["Audio: AAC 2.0 (replaced)"]);
+  });
 });

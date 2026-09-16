@@ -10,6 +10,7 @@ import {
   classifyInterruptedKeep,
   KEEP_ALREADY_WAITING,
   KEEP_INTERRUPTED,
+  LIBRARY_SOURCE_GONE,
   MISSING_REVISION,
   REPLACEMENT_STARTED,
   SIDECAR_GONE,
@@ -662,6 +663,10 @@ export class JobService {
   async recoverInterruptedKeeps(): Promise<void> {
     for (const review of this.opts.store.listReviews()) {
       if (review.status === "discarding") {
+        if (!(await fileExists(review.sourcePath))) {
+          this.opts.store.updateReview(review.id, { status: "pending", error: LIBRARY_SOURCE_GONE });
+          continue;
+        }
         await this.unlinkSidecarIfLast(review);
         this.opts.store.deleteReview(review.id);
         this.opts.store.addHistory(review.itemId, "discarded", 0, this.now());
@@ -1077,6 +1082,10 @@ export class JobService {
       const review = this.opts.store.getReview(reviewId);
       if (!review) return { error: "That review item is gone.", status: 404 };
       return { error: REPLACEMENT_STARTED, status: 409 };
+    }
+    if (!(await fileExists(claimed.sourcePath))) {
+      this.opts.store.updateReview(reviewId, { status: "pending", error: LIBRARY_SOURCE_GONE });
+      return { error: LIBRARY_SOURCE_GONE, status: 409 };
     }
     await this.unlinkSidecarIfLast(claimed);
     this.opts.store.deleteReview(reviewId);

@@ -1,5 +1,6 @@
 export const KEEP_INTERRUPTED = "Keep was interrupted. Try Keep again.";
 export const SIDECAR_GONE = "The sidecar is gone. Discard this card or run the job again.";
+export const LIBRARY_SOURCE_GONE = "The library file is missing. Polisharr will not delete the Review copy.";
 export const SOURCE_CHANGED = "The original file changed before replacement. The finished copy is still in Review. Inspect the title again and choose Keep or Discard.";
 export const MISSING_REVISION = "This result is missing the original file identity from before the encode. Inspect the title again and choose Keep or Discard.";
 export const REPLACEMENT_STARTED = "Replacement already started.";

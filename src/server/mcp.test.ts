@@ -253,9 +253,10 @@ describe("MCP agent access", () => {
     const ctx = await ready();
     apps.push(ctx);
     const item = ctx.store.listItems()[0]!;
+    const original = join(ctx.dir, "orig.mkv");
     const sidecar = join(ctx.dir, "review", "keep-me.mkv");
+    writeFileSync(original, "orig");
     writeFileSync(sidecar, "sidecar");
-    writeFileSync(item.path.startsWith("/mnt") ? join(ctx.dir, "orig.mkv") : item.path, "orig");
     ctx.store.insertReview({
       id: "rev-mcp",
       jobId: "job-mcp",
@@ -264,7 +265,7 @@ describe("MCP agent access", () => {
       status: "pending",
       flagged: false,
       flagReason: null,
-      sourcePath: item.path,
+      sourcePath: original,
       sidecarPath: sidecar,
       source: { codec: "h264", quality: "HD", sizeBytes: 8, sizePerHourGb: 8, durationSec: 60, tracks: "1 audio / 0 subtitles" },
       sidecar: { codec: "hevc", quality: "HD", sizeBytes: 3, sizePerHourGb: 3, durationSec: 60, tracks: "1 audio / 0 subtitles" },

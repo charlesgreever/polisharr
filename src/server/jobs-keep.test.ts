@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { JobService } from "./jobs.ts";
 import { stagedBackupPath, stagedNewPath } from "./promote.ts";
-import { KEEP_INTERRUPTED, SIDECAR_GONE } from "./review-recovery.ts";
+import { KEEP_INTERRUPTED, LIBRARY_SOURCE_GONE, SIDECAR_GONE } from "./review-recovery.ts";
 import { Store } from "./store.ts";
 import type { InspectionReport, ReviewItem } from "./types.ts";
 
@@ -129,6 +129,53 @@ describe("interrupted Keep recovery", () => {
     const discarded = await ctx.jobs.discard("rev-1");
     expect(discarded).toMatchObject({ accepted: true });
     expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    ctx.close();
+  });
+
+  it("does not delete the Review copy when the library file is already gone", async () => {
+    const ctx = setup();
+    writeFileSync(ctx.sidecarPath, "ONLY-COPY");
+    ctx.store.insertReview({
+      id: "rev-1",
+      jobId: "job-1",
+      itemId: ctx.itemId,
+      displayTitle: "Film",
+      status: "pending",
+      flagged: false,
+      flagReason: null,
+      sourcePath: ctx.sourcePath,
+      sidecarPath: ctx.sidecarPath,
+      ...compare(9, 10),
+      error: null,
+    });
+
+    const discarded = await ctx.jobs.discard("rev-1");
+    expect(discarded).toMatchObject({ error: LIBRARY_SOURCE_GONE, status: 409 });
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("ONLY-COPY");
+    expect(ctx.store.getReview("rev-1")?.status).toBe("pending");
+    ctx.close();
+  });
+
+  it("does not finish a crashed Discard when the library file is gone", async () => {
+    const ctx = setup();
+    writeFileSync(ctx.sidecarPath, "ONLY-COPY");
+    ctx.store.insertReview({
+      id: "rev-1",
+      jobId: "job-1",
+      itemId: ctx.itemId,
+      displayTitle: "Film",
+      status: "discarding",
+      flagged: false,
+      flagReason: null,
+      sourcePath: ctx.sourcePath,
+      sidecarPath: ctx.sidecarPath,
+      ...compare(9, 10),
+      error: null,
+    });
+
+    await ctx.jobs.recoverInterruptedKeeps();
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("ONLY-COPY");
+    expect(ctx.store.getReview("rev-1")).toMatchObject({ status: "pending", error: LIBRARY_SOURCE_GONE });
     ctx.close();
   });
 

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1682,6 +1682,84 @@ describe("ISO remux and custom audio arguments", () => {
       });
       expect(result.output.videoCodec).toBe("hevc");
       expect(result.output.audio).toHaveLength(1);
+      expect(readFileSync(sourcePath, "utf8")).toBe("source");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the library file in place when a skipped size encode has no mux work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-skip-no-mux-"));
+    try {
+      const sourcePath = join(dir, "library.mkv");
+      const reviewDir = join(dir, "review");
+      const mkvmerge = join(dir, "mkvmerge.cjs");
+      const ffprobe = join(dir, "ffprobe.cjs");
+      const ffmpeg = join(dir, "ffmpeg.cjs");
+      await writeFile(sourcePath, "library-original");
+      await writeFile(ffmpeg, [
+        "#!/usr/bin/env node",
+        "process.stderr.write('should not encode');",
+        "process.exit(2);",
+      ].join("\n"));
+      await writeFile(mkvmerge, [
+        "#!/usr/bin/env node",
+        "process.stderr.write('should not mux');",
+        "process.exit(2);",
+      ].join("\n"));
+      await writeFile(ffprobe, [
+        "#!/usr/bin/env node",
+        "process.stdout.write(JSON.stringify({",
+        "  format: { duration: '3600' },",
+        "  streams: [",
+        "    { index: 0, codec_type: 'video', codec_name: 'hevc', width: 1920, height: 1080, bits_per_raw_sample: '8' },",
+        "    { index: 1, codec_type: 'audio', codec_name: 'truehd', channels: 8, tags: { language: 'eng', title: 'TrueHD Atmos 7.1' } }",
+        "  ]",
+        "}));",
+      ].join("\n"));
+      await Promise.all([chmod(mkvmerge, 0o755), chmod(ffprobe, 0o755), chmod(ffmpeg, 0o755)]);
+      const optimizer = ffmpegOptimizer({ capacity: async () => 10 * 1024 ** 3 });
+      await expect(optimizer({
+        sourcePath,
+        reviewDir,
+        plan: planFromSuggestion({
+          ...suggestion,
+          actions: ["transcode"],
+          mustEncode: false,
+          keepAudio: [1],
+          stripAudio: [],
+          keepSubs: [],
+          stripSubs: [],
+          now: { codec: "hevc", quality: "Remux-1080p", sizeBytes: 8_000_000_000, sizePerHourGb: 8 },
+          after: { codec: "hevc", quality: null, sizeBytes: 2_500_000_000, sizePerHourGb: 2.5 },
+        }),
+        report: {
+          sourceSig: "library.mkv|8",
+          sourceMethod: "ffprobe",
+          listingState: "complete",
+          durationSec: 3600,
+          sizeBytes: 8_000_000_000,
+          sizePerHourGb: 8,
+          videoCodec: "hevc",
+          width: 1920,
+          height: 1080,
+          bitDepth: 8,
+          hdr: "none",
+          audio: [{ index: 1, language: "eng", channels: 8, codec: "truehd", title: "TrueHD Atmos 7.1", untagged: false, commentary: false }],
+          subtitles: [],
+          hasChapters: false,
+          hasAttachments: false,
+        },
+        target: "hevc",
+        backend: "none",
+        ffmpeg,
+        ffprobe,
+        mkvmerge,
+        conservative: false,
+        jobId: "job-tmnt",
+      })).rejects.toThrow(/library file/i);
+      expect(readFileSync(sourcePath, "utf8")).toBe("library-original");
+      expect(existsSync(join(reviewDir, "library-job-tmnt.mkv"))).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

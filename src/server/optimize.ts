@@ -34,6 +34,9 @@ export async function removeReviewArtifact(path: string): Promise<void> {
   if (fork) await tryUnlink(fork);
 }
 
+export const LIBRARY_FILE_NOT_A_SIDECAR =
+  "This plan would only move the library file into Review. Polisharr left the original in place. Exempt this title or drop extra lossless tracks.";
+
 export const WORK_DIR_GUARD = ".in-progress";
 export const PREVIEW_DIR_NAME = ".previews";
 export const PREVIEW_PUBLISHED_MARKER = ".published";
@@ -395,6 +398,10 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
         }
       }
       emit("finishing", 0.95);
+      // Same-volume placeFile renames. A skipped encode with no mux still points at the library file.
+      if (current === req.sourcePath) {
+        throw new Error(LIBRARY_FILE_NOT_A_SIDECAR);
+      }
       if (current !== sidecarPath) {
         const placed = await placeFile(current, sidecarPath);
         req.onLog?.(placeMethodSentence(placed.method));

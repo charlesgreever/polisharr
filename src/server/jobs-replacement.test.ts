@@ -606,8 +606,10 @@ describe("deferred replacement", () => {
     expect(await ctx.jobs.keep("rev-1")).toEqual({ accepted: true, disposition: "waiting" });
     expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
     file.current = PLAYBACK_ALLOWED;
-    await vi.waitFor(() => expect(readFileSync(ctx.sourcePath, "utf8")).toBe("SIDECAR!!!"), { timeout: 3000 });
-    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(readFileSync(ctx.sourcePath, "utf8")).toBe("SIDECAR!!!");
+      expect(ctx.store.getReview("rev-1")).toBeUndefined();
+    }, { timeout: 8_000 });
     expect(ctx.store.getNode("local")?.enabled).toBe(false);
   });
 

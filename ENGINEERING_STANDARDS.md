@@ -90,6 +90,7 @@ Empty `catch` is forbidden unless the next line documents why ignore is safe (`u
 | Homepage widget key | SHA-256 | never (shown once on mint) |
 | Arr webhook token | SHA-256 | `hasWebhookToken: true` only (raw token shown once on mint) |
 | Cluster token | SHA-256 | `hasClusterToken: true` only (raw token shown once on mint) |
+| MCP agent token | SHA-256 | `hasMcpToken: true` only (raw token shown once on mint) |
 | Session | random id, httpOnly cookie | cookie only |
 
 Do not log API keys, tokens, or password hashes. Do not put them in query strings. Do not commit `.env` or `config/*.db`. Radarr/Sonarr Connect may send the webhook token as `?apikey=` when the form only has a URL (issue #41); prefer `X-Api-Key` or HTTP Basic so the token stays out of access logs.

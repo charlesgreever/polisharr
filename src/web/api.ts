@@ -21,6 +21,7 @@ export const api = {
   mintWebhookToken: () => req<{ token: string; url: string }>("/api/settings/webhook-token", { method: "POST" }),
   mintWidgetKey: () => req<{ key: string }>("/api/settings/widget-key", { method: "POST" }),
   mintClusterToken: () => req<{ token: string }>("/api/settings/cluster-token", { method: "POST" }),
+  mintMcpToken: () => req<{ token: string }>("/api/settings/mcp-token", { method: "POST" }),
   nodes: () => req<NodesPayload>("/api/nodes"),
   changePassword: (username: string, password: string) =>
     req("/api/auth/password", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -342,6 +343,7 @@ export type SettingsPayload = {
   hasWebhookToken?: boolean;
   hasWidgetKey?: boolean;
   hasClusterToken?: boolean;
+  hasMcpToken?: boolean;
   defaultEncodeNodeId?: string;
   thisNodeId?: string;
   username?: string;

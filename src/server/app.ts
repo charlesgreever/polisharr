@@ -7,7 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import argon2 from "argon2";
@@ -63,6 +63,16 @@ import {
 } from "./types.ts";
 import { profilePreviews, syncProfiles } from "./arr-profiles.ts";
 import { validateCustomPlan } from "./custom-plan.ts";
+import {
+  encodeDraftFromArgs,
+  handleMcpJsonRpc,
+  MCP_AUTH_ERROR,
+  MCP_DISCARD_CONFIRM,
+  MCP_KEEP_CONFIRM,
+  MCP_LIST_LIMIT,
+  MCP_MASTER_ONLY,
+  type McpHost,
+} from "./mcp.ts";
 import type { ArrKind, CustomPlanDraft, HardwareInfo, PlayerKind, Settings, Suggestion } from "./types.ts";
 import { parseAudioMix, parseVideoTarget } from "./types.ts";
 import { createInspectionRunner } from "./inspection-runner.ts";
@@ -453,6 +463,227 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
+  const mcpHost: McpHost = {
+    version,
+    searchTitles: (query) => store.listItems()
+      .filter((item) => matchesTitleSearch(query, item))
+      .slice(0, MCP_LIST_LIMIT)
+      .map((item) => {
+        const report = store.getInspection(item.id);
+        return {
+          itemId: item.id,
+          type: item.type,
+          displayTitle: displayTitle(item),
+          instanceName: item.instanceName,
+          quality: item.quality,
+          sizeBytes: report?.sizeBytes ?? item.sizeBytes,
+          codec: report?.videoCodec ?? null,
+        };
+      }),
+    getTitle: (itemId) => {
+      const item = store.getItem(itemId);
+      if (!item) return { ok: false, error: "That title is not in the library." };
+      const report = store.getInspection(item.id);
+      const suggestion = store.openSuggestionForItem(item.id);
+      const review = store.listReviews().find((row) => row.itemId === item.id);
+      return {
+        ok: true,
+        itemId: item.id,
+        displayTitle: displayTitle(item),
+        fileName: basename(item.path),
+        instanceName: item.instanceName,
+        type: item.type,
+        quality: item.quality,
+        sizeBytes: report?.sizeBytes ?? item.sizeBytes,
+        unread: !report,
+        codec: report?.videoCodec ?? null,
+        hdr: report?.hdr ?? null,
+        tracks: report ? `${report.audio.length} audio / ${report.subtitles.length} subtitles` : null,
+        suggestion: report && suggestion
+          ? { actions: suggestion.actions, reasons: suggestion.reasons, warning: suggestion.warning }
+          : null,
+        reviewId: review?.id ?? null,
+        reviewStatus: review?.status ?? null,
+      };
+    },
+    listSuggestions: (query) => store.suggestionPage(0, MCP_LIST_LIMIT, query).items.map((row) => ({
+      itemId: row.itemId,
+      displayTitle: row.displayTitle,
+      actions: row.actions,
+      reasons: row.reasons,
+      warning: row.warning,
+      estimatedSavingsBytes: row.estimatedSavingsBytes,
+    })),
+    listJobs: () => store.jobPage(0, MCP_LIST_LIMIT).items.map((job) => {
+      const pub = publicJob(job);
+      return {
+        jobId: job.id,
+        itemId: job.itemId,
+        displayTitle: "displayTitle" in job ? (job as { displayTitle?: string }).displayTitle ?? null : null,
+        status: job.status,
+        phase: job.phase,
+        progress: job.progress,
+        error: job.error,
+        assignedNodeName: pub.assignedNodeName ?? null,
+      };
+    }),
+    listNodes: () => {
+      const now = clusterNow();
+      return store.listNodes().map((node) => ({
+        id: node.id,
+        name: node.name,
+        online: nodeIsOnline(node.lastSeen, now),
+        enabled: node.enabled,
+        hardwareLabel: nodeHardwareLabel(node.hardware),
+        currentJobId: node.currentJobId ?? null,
+      }));
+    },
+    listReview: () => store.reviewPage(0, MCP_LIST_LIMIT).items.map((row) => ({
+      reviewId: row.id,
+      itemId: row.itemId,
+      displayTitle: "displayTitle" in row ? (row as { displayTitle?: string }).displayTitle ?? null : null,
+      status: row.status,
+      sourceSizeBytes: row.source.sizeBytes,
+      sidecarSizeBytes: row.sidecar.sizeBytes,
+    })),
+    previewPlan: (args) => mcpCustomPlan(args, false),
+    queueSuggestion: (itemId) => {
+      const blocked = gateOptimize();
+      if (blocked) return { ok: false, error: blocked };
+      const suggestion = store.openSuggestionForItem(itemId);
+      if (!suggestion || suggestion.dismissed) return { ok: false, error: "There is no open suggestion to queue." };
+      const result = jobs.enqueue(suggestion.itemId, suggestion);
+      if ("error" in result) return { ok: false, error: result.error };
+      return { ok: true, jobId: result.id };
+    },
+    addStereo: (itemId) => {
+      const blocked = gateOptimize();
+      if (blocked) return { ok: false, error: blocked };
+      const item = store.getItem(itemId);
+      if (!item) return { ok: false, error: "That title is not in the library." };
+      const report = store.getInspection(item.id);
+      if (!report) return { ok: false, error: "This file has not been inspected yet, or the path is unreadable." };
+      if (report.audio.some((track) => track.channels <= 2)) {
+        return { ok: false, error: "This file already has a stereo track." };
+      }
+      const settings = store.getSettings();
+      const suggestion = buildSuggestion({
+        item,
+        report,
+        settings,
+        sizeExempt: item.sizeExempt,
+        excluded: false,
+        forceStereo: true,
+        videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
+        av1Available: clusterAv1(),
+        hardwareAvailable: clusterHardware(),
+      });
+      if (!suggestion?.actions.includes("add_stereo")) {
+        return { ok: false, error: "Add stereo did not change the plan." };
+      }
+      store.saveSuggestion(item.id, suggestion);
+      return { ok: true, onSuggestions: true };
+    },
+    queueEncode: (args) => mcpCustomPlan(args, true),
+    cancelJob: (jobId) => {
+      const result = jobs.cancel(jobId);
+      if ("error" in result) return { ok: false, error: result.error };
+      return { ok: true };
+    },
+    keepReview: async (reviewId, confirm) => {
+      if (confirm !== MCP_KEEP_CONFIRM) {
+        return { ok: false, error: "Type KEEP to replace the library file with this sidecar." };
+      }
+      const blocked = gateOptimize();
+      if (blocked) return { ok: false, error: blocked };
+      const result = await jobs.keep(reviewId);
+      if ("error" in result) return { ok: false, error: result.error };
+      return { ok: true, accepted: true, disposition: result.disposition };
+    },
+    discardReview: async (reviewId, confirm) => {
+      if (confirm !== MCP_DISCARD_CONFIRM) {
+        return { ok: false, error: "Type DISCARD to delete this sidecar and leave the original." };
+      }
+      const result = await jobs.discard(reviewId);
+      if ("error" in result) return { ok: false, error: result.error };
+      return { ok: true };
+    },
+  };
+
+  function mcpCustomPlan(args: Record<string, unknown>, queue: boolean): Record<string, unknown> {
+    const itemId = typeof args.itemId === "string" ? args.itemId.trim() : "";
+    if (!itemId) return { ok: false, error: "The itemId value is required." };
+    const blocked = queue ? gateOptimize() : null;
+    if (blocked) return { ok: false, error: blocked };
+    const item = store.getItem(itemId);
+    if (!item) return { ok: false, error: "That title is not in the library." };
+    const report = store.getInspection(item.id);
+    if (!report) return { ok: false, error: "This file has not been inspected yet, or the path is unreadable." };
+    const parsed = encodeDraftFromArgs(args);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    if (parsed.draft.writeMode === "direct" && store.getSettings().writeMode !== "direct") {
+      return { ok: false, error: "Direct write is off in Settings." };
+    }
+    const settings = store.getSettings();
+    const codec = parsed.draft.video.codec ?? store.videoTargetForItem(item) ?? settings.videoTarget;
+    const draft: CustomPlanDraft = {
+      video: parsed.draft.video.mode === "size"
+        ? { mode: "size", targetBytes: parsed.draft.video.targetBytes, codec, downscale1080p: parsed.draft.video.downscale1080p }
+        : { mode: "quality", quality: parsed.draft.video.quality, codec, downscale1080p: parsed.draft.video.downscale1080p },
+      writeMode: parsed.draft.writeMode,
+    };
+    const result = validateCustomPlan({
+      item,
+      report,
+      settings,
+      hardware: lastHardware,
+      draft,
+      av1Available: clusterAv1(),
+    });
+    if (!result.ok) {
+      return { ok: false, error: result.errors[0]?.message ?? "That encode plan is invalid.", errors: result.errors };
+    }
+    if (!queue) {
+      return {
+        ok: true,
+        itemId: item.id,
+        displayTitle: displayTitle(item),
+        reasons: result.plan.reasons,
+        warning: result.plan.warning,
+        estimatedOutputBytes: result.plan.estimatedOutputBytes,
+        targetBytes: parsed.targetBytes ?? null,
+        codec: result.plan.video.kind === "copy" ? null : result.plan.video.codec,
+      };
+    }
+    const queued = jobs.enqueueCustom(item.id, result.plan, {
+      assignedNodeId: typeof args.assignedNodeId === "string" ? args.assignedNodeId : undefined,
+    });
+    if ("error" in queued) return { ok: false, error: queued.error };
+    return {
+      ok: true,
+      jobId: queued.id,
+      itemId: item.id,
+      displayTitle: displayTitle(item),
+      reasons: result.plan.reasons,
+      estimatedOutputBytes: result.plan.estimatedOutputBytes,
+      targetBytes: parsed.targetBytes ?? null,
+    };
+  }
+
+  app.post("/mcp", async (c) => {
+    if (isWorker) return c.json({ error: MCP_MASTER_ONLY }, 404);
+    const presented = presentedWebhookToken({
+      apiKey: c.req.header("x-api-key") ?? undefined,
+      authorization: c.req.header("authorization") ?? undefined,
+    });
+    if (!webhookTokenMatches(presented, store.mcpTokenHash())) {
+      return c.json({ error: MCP_AUTH_ERROR }, 401);
+    }
+    const handled = await handleMcpJsonRpc(await readJson(c), mcpHost);
+    if (!handled.payload) return c.body(null, handled.status as 202);
+    return c.json(handled.payload, handled.status as 200);
+  });
+
   app.get("/api/hardware", async (c) => c.json(await hardware()));
 
   app.get("/api/nodes", async (c) => {
@@ -675,6 +906,7 @@ export function createApp(opts: AppOptions) {
       hasWebhookToken: Boolean(store.webhookTokenHash()),
       hasWidgetKey: Boolean(store.widgetKeyHash()),
       hasClusterToken: Boolean(store.clusterTokenHash()),
+      hasMcpToken: Boolean(store.mcpTokenHash()),
       username: store.onlyUser()?.username ?? "",
       instances: publicInstances(),
       firstRun: firstRunState(),
@@ -1846,6 +2078,12 @@ export function createApp(opts: AppOptions) {
     const raw = randomBytes(24).toString("hex");
     store.setWidgetKeyHash(createHash("sha256").update(raw).digest("hex"));
     return c.json({ key: raw });
+  });
+
+  app.post("/api/settings/mcp-token", (c) => {
+    const raw = randomBytes(24).toString("hex");
+    store.setMcpTokenHash(createHash("sha256").update(raw).digest("hex"));
+    return c.json({ token: raw });
   });
 
   app.post("/api/settings/webhook-token", (c) => {

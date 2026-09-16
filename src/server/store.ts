@@ -1772,6 +1772,15 @@ export class Store {
     return row?.value ?? null;
   }
 
+  mcpTokenHash(): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'mcp'").get() as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setMcpTokenHash(hash: string): void {
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('mcp', ?)").run(hash);
+  }
+
   setClusterTokenHash(hash: string): void {
     this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cluster', ?)").run(hash);
   }

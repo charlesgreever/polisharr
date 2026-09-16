@@ -37,6 +37,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
   const [webhookToken, setWebhookToken] = useState<string | null>(null);
   const [widgetKey, setWidgetKey] = useState<string | null>(null);
   const [clusterToken, setClusterToken] = useState<string | null>(null);
+  const [mcpToken, setMcpToken] = useState<string | null>(null);
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -102,7 +103,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       <div>
         <PageHead title="Settings" />
         <Help>
-          Preferred language decides which audio and subtitle tracks stay. Confirm it once before any optimize. The review folder is where finished copies wait for Keep; it must sit outside your movie and show libraries.
+          Preferred language decides which audio and subtitle tracks stay. Confirm it once before any optimize. The review folder is where finished copies wait for Keep; it must sit outside your movie and show libraries. An agent token (MCP) lets an assistant on this network search the library and queue sidecar encodes; Keep still needs the word KEEP.
         </Help>
       </div>
       {!firstRun.complete && (
@@ -658,6 +659,35 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           }
         >
           {data.hasWidgetKey ? "Rotate widget key" : "Generate widget key"}
+        </button>
+      </div>
+      <div className="glass space-y-4 p-5">
+        <h2 className="font-semibold">AI agent access</h2>
+        <p className="help">
+          Mint a token so an agent such as Grok can call Polisharr over MCP. Point the agent at the master URL path /mcp with this token. GPU workers do not serve MCP. Queue writes a sidecar; the library file does not change until Keep. Keep and Discard require the confirm words KEEP and DISCARD.
+        </p>
+        {mcpToken ? (
+          <SecretOnce
+            label="Token (shown once)"
+            value={mcpToken}
+            onCopied={() => setMsg("MCP token copied.")}
+            onFailed={() => setMsg("Copy failed. Select the token and copy it yourself.")}
+          />
+        ) : (
+          <p className="help">{data.hasMcpToken ? "An MCP token is saved. Generate a new one to replace it." : "No MCP token yet. Generate one before an agent can connect."}</p>
+        )}
+        <button
+          className="btn"
+          type="button"
+          onClick={() =>
+            void api.mintMcpToken().then((result) => {
+              setMcpToken(result.token);
+              load();
+              setMsg("MCP token generated. Copy it now; Polisharr will not show it again.");
+            }).catch((e: Error) => setMsg(e.message))
+          }
+        >
+          {data.hasMcpToken ? "Rotate MCP token" : "Generate MCP token"}
         </button>
       </div>
       {msg && <p className="ok text-sm">{msg}</p>}

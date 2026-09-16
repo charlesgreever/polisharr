@@ -213,6 +213,23 @@ Radarr or Sonarr posts after it imports, upgrades, or renames a file. Polisharr 
 
 Signed-in pages keep a **Report** control on screen. **Bug** and **Change request** open a GitHub issue on this repository with the current route, inspect leftovers, and a running job if there is one. The prefill never includes file paths, API keys, tokens, or passwords. Attach a screenshot on GitHub yourself if one would help.
 
+## AI agent access (MCP)
+
+Polisharr can expose tools to an AI assistant over MCP (Model Context Protocol) on the **master** only, at `POST /mcp`. GPU workers do not serve this. Mint a token in Settings → **AI agent access**. The token is shown once.
+
+The assistant can search titles, read jobs and Review, queue the current suggestion, add stereo, and queue a size or quality sidecar encode. The library file still does not change until Keep. Keep and Discard require the confirm words `KEEP` and `DISCARD`.
+
+Example Grok `~/.grok/config.toml` (no live token in this file):
+
+```toml
+[mcp_servers.polisharr]
+url = "http://192.168.1.10:7373/mcp"
+headers = { Authorization = "Bearer <token from Settings>" }
+enabled = true
+```
+
+You can also send `X-Api-Key` with the same token. Regenerating the token in Settings invalidates the previous one.
+
 ## Homepage
 
 Polisharr exposes `GET /api/widget` for a Homepage `customapi` tile. Example YAML: [docs/homepage.md](docs/homepage.md).

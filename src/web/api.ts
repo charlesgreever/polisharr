@@ -428,6 +428,7 @@ export type JobRow = {
   waitingForNode?: boolean;
   waitingReason?: "offline" | "busy" | "playback" | "playback-status" | null;
   playbackHold?: PlaybackHold | null;
+  finishedAt?: number | null;
 };
 export type PlaybackHold = {
   reason: "playing" | "unknown" | "cooldown" | null;

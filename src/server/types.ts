@@ -332,6 +332,7 @@ export type Job = {
   warning: string | null;
   runNow: boolean;
   createdAt: number;
+  finishedAt: number | null;
   writeMode: WriteMode;
   promoteError: string | null;
   assignedNodeId: string | null;

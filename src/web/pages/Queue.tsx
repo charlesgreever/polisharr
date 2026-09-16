@@ -46,6 +46,11 @@ export function queueWaitingStatus(job: {
   return job.status;
 }
 
+export function queueFinishedWhen(at: number | null | undefined): string {
+  if (at == null) return "";
+  return new Date(at).toLocaleString();
+}
+
 export function partitionQueueJobs<T extends { status: string }>(items: T[]): {
   working: T[];
   waiting: T[];
@@ -244,6 +249,7 @@ function QueueTable({
               <th>Status</th>
               <th>Plan</th>
               {kind === "waiting" && <th>Phase</th>}
+              {kind === "finished" && <th>Finished</th>}
               <th></th>
             </tr>
           </thead>
@@ -262,6 +268,7 @@ function QueueTable({
                 </td>
                 <td>{planLabel(job)}</td>
                 {kind === "waiting" && <td>{phaseLabel(job.phase, job.status, job.playbackHold)}</td>}
+                {kind === "finished" && <td>{queueFinishedWhen(job.finishedAt)}</td>}
                 <td>
                   <JobButtons job={job} actions={actions} kind={kind} />
                   <JobNotes job={job} log={actions.logs[job.id]} />

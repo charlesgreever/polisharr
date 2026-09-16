@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FINISHED_HEADING,
   partitionQueueJobs,
+  queueFinishedWhen,
   queueNodeLine,
   queueToolbar,
   queueWaitingStatus,
@@ -41,6 +42,18 @@ describe("Queue sections", () => {
   it("still offers Clear finished when finished jobs are not on the loaded page", () => {
     expect(queueToolbar({ activeCount: 2, finishedCount: 55 })).toEqual({ cancelAll: true, clearFinished: true });
     expect(queueToolbar({ activeCount: 0, finishedCount: 0 })).toEqual({ cancelAll: false, clearFinished: false });
+  });
+
+  it("keeps finished jobs in the order the page sent them and names the completion time", () => {
+    const groups = partitionQueueJobs([
+      job("run", "running"),
+      { ...job("new", "succeeded"), finishedAt: 2 },
+      { ...job("old", "succeeded"), finishedAt: 1 },
+    ]);
+    expect(groups.finished.map((row) => row.id)).toEqual(["new", "old"]);
+    const at = Date.UTC(2026, 8, 16, 17, 22, 0);
+    expect(queueFinishedWhen(at)).toBe(new Date(at).toLocaleString());
+    expect(queueFinishedWhen(null)).toBe("");
   });
 
   it("names Working now when a running job is present and does not call the queue idle", () => {

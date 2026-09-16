@@ -222,7 +222,8 @@ describe("store schema migration", () => {
     const first = store.jobPage(0, 50);
     expect(first.items[0]?.id).toBe("job-run");
     expect(first.items[1]?.id).toBe("job-wait");
-    expect(first.items[2]?.id).toBe("job-done-1");
+    expect(first.items[2]?.id).toBe("job-done-55");
+    expect(first.items[2]?.finishedAt).toBe(55);
     expect(first.finishedCount).toBe(55);
     expect(first.total).toBe(57);
     expect(store.listJobs()[0]?.id).toBe("job-done-1");

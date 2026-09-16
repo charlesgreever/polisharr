@@ -307,6 +307,10 @@ export class Store {
     this.ensureColumn("jobs", "started_at", "INTEGER");
     this.ensureColumn("jobs", "dispatched_write_mode", "TEXT");
     this.ensureColumn("jobs", "source_revision", "TEXT");
+    this.ensureColumn("jobs", "finished_at", "INTEGER");
+    this.db.exec(
+      "UPDATE jobs SET finished_at = created_at WHERE finished_at IS NULL AND status IN ('succeeded','failed','cancelled')",
+    );
     this.ensureColumn("reviews", "intent_origin", "TEXT");
     this.ensureColumn("reviews", "intent_requested_at", "INTEGER");
     this.ensureColumn("reviews", "source_revision", "TEXT");
@@ -1068,20 +1072,21 @@ export class Store {
     return { walking: row.walking === 1, pending: row.pending, inspected: row.inspected, failed: row.failed };
   }
 
-  insertJob(job: Omit<Job, "displayTitle" | "writeMode" | "promoteError" | "assignedNodeId" | "nodeId" | "startedAt"> & {
+  insertJob(job: Omit<Job, "displayTitle" | "writeMode" | "promoteError" | "assignedNodeId" | "nodeId" | "startedAt" | "finishedAt"> & {
     plan: unknown;
     position?: number;
     writeMode?: "sidecar" | "direct";
     promoteError?: string | null;
     assignedNodeId?: string | null;
+    finishedAt?: number | null;
   }): string {
     const position =
       job.position ??
       ((this.db.prepare("SELECT COALESCE(MAX(position), 0) + 1 AS n FROM jobs").get() as { n: number }).n);
     this.db
       .prepare(
-        `INSERT INTO jobs (id, item_id, suggestion_id, status, phase, progress, error, warning, run_now, position, plan, created_at, write_mode, promote_error, assigned_node_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO jobs (id, item_id, suggestion_id, status, phase, progress, error, warning, run_now, position, plan, created_at, write_mode, promote_error, assigned_node_id, finished_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         job.id,
@@ -1099,6 +1104,7 @@ export class Store {
         job.writeMode === "direct" ? "direct" : "sidecar",
         job.promoteError ?? null,
         job.assignedNodeId ?? null,
+        jobFinishedAt(job.status, job.finishedAt, job.createdAt),
       );
     return job.id;
   }
@@ -1117,6 +1123,7 @@ export class Store {
     startedAt: number | null;
     dispatchedWriteMode: "sidecar" | "direct" | null;
     sourceRevision: PlaybackFileRevision | null;
+    finishedAt: number | null;
   }>): void {
     const current = this.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!current) return;
@@ -1128,7 +1135,7 @@ export class Store {
       : patch.sourceRevision == null ? null : JSON.stringify(patch.sourceRevision);
     this.db
       .prepare(
-        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, warning=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=?, dispatched_write_mode=?, source_revision=? WHERE id=?",
+        "UPDATE jobs SET status=?, phase=?, progress=?, error=?, warning=?, run_now=?, position=?, write_mode=?, promote_error=?, node_id=?, started_at=?, dispatched_write_mode=?, source_revision=?, finished_at=? WHERE id=?",
       )
       .run(
         patch.status ?? current.status,
@@ -1144,6 +1151,7 @@ export class Store {
         patch.startedAt === undefined ? current.started_at : patch.startedAt,
         dispatched ?? null,
         sourceRevision ?? null,
+        nextJobFinishedAt(patch.status ?? String(current.status), current, patch.finishedAt),
         id,
       );
   }
@@ -1184,7 +1192,9 @@ export class Store {
          WHEN 'held' THEN 1
          WHEN 'paused' THEN 1
          ELSE 2
-       END ASC, j.position ASC
+       END ASC,
+       CASE WHEN j.status IN ('running','queued','held','paused') THEN j.position ELSE 0 END ASC,
+       CASE WHEN j.status IN ('succeeded','failed','cancelled') THEN COALESCE(j.finished_at, j.created_at) ELSE 0 END DESC
        LIMIT ? OFFSET ?`,
     ).all(limit, offset) as Record<string, unknown>[];
     return {
@@ -1227,8 +1237,8 @@ export class Store {
         "SELECT id, item_id FROM jobs WHERE status IN ('queued','held','paused','running') ORDER BY position",
       ).all() as Array<{ id: string; item_id: string }>;
       this.db.prepare(
-        "UPDATE jobs SET status = 'cancelled', phase = 'idle', error = 'Cancelled.' WHERE status IN ('queued','held','paused','running')",
-      ).run();
+        "UPDATE jobs SET status = 'cancelled', phase = 'idle', error = 'Cancelled.', finished_at = COALESCE(finished_at, ?) WHERE status IN ('queued','held','paused','running')",
+      ).run(now);
       const history = this.db.prepare(
         "INSERT INTO history (id, item_id, outcome, bytes_saved, created_at) VALUES (?, ?, 'cancelled', 0, ?)",
       );
@@ -2418,6 +2428,7 @@ function mapJob(row: Record<string, unknown>): Job & { plan: JobPlan } {
     assignedNodeId: row.assigned_node_id == null || row.assigned_node_id === "" ? null : String(row.assigned_node_id),
     nodeId: row.node_id == null || row.node_id === "" ? null : String(row.node_id),
     startedAt: row.started_at == null ? null : Number(row.started_at),
+    finishedAt: row.finished_at == null ? null : Number(row.finished_at),
     dispatchedWriteMode: row.dispatched_write_mode === "direct" || row.dispatched_write_mode === "sidecar"
       ? row.dispatched_write_mode
       : null,
@@ -2769,6 +2780,22 @@ function currentFileErrorSql(alias: string): string {
 
 function itemHref(itemType: unknown, itemId: string): string {
   return itemType === "episode" ? `/series/episodes/${itemId}` : `/movies/${itemId}`;
+}
+
+function jobIsFinished(status: string): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled";
+}
+
+function jobFinishedAt(status: string, finishedAt: number | null | undefined, createdAt: number): number | null {
+  if (!jobIsFinished(status)) return null;
+  return finishedAt ?? createdAt;
+}
+
+function nextJobFinishedAt(status: string, current: Record<string, unknown>, patch: number | null | undefined): number | null {
+  if (patch !== undefined) return patch;
+  if (!jobIsFinished(status)) return null;
+  if (current.finished_at != null) return Number(current.finished_at);
+  return Date.now();
 }
 
 function joinedDisplayTitle(row: Record<string, unknown>, fallback: string): string {

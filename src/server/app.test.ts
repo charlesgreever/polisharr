@@ -820,6 +820,8 @@ describe("public HTTP behavior", () => {
     };
     expect(page.items[0]?.id).toBe("job-run");
     expect(page.items[1]?.id).toBe("job-wait");
+    expect(page.items[2]?.id).toBe("job-done-55");
+    expect(page.items[2]).toMatchObject({ finishedAt: 55 });
     expect(page.finishedCount).toBe(55);
     expect(page.total).toBe(57);
   });

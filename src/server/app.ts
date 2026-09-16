@@ -66,6 +66,7 @@ import { validateCustomPlan } from "./custom-plan.ts";
 import {
   encodeDraftFromArgs,
   handleMcpJsonRpc,
+  mcpTracksFromReport,
   MCP_AUTH_ERROR,
   MCP_DISCARD_CONFIRM,
   MCP_KEEP_CONFIRM,
@@ -504,7 +505,15 @@ export function createApp(opts: AppOptions) {
           : null,
         reviewId: review?.id ?? null,
         reviewStatus: review?.status ?? null,
+        ...(report ? mcpTracksFromReport(report) : { listingComplete: false, audio: [], subtitles: [] }),
       };
+    },
+    getTracks: (itemId) => {
+      const item = store.getItem(itemId);
+      if (!item) return { ok: false, error: "That title is not in the library." };
+      const report = store.getInspection(item.id);
+      if (!report) return { ok: false, error: "This file has not been inspected yet, or the path is unreadable." };
+      return { ok: true, itemId: item.id, displayTitle: displayTitle(item), ...mcpTracksFromReport(report) };
     },
     listSuggestions: (query) => store.suggestionPage(0, MCP_LIST_LIMIT, query).items.map((row) => ({
       itemId: row.itemId,
@@ -625,12 +634,15 @@ export function createApp(opts: AppOptions) {
       return { ok: false, error: "Direct write is off in Settings." };
     }
     const settings = store.getSettings();
-    const codec = parsed.draft.video.codec ?? store.videoTargetForItem(item) ?? settings.videoTarget;
+    const video = parsed.draft.video ?? { mode: "copy" as const };
+    const codec = video.mode === "copy" ? undefined : (video.codec ?? store.videoTargetForItem(item) ?? settings.videoTarget);
     const draft: CustomPlanDraft = {
-      video: parsed.draft.video.mode === "size"
-        ? { mode: "size", targetBytes: parsed.draft.video.targetBytes, codec, downscale1080p: parsed.draft.video.downscale1080p }
-        : { mode: "quality", quality: parsed.draft.video.quality, codec, downscale1080p: parsed.draft.video.downscale1080p },
-      writeMode: parsed.draft.writeMode,
+      ...parsed.draft,
+      video: video.mode === "copy"
+        ? { mode: "copy", downscale1080p: video.downscale1080p }
+        : video.mode === "size"
+          ? { mode: "size", targetBytes: video.targetBytes, codec, downscale1080p: video.downscale1080p }
+          : { mode: "quality", quality: video.quality, codec, downscale1080p: video.downscale1080p },
     };
     const result = validateCustomPlan({
       item,
@@ -653,6 +665,8 @@ export function createApp(opts: AppOptions) {
         estimatedOutputBytes: result.plan.estimatedOutputBytes,
         targetBytes: parsed.targetBytes ?? null,
         codec: result.plan.video.kind === "copy" ? null : result.plan.video.codec,
+        audio: result.plan.audio,
+        subtitles: result.plan.subtitles,
       };
     }
     const queued = jobs.enqueueCustom(item.id, result.plan, {

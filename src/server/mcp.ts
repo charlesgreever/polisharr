@@ -1,3 +1,6 @@
+import type { CustomAudioChoice, CustomPlanDraft, CustomSubtitleChoice, InspectionReport } from "./types.ts";
+import { languageDisplayName } from "./language-id.ts";
+
 export const MCP_PROTOCOL = "2025-03-26";
 export const MCP_AUTH_ERROR = "That MCP token is not valid.";
 export const MCP_MASTER_ONLY = "MCP is only available on the Polisharr that runs the library UI.";
@@ -19,6 +22,7 @@ export type McpHost = {
   version: string;
   searchTitles: (query: string) => McpToolResult[];
   getTitle: (itemId: string) => McpToolResult;
+  getTracks: (itemId: string) => McpToolResult;
   listSuggestions: (query: string) => McpToolResult[];
   listJobs: () => McpToolResult[];
   listNodes: () => McpToolResult[];
@@ -48,9 +52,15 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "get_title",
-    description: "Read one library title: file name, size, codec, tracks, open suggestion, and pending Review sidecar if any. Does not invent a plan for an unread file.",
+    description: "Read one library title: file name, size, codec, each audio and subtitle track, open suggestion, and pending Review sidecar if any. Does not invent a plan for an unread file. Use get_tracks when you only need the track list.",
     inputSchema: objectSchema({ itemId: { type: "string" } }, ["itemId"]),
     run: (args, host) => host.getTitle(stringArg(args, "itemId")),
+  },
+  {
+    name: "get_tracks",
+    description: "List every audio and subtitle stream on one title with the same keep, drop, AAC, and downmix actions as the title page. Call this before preview_plan or queue_encode when changing tracks. Unread files return an error instead of a guessed list.",
+    inputSchema: objectSchema({ itemId: { type: "string" } }, ["itemId"]),
+    run: (args, host) => host.getTracks(stringArg(args, "itemId")),
   },
   {
     name: "list_suggestions",
@@ -78,7 +88,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "preview_plan",
-    description: "Dry-run a custom encode plan for one title. Returns reasons, warnings, and estimated bytes. Does not queue work. Prefer this before queue_encode when the operator names a target size.",
+    description: "Dry-run a custom plan for one title, including per-track audio and subtitle choices, size or quality encode, or copy-only track work. Returns reasons, warnings, and estimated bytes. Does not queue work.",
     inputSchema: encodeSchema(),
     run: (args, host) => host.previewPlan(args),
   },
@@ -96,7 +106,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "queue_encode",
-    description: "Queue a custom sidecar encode. Pass targetGb or targetBytes for a size target, or quality for encoder quality. quality wins if both are set. Default codec follows the title or house encode target. Default write is sidecar. Call get_title first.",
+    description: "Queue a custom sidecar plan. Pass targetGb or targetBytes for a size target, quality for encoder quality, or omit both to copy video and only change tracks. audio and subtitles use the same keep/remove/replace_aac/replace_downmix/add_downmix actions as the title page. Default write is sidecar. Call get_tracks first.",
     inputSchema: encodeSchema(),
     run: (args, host) => host.queueEncode(args),
   },
@@ -148,19 +158,23 @@ export async function handleMcpJsonRpc(body: unknown, host: McpHost): Promise<{ 
 
 export function encodeDraftFromArgs(args: Record<string, unknown>): {
   ok: true;
-  draft: {
-    video: { mode: "size"; targetBytes: number; codec?: "hevc" | "av1"; downscale1080p?: boolean }
-      | { mode: "quality"; quality: number; codec?: "hevc" | "av1"; downscale1080p?: boolean };
-    writeMode: "sidecar" | "direct";
-  };
+  draft: CustomPlanDraft;
   targetBytes?: number;
 } | { ok: false; error: string } {
   const downscale1080p = args.downscale1080p === true;
   const codec = args.codec === "hevc" || args.codec === "av1" ? args.codec : undefined;
   const writeMode = args.writeMode === "direct" ? "direct" : "sidecar";
+  const audio = parseAudioChoices(args.audio);
+  if (!audio.ok) return audio;
+  const subtitles = parseSubtitleChoices(args.subtitles);
+  if (!subtitles.ok) return subtitles;
+  const tracks = {
+    ...(audio.value.length ? { audio: audio.value } : {}),
+    ...(subtitles.value.length ? { subtitles: subtitles.value } : {}),
+  };
   const quality = asFiniteNumber(args.quality);
   if (quality != null) {
-    return { ok: true, draft: { video: { mode: "quality", quality, codec, downscale1080p }, writeMode } };
+    return { ok: true, draft: { video: { mode: "quality", quality, codec, downscale1080p }, writeMode, ...tracks } };
   }
   const targetGb = asFiniteNumber(args.targetGb);
   const explicitBytes = asFiniteNumber(args.targetBytes);
@@ -170,12 +184,24 @@ export function encodeDraftFromArgs(args: Record<string, unknown>): {
       ? Math.round(targetGb * 1024 ** 3)
       : null;
   if (targetBytes == null) {
-    return { ok: false, error: "Pass targetGb, targetBytes, or quality." };
+    return { ok: true, draft: { video: { mode: "copy", downscale1080p }, writeMode, ...tracks } };
   }
   return {
     ok: true,
-    draft: { video: { mode: "size", targetBytes, codec, downscale1080p }, writeMode },
+    draft: { video: { mode: "size", targetBytes, codec, downscale1080p }, writeMode, ...tracks },
     targetBytes,
+  };
+}
+
+export function mcpTracksFromReport(report: InspectionReport): {
+  listingComplete: boolean;
+  audio: ReturnType<typeof describeAudioTrack>[];
+  subtitles: ReturnType<typeof describeSubtitleTrack>[];
+} {
+  return {
+    listingComplete: report.listingState === "complete",
+    audio: report.audio.map(describeAudioTrack),
+    subtitles: report.subtitles.map(describeSubtitleTrack),
   };
 }
 
@@ -253,7 +279,114 @@ function encodeSchema(): Record<string, unknown> {
     downscale1080p: { type: "boolean" },
     writeMode: { type: "string", enum: ["sidecar", "direct"] },
     assignedNodeId: { type: "string" },
+    audio: {
+      type: "array",
+      description: "Per-track audio actions from get_tracks: keep, remove, replace_aac, replace_downmix, add_downmix.",
+      items: {
+        type: "object",
+        properties: {
+          index: { type: "number" },
+          action: { type: "string", enum: ["keep", "remove", "replace_aac", "replace_downmix", "add_downmix"] },
+          channels: { type: "number", description: "Downmix layout: 6 for 5.1, 2 for stereo." },
+        },
+        required: ["index", "action"],
+      },
+    },
+    subtitles: {
+      type: "array",
+      description: "Per-track subtitle actions from get_tracks: keep or remove.",
+      items: {
+        type: "object",
+        properties: {
+          index: { type: "number" },
+          action: { type: "string", enum: ["keep", "remove"] },
+        },
+        required: ["index", "action"],
+      },
+    },
   }, ["itemId"]);
+}
+
+function parseAudioChoices(value: unknown): { ok: true; value: CustomAudioChoice[] } | { ok: false; error: string } {
+  if (value == null) return { ok: true, value: [] };
+  if (!Array.isArray(value)) return { ok: false, error: "audio must be a list of track actions." };
+  const actions = new Set(["keep", "remove", "replace_aac", "replace_downmix", "add_downmix"]);
+  const out: CustomAudioChoice[] = [];
+  for (const row of value) {
+    const rec = record(row);
+    const index = asFiniteNumber(rec.index);
+    const action = typeof rec.action === "string" ? rec.action : "";
+    if (index == null || !Number.isInteger(index) || !actions.has(action)) {
+      return { ok: false, error: "Each audio item needs an index and a keep, remove, replace_aac, replace_downmix, or add_downmix action." };
+    }
+    const channels = asFiniteNumber(rec.channels);
+    out.push({
+      index,
+      action: action as CustomAudioChoice["action"],
+      ...(channels != null ? { channels } : {}),
+    });
+  }
+  return { ok: true, value: out };
+}
+
+function parseSubtitleChoices(value: unknown): { ok: true; value: CustomSubtitleChoice[] } | { ok: false; error: string } {
+  if (value == null) return { ok: true, value: [] };
+  if (!Array.isArray(value)) return { ok: false, error: "subtitles must be a list of track actions." };
+  const out: CustomSubtitleChoice[] = [];
+  for (const row of value) {
+    const rec = record(row);
+    const index = asFiniteNumber(rec.index);
+    const action = rec.action === "keep" || rec.action === "remove" ? rec.action : null;
+    if (index == null || !Number.isInteger(index) || !action) {
+      return { ok: false, error: "Each subtitle item needs an index and a keep or remove action." };
+    }
+    out.push({ index, action });
+  }
+  return { ok: true, value: out };
+}
+
+function describeAudioTrack(track: InspectionReport["audio"][number]) {
+  const downmixTo = [6, 2].filter((channels) => channels < track.channels);
+  const actions = ["keep", "remove", "replace_aac"];
+  if (downmixTo.length) {
+    actions.push("replace_downmix", "add_downmix");
+  }
+  return {
+    index: track.index,
+    language: track.language,
+    languageName: languageDisplayName(track.language),
+    channels: track.channels,
+    layout: layoutLabel(track.channels),
+    codec: track.codec,
+    title: track.title || null,
+    commentary: track.commentary,
+    default: Boolean(track.default),
+    untagged: track.untagged,
+    actions,
+    downmixTo,
+  };
+}
+
+function describeSubtitleTrack(track: InspectionReport["subtitles"][number]) {
+  return {
+    index: track.index,
+    language: track.language,
+    languageName: languageDisplayName(track.language),
+    codec: track.codec,
+    title: track.title || null,
+    forced: track.forced,
+    sdh: track.sdh,
+    default: Boolean(track.default),
+    untagged: track.untagged,
+    actions: ["keep", "remove"],
+  };
+}
+
+function layoutLabel(channels: number): string {
+  if (channels === 2) return "stereo";
+  if (channels === 6) return "5.1";
+  if (channels === 8) return "7.1";
+  return `${channels}ch`;
 }
 
 function record(value: unknown): Record<string, unknown> {

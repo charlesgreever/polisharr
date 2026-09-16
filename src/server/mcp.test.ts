@@ -249,6 +249,77 @@ describe("MCP agent access", () => {
     expect(direct.data.error).toBe("Direct write is off in Settings.");
   });
 
+  it("lists each audio and subtitle track with the same actions as the title page", async () => {
+    const ctx = await ready();
+    apps.push(ctx);
+    const itemId = ctx.store.listItems()[0]!.id;
+    const report = ctx.store.getInspection(itemId)!;
+    ctx.store.saveInspection(itemId, {
+      ...report,
+      audio: [
+        { index: 1, language: "eng", channels: 8, codec: "truehd", title: "", untagged: false, commentary: false, default: true },
+        { index: 2, language: "eng", channels: 2, codec: "aac", title: "Commentary", untagged: false, commentary: true },
+      ],
+      subtitles: [
+        { index: 3, language: "eng", codec: "subrip", title: "", untagged: false, forced: false, sdh: false },
+        { index: 4, language: "spa", codec: "subrip", title: "", untagged: false, forced: false, sdh: false },
+      ],
+    });
+    const tracks = await tool(ctx.app.app, ctx.token, "get_tracks", { itemId });
+    expect(tracks.data.ok).toBe(true);
+    const audio = tracks.data.audio as Array<{ index: number; layout: string; actions: string[]; downmixTo: number[]; commentary: boolean }>;
+    expect(audio).toEqual([
+      expect.objectContaining({ index: 1, layout: "7.1", commentary: false, actions: expect.arrayContaining(["keep", "remove", "replace_aac", "replace_downmix", "add_downmix"]), downmixTo: [6, 2] }),
+      expect.objectContaining({ index: 2, layout: "stereo", commentary: true, downmixTo: [] }),
+    ]);
+    const subs = tracks.data.subtitles as Array<{ index: number; language: string; actions: string[] }>;
+    expect(subs.map((row) => row.index)).toEqual([3, 4]);
+    expect(subs[1]).toMatchObject({ language: "spa", actions: ["keep", "remove"] });
+  });
+
+  it("previews and queues keep, drop, and downmix choices without a video encode", async () => {
+    const ctx = await ready();
+    apps.push(ctx);
+    const itemId = ctx.store.listItems()[0]!.id;
+    const report = ctx.store.getInspection(itemId)!;
+    ctx.store.saveInspection(itemId, {
+      ...report,
+      videoCodec: "hevc",
+      audio: [
+        { index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false },
+        { index: 2, language: "spa", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
+      ],
+      subtitles: [{ index: 3, language: "spa", codec: "subrip", title: "", untagged: false, forced: false, sdh: false }],
+    });
+    const preview = await tool(ctx.app.app, ctx.token, "preview_plan", {
+      itemId,
+      audio: [
+        { index: 1, action: "replace_downmix", channels: 2 },
+        { index: 2, action: "remove" },
+      ],
+      subtitles: [{ index: 3, action: "remove" }],
+    });
+    expect(preview.data.ok).toBe(true);
+    expect(preview.data.codec).toBeNull();
+    expect(String(preview.data.reasons)).toMatch(/stereo/i);
+    const queued = await tool(ctx.app.app, ctx.token, "queue_encode", {
+      itemId,
+      audio: [{ index: 1, action: "replace_downmix", channels: 2 }, { index: 2, action: "remove" }],
+      subtitles: [{ index: 3, action: "remove" }],
+    });
+    expect(queued.data.ok).toBe(true);
+    const job = ctx.store.getJob(String(queued.data.jobId));
+    expect(job?.plan).toMatchObject({
+      origin: "custom",
+      video: { kind: "copy" },
+      audio: expect.arrayContaining([
+        { op: "replace_downmix", index: 1, channels: 2 },
+        { op: "remove", index: 2 },
+      ]),
+      subtitles: [{ op: "remove", index: 3 }],
+    });
+  });
+
   it("keeps and discards Review items only with the confirm words", async () => {
     const ctx = await ready();
     apps.push(ctx);
@@ -286,6 +357,6 @@ describe("MCP encode draft", () => {
     expect(size).toMatchObject({ ok: true, targetBytes: 8 * 1024 ** 3 });
     const quality = encodeDraftFromArgs({ itemId: "x", targetGb: 8, quality: 22 });
     expect(quality).toMatchObject({ ok: true, draft: { video: { mode: "quality", quality: 22 } } });
-    expect(encodeDraftFromArgs({ itemId: "x" }).ok).toBe(false);
+    expect(encodeDraftFromArgs({ itemId: "x" })).toMatchObject({ ok: true, draft: { video: { mode: "copy" } } });
   });
 });

@@ -217,7 +217,7 @@ Signed-in pages keep a **Report** control on screen. **Bug** and **Change reques
 
 Polisharr can expose tools to an AI assistant over MCP (Model Context Protocol) on the **master** only, at `POST /mcp`. GPU workers do not serve this. Mint a token in Settings → **AI agent access**. The token is shown once.
 
-The assistant can search titles, read jobs and Review, queue the current suggestion, add stereo, and queue a size or quality sidecar encode. The library file still does not change until Keep. Keep and Discard require the confirm words `KEEP` and `DISCARD`.
+The assistant can search titles, read each audio and subtitle track, queue the current suggestion, add stereo, and queue a custom sidecar plan (size, quality, keep/drop tracks, or downmix). The library file still does not change until Keep. Keep and Discard require the confirm words `KEEP` and `DISCARD`.
 
 Example Grok `~/.grok/config.toml` (no live token in this file):
 

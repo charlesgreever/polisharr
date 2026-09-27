@@ -229,6 +229,44 @@ describe("store schema migration", () => {
     expect(store.listJobs()[0]?.id).toBe("job-done-1");
   });
 
+  it("drops finished job logs when the database opens again", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "opt-log-")), "polisharr.db");
+    const first = new Store(path);
+    first.insertJob({
+      id: "done",
+      itemId: "item",
+      suggestionId: null,
+      status: "succeeded",
+      phase: "idle",
+      progress: 1,
+      error: null,
+      warning: null,
+      runNow: false,
+      createdAt: 1,
+      plan: {},
+    });
+    first.insertJob({
+      id: "run",
+      itemId: "item",
+      suggestionId: null,
+      status: "running",
+      phase: "transcoding",
+      progress: 0.2,
+      error: null,
+      warning: null,
+      runNow: false,
+      createdAt: 2,
+      plan: {},
+    });
+    first.appendJobLog("done", "finished ffmpeg log");
+    first.appendJobLog("run", "still encoding");
+    first.close();
+    const second = new Store(path);
+    stores.push(second);
+    expect(second.jobLog("done")).toBe("");
+    expect(second.jobLog("run")).toBe("still encoding");
+  });
+
   it("counts running jobs in queueActive so a processing file is not hidden", () => {
     const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-work-")), "polisharr.db"));
     stores.push(store);

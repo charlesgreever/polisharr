@@ -189,7 +189,7 @@ export function createInspectionRunner(opts: InspectionRunnerOptions) {
   }
 
   function leftoverCount(): number {
-    return opts.store.listItems().filter((item) => inspectStillOpen(item)).length;
+    return opts.store.countInspectLeftovers();
   }
 
   function publishInspect(walking: boolean, pending: number, total: number): void {

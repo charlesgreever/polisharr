@@ -308,9 +308,12 @@ export class Store {
     this.ensureColumn("jobs", "dispatched_write_mode", "TEXT");
     this.ensureColumn("jobs", "source_revision", "TEXT");
     this.ensureColumn("jobs", "finished_at", "INTEGER");
-    this.db.exec(
-      "UPDATE jobs SET finished_at = created_at WHERE finished_at IS NULL AND status IN ('succeeded','failed','cancelled')",
-    );
+    this.db.exec(`
+      UPDATE jobs SET finished_at = created_at WHERE finished_at IS NULL AND status IN ('succeeded','failed','cancelled');
+      UPDATE jobs SET log = NULL WHERE status IN ('succeeded','failed','cancelled') AND log IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS jobs_queue_status ON jobs (queue_visible, status);
+    `);
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
     this.ensureColumn("reviews", "intent_origin", "TEXT");
     this.ensureColumn("reviews", "intent_requested_at", "INTEGER");
     this.ensureColumn("reviews", "source_revision", "TEXT");
@@ -1173,7 +1176,42 @@ export class Store {
   }
 
   listJobs(): Array<Job & { plan: JobPlan }> {
-    return (this.db.prepare("SELECT * FROM jobs WHERE queue_visible = 1 ORDER BY position ASC").all() as Record<string, unknown>[]).map(mapJob);
+    return (this.db.prepare(
+      `SELECT ${JOB_ROW_COLUMNS} FROM jobs WHERE queue_visible = 1 ORDER BY position ASC`,
+    ).all() as Record<string, unknown>[]).map(mapJob);
+  }
+
+  countInspectLeftovers(): number {
+    const media = MEDIA_FILE_SUFFIXES.map(() => "lower(i.path) LIKE ?").join(" OR ");
+    const suffixes = MEDIA_FILE_SUFFIXES.map((suffix) => `%${suffix}`);
+    const isoStale = `(
+      lower(i.path) LIKE '%.iso'
+      AND (
+        n.item_id IS NULL
+        OR IFNULL(json_extract(n.report, '$.sourceMethod'), '') != 'iso_ffmpeg'
+      )
+    )`;
+    const sigMismatch = `IFNULL(n.source_sig, '') != (i.path || '|' || i.size_bytes)
+      AND NOT EXISTS (
+        SELECT 1 FROM file_errors e
+        WHERE e.path = i.path AND ${currentFileErrorSql("e")}
+      )`;
+    return Number((this.db.prepare(
+      `SELECT COUNT(*) AS n
+       FROM library_items i
+       LEFT JOIN inspections n ON n.item_id = i.id
+       WHERE i.path != ''
+         AND (${media})
+         AND (
+           ${isoStale}
+           OR (lower(i.path) NOT LIKE '%.iso' AND ${sigMismatch})
+           OR (
+             lower(i.path) LIKE '%.iso'
+             AND IFNULL(json_extract(n.report, '$.sourceMethod'), '') = 'iso_ffmpeg'
+             AND ${sigMismatch}
+           )
+         )`,
+    ).get(...suffixes) as { n: number }).n);
   }
 
   jobPage(offset: number, limit: number): Page<Job & { plan: JobPlan }> {
@@ -1182,7 +1220,7 @@ export class Store {
       "SELECT COUNT(*) AS n FROM jobs WHERE queue_visible = 1 AND status IN ('succeeded','failed','cancelled')",
     ).get() as { n: number }).n);
     const rows = this.db.prepare(
-      `SELECT j.*, i.type AS item_type, i.title AS item_title, i.show_title AS item_show_title,
+      `SELECT ${jobColumns("j")}, i.type AS item_type, i.title AS item_title, i.show_title AS item_show_title,
               i.season AS item_season, i.episode AS item_episode, i.episode_title AS item_episode_title
        FROM jobs j LEFT JOIN library_items i ON i.id = j.item_id
        WHERE j.queue_visible = 1
@@ -1680,7 +1718,7 @@ export class Store {
          (SELECT COUNT(*) FROM jobs WHERE queue_visible = 1 AND status = 'failed') AS failed`,
     ).get() as Record<string, number>;
     const row = this.db.prepare(
-      `SELECT j.*, i.type AS item_type, i.title AS item_title, i.show_title AS item_show_title,
+      `SELECT ${jobColumns("j")}, i.type AS item_type, i.title AS item_title, i.show_title AS item_show_title,
               i.season AS item_season, i.episode AS item_episode, i.episode_title AS item_episode_title
        FROM jobs j LEFT JOIN library_items i ON i.id = j.item_id
        WHERE j.queue_visible = 1 AND j.status = 'running' ORDER BY j.position LIMIT 1`,
@@ -2780,6 +2818,18 @@ function currentFileErrorSql(alias: string): string {
 
 function itemHref(itemType: unknown, itemId: string): string {
   return itemType === "episode" ? `/series/episodes/${itemId}` : `/movies/${itemId}`;
+}
+
+const MEDIA_FILE_SUFFIXES = [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".mts", ".iso", ".mk3d", ".webm"];
+
+const JOB_ROW_COLUMNS = `
+  id, item_id, suggestion_id, status, phase, progress, error, warning, run_now, position, plan, created_at,
+  write_mode, promote_error, assigned_node_id, node_id, started_at, dispatched_write_mode, source_revision,
+  finished_at, queue_visible, lease_until, lease_token
+`.replace(/\s+/g, " ").trim();
+
+function jobColumns(alias: string): string {
+  return JOB_ROW_COLUMNS.split(", ").map((column) => `${alias}.${column}`).join(", ");
 }
 
 function jobIsFinished(status: string): boolean {

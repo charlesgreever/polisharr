@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseBackend, choosePreviewEncoder, createPreviewCapabilityProbe, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, parseH264PreviewEncoders, probeEncodeDevices, probePreviewCapability } from "./hardware.ts";
+import { chooseBackend, choosePreviewEncoder, createPreviewCapabilityProbe, encodeApiLabel, gpuNameFromPci, gpuNameFromSysctl, parseEncoders, parseFfmpegVersion, parseH264PreviewEncoders, probeEncodeDevices, probePreviewCapability } from "./hardware.ts";
 
 const jellyfinBoth = `
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
@@ -21,6 +21,21 @@ const brewVideotoolbox = `
  V..... hevc_videotoolbox    VideoToolbox H.265 Encoder (codec hevc)
  V..... av1_videotoolbox     VideoToolbox AV1 Encoder (codec av1)
 `;
+
+describe("ffmpeg build version", () => {
+  it("reads the Jellyfin banner token", () => {
+    expect(parseFfmpegVersion("ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with gcc 12\n")).toBe("8.1.3-Jellyfin");
+  });
+
+  it("reads a plain ffmpeg banner token", () => {
+    expect(parseFfmpegVersion("ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers")).toBe("7.1.1");
+  });
+
+  it("returns an empty string when the banner is missing", () => {
+    expect(parseFfmpegVersion("")).toBe("");
+    expect(parseFfmpegVersion("configuration: --enable-nvenc")).toBe("");
+  });
+});
 
 describe("hardware encoder listing", () => {
   it("marks NVIDIA AV1 when av1_nvenc is listed", () => {

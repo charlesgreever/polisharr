@@ -96,6 +96,7 @@ describe("store schema migration", () => {
         concurrency: 2,
         enabled: true,
         version: "0.0.0",
+        ffmpegVersion: "",
         currentJobId: null,
         preview: null,
       },

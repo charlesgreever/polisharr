@@ -2422,6 +2422,66 @@ describe("public HTTP behavior", () => {
     expect(settings.defaultEncodeNodeId).toBe("worker-1");
   });
 
+  it("shows each node's Polisharr version and ffmpeg build, and keeps a build a heartbeat does not repeat", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-node-build-"));
+    const env = loadEnv({
+      CONFIG_DIR: dir,
+      PORT: "7373",
+      POLISHARR_ROLE: "master",
+      POLISHARR_NODE_NAME: "homeserver",
+      POLISHARR_CLUSTER_TOKEN: "cluster-secret",
+    });
+    const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null };
+    const created = createApp({ env, hardware: async () => hw, version: "0.2.46", ffmpegVersion: "7.0.2-Jellyfin" });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    const hello = await created.app.request("/api/cluster/hello", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({
+        nodeId: "worker-1",
+        name: "4070",
+        version: "0.2.46",
+        ffmpegVersion: "8.1.3-Jellyfin",
+        hardware: hw,
+        concurrency: 1,
+      }),
+    });
+    expect(hello.status).toBe(200);
+    const listed = (await (await created.app.request("/api/nodes", { headers })).json()) as {
+      nodes: Array<{ id: string; name: string; thisNode: boolean; version: string; ffmpegVersion: string }>;
+    };
+    expect(listed.nodes.find((node) => node.thisNode)).toMatchObject({ name: "homeserver", version: "0.2.46", ffmpegVersion: "7.0.2-Jellyfin" });
+    expect(listed.nodes.find((node) => node.id === "worker-1")).toMatchObject({ version: "0.2.46", ffmpegVersion: "8.1.3-Jellyfin" });
+    const updated = await created.app.request("/api/cluster/heartbeat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", hardware: hw, version: "0.2.47", ffmpegVersion: "8.1.3-Jellyfin", concurrency: 1 }),
+    });
+    expect(updated.status).toBe(200);
+    const kept = await created.app.request("/api/cluster/heartbeat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", hardware: hw, concurrency: 1 }),
+    });
+    expect(kept.status).toBe(200);
+    const after = (await (await created.app.request("/api/nodes", { headers })).json()) as {
+      nodes: Array<{ id: string; version: string; ffmpegVersion: string }>;
+    };
+    expect(after.nodes.find((node) => node.id === "worker-1")).toMatchObject({ version: "0.2.47", ffmpegVersion: "8.1.3-Jellyfin" });
+    const cleared = await created.app.request("/api/cluster/heartbeat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cluster-secret" },
+      body: JSON.stringify({ nodeId: "worker-1", hardware: hw, ffmpegVersion: "", concurrency: 1 }),
+    });
+    expect(cleared.status).toBe(200);
+    const blank = (await (await created.app.request("/api/nodes", { headers })).json()) as {
+      nodes: Array<{ id: string; version: string; ffmpegVersion: string }>;
+    };
+    expect(blank.nodes.find((node) => node.id === "worker-1")).toMatchObject({ version: "0.2.47", ffmpegVersion: "" });
+  });
+
   it("returns 202 for a Review preview task and leases it on a capable worker", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-preview-http-"));
     const env = loadEnv({

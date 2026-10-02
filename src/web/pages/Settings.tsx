@@ -22,6 +22,13 @@ import {
 } from "../settings-copy";
 import { ANY_OPEN_NODE_ID } from "../encode-node";
 
+function nodeBuildText(node: ClusterNode): string {
+  const polisharr = node.version.trim();
+  const ffmpeg = node.ffmpegVersion?.trim() ?? "";
+  const build = [polisharr, ffmpeg ? `ffmpeg ${ffmpeg}` : ""].filter(Boolean).join(" · ");
+  return build ? ` · ${build}` : "";
+}
+
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
   const [data, setData] = useState<SettingsPayload | null>(null);
   const [hw, setHw] = useState<Hardware | null>(null);
@@ -275,7 +282,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           {nodes.map((node) => (
             <li key={node.id} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
               <div className="font-medium text-ink">{node.name}</div>
-              <div className="text-muted">{node.roleLabel} · {node.hardwareLabel} · {node.online ? "Online" : "Offline"}{node.enabled ? "" : " · Drained"}</div>
+              <div className="text-muted">{node.roleLabel} · {node.hardwareLabel} · {node.online ? "Online" : "Offline"}{node.enabled ? "" : " · Drained"}{nodeBuildText(node)}</div>
               <div className="text-muted">{node.runningCount ?? 0} / {node.concurrency}{node.runningTitles?.length ? ` · ${node.runningTitles.join(", ")}` : ""}</div>
               <div className="flex flex-wrap items-end gap-3">
                 <label className="block text-sm">

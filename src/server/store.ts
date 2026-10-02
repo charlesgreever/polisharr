@@ -321,6 +321,7 @@ export class Store {
     this.ensureColumn("reviews", "wait_reason", "TEXT");
     this.ensureColumn("reviews", "mutation_started", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("nodes", "preview", "TEXT");
+    this.ensureColumn("nodes", "ffmpeg_version", "TEXT NOT NULL DEFAULT ''");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS preview_tasks (
         id TEXT PRIMARY KEY,
@@ -1843,8 +1844,8 @@ export class Store {
 
   upsertNode(node: ClusterNode): void {
     this.db.prepare(
-      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id, preview)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes (id, name, role, last_seen, hardware, concurrency, enabled, version, current_job_id, preview, ffmpeg_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          role = excluded.role,
@@ -1854,7 +1855,8 @@ export class Store {
          enabled = excluded.enabled,
          version = excluded.version,
          current_job_id = excluded.current_job_id,
-         preview = excluded.preview`,
+         preview = excluded.preview,
+         ffmpeg_version = excluded.ffmpeg_version`,
     ).run(
       node.id,
       node.name,
@@ -1866,6 +1868,7 @@ export class Store {
       node.version,
       node.currentJobId,
       node.preview == null ? null : JSON.stringify(node.preview),
+      node.ffmpegVersion ?? "",
     );
   }
 
@@ -2527,6 +2530,7 @@ function mapNode(row: Record<string, unknown>): ClusterNode {
     concurrency: Number(row.concurrency) || 1,
     enabled: Number(row.enabled) === 1,
     version: String(row.version ?? ""),
+    ffmpegVersion: String(row.ffmpeg_version ?? ""),
     currentJobId: row.current_job_id == null ? null : String(row.current_job_id),
     preview: parsePreviewCapability(parseJson(row.preview)),
   };

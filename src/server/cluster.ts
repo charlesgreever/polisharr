@@ -34,6 +34,7 @@ export type ClusterNode = {
   concurrency: number;
   enabled: boolean;
   version: string;
+  ffmpegVersion?: string;
   currentJobId: string | null;
   preview?: PreviewCapability | null;
 };
@@ -162,6 +163,7 @@ export type ClusterHello = {
   nodeId: string;
   name: string;
   version: string;
+  ffmpegVersion?: string;
   hardware: HardwareInfo;
   concurrency: number;
   preview: PreviewCapability | null;
@@ -175,6 +177,8 @@ export type ClusterHeartbeat = {
   runningJobIds: string[];
   preview: PreviewCapability | null;
   runningPreviewIds: string[];
+  version?: string;
+  ffmpegVersion?: string;
 };
 
 export type PreviewRenderPlan = {
@@ -215,6 +219,7 @@ export function parseClusterHello(value: unknown): { ok: true; hello: ClusterHel
   const name = trimString(raw.name);
   if (!name) return { ok: false, error: "A node name is required." };
   const version = trimString(raw.version) || "unknown";
+  const ffmpegVersion = optionalSentString(raw, "ffmpegVersion");
   const concurrency = parseConcurrency(raw.concurrency);
   if (concurrency == null) return { ok: false, error: "The concurrency value is invalid." };
   return {
@@ -223,6 +228,7 @@ export function parseClusterHello(value: unknown): { ok: true; hello: ClusterHel
       nodeId,
       name,
       version,
+      ...(ffmpegVersion !== undefined ? { ffmpegVersion } : {}),
       hardware: parseHardwareInfo(raw.hardware),
       concurrency,
       preview: parsePreviewCapability(raw.preview),
@@ -242,6 +248,8 @@ export function parseClusterHeartbeat(value: unknown): { ok: true; beat: Cluster
   const currentJobId = typeof raw.currentJobId === "string" && raw.currentJobId.trim()
     ? raw.currentJobId.trim()
     : null;
+  const version = optionalSentString(raw, "version");
+  const ffmpegVersion = optionalSentString(raw, "ffmpegVersion");
   return {
     ok: true,
     beat: {
@@ -254,6 +262,8 @@ export function parseClusterHeartbeat(value: unknown): { ok: true; beat: Cluster
       runningPreviewIds: Array.isArray(raw.runningPreviewIds)
         ? raw.runningPreviewIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
         : [],
+      ...(version !== undefined ? { version } : {}),
+      ...(ffmpegVersion !== undefined ? { ffmpegVersion } : {}),
     },
   };
 }
@@ -264,6 +274,11 @@ function record(value: unknown): Record<string, unknown> {
 
 function trimString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function optionalSentString(raw: Record<string, unknown>, key: string): string | undefined {
+  if (!Object.hasOwn(raw, key)) return undefined;
+  return typeof raw[key] === "string" ? raw[key].trim() : "";
 }
 
 export type RemoteJobDocument = {

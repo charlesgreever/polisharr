@@ -262,6 +262,7 @@ export type ClusterNode = {
   concurrency: number;
   enabled: boolean;
   version: string;
+  ffmpegVersion?: string;
   currentJobId: string | null;
   online: boolean;
   runningCount?: number;

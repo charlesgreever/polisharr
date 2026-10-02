@@ -53,6 +53,21 @@ describe("worker loop", () => {
     expect(worker.snapshot().detail).toContain("http://192.168.1.10:7373");
   });
 
+  it("sends the Polisharr version and ffmpeg build on hello and heartbeat", async () => {
+    const bodies: unknown[] = [];
+    const worker = loop({
+      ffmpegVersion: "8.1.3-Jellyfin",
+      fetch: (async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch,
+    });
+    await worker.tick();
+    await worker.tick();
+    expect(bodies[0]).toMatchObject({ version: "0.2.18", ffmpegVersion: "8.1.3-Jellyfin" });
+    expect(bodies[1]).toMatchObject({ version: "0.2.18", ffmpegVersion: "8.1.3-Jellyfin" });
+  });
+
   it("does not send a token in the status sentence when the master rejects it", async () => {
     const worker = loop({
       fetch: (async () => new Response(JSON.stringify({ error: CLUSTER_WRONG_TOKEN }), { status: 401 })) as typeof fetch,

@@ -165,6 +165,22 @@ describe("cluster node identity", () => {
       hello: { nodeId: "worker-1", name: "5090", version: "0.2.18", hardware: { ...hardware, videotoolbox: false, vaapiDevice: undefined, gpuName: undefined, qsv: false }, concurrency: 2, preview: null },
     });
     expect(parseClusterHello({ name: "5090" }).ok).toBe(false);
+    expect(parseClusterHello({
+      nodeId: "worker-1",
+      name: "4070",
+      version: "0.2.46",
+      ffmpegVersion: " 8.1.3-Jellyfin ",
+      hardware,
+      concurrency: 1,
+    })).toMatchObject({ ok: true, hello: { version: "0.2.46", ffmpegVersion: "8.1.3-Jellyfin" } });
+    const withoutBuild = parseClusterHello({
+      nodeId: "worker-1",
+      name: "4070",
+      version: "0.2.46",
+      hardware,
+      concurrency: 1,
+    });
+    expect(withoutBuild.ok && withoutBuild.hello.ffmpegVersion).toBeUndefined();
     expect(parseClusterHeartbeat({
       nodeId: "worker-1",
       hardware,
@@ -174,6 +190,21 @@ describe("cluster node identity", () => {
       ok: true,
       beat: { nodeId: "worker-1", currentJobId: "job-9", runningJobIds: ["job-9"], concurrency: 1, preview: null, runningPreviewIds: [] },
     });
+    const beatWithoutBuild = parseClusterHeartbeat({
+      nodeId: "worker-1",
+      hardware,
+      currentJobId: "job-9",
+      runningJobIds: ["job-9"],
+    });
+    expect(beatWithoutBuild.ok && beatWithoutBuild.beat.version).toBeUndefined();
+    expect(beatWithoutBuild.ok && beatWithoutBuild.beat.ffmpegVersion).toBeUndefined();
+    expect(parseClusterHeartbeat({
+      nodeId: "worker-1",
+      hardware,
+      version: "0.2.47",
+      ffmpegVersion: "8.1.3-Jellyfin",
+      concurrency: 1,
+    })).toMatchObject({ ok: true, beat: { version: "0.2.47", ffmpegVersion: "8.1.3-Jellyfin" } });
     expect(parseClusterClaim({ nodeId: "worker-1", freeSlots: 2 })).toEqual({ ok: true, nodeId: "worker-1", freeSlots: 2 });
     expect(parseRemoteComplete({
       leaseToken: "tok",

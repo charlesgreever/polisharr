@@ -31,6 +31,7 @@ export type WorkerLoopOptions = {
   nodeId: string;
   name: string;
   version: string;
+  ffmpegVersion?: string;
   masterUrl: string | null;
   token: string | null;
   hardware: () => Promise<HardwareInfo>;
@@ -132,6 +133,8 @@ export class WorkerLoop {
       const preview = await this.currentPreviewCapability();
       const beat = await this.postJson<{ cancelJobIds?: unknown; cancelPreviewIds?: unknown; concurrency?: unknown }>("/api/cluster/heartbeat", {
         nodeId: this.opts.nodeId,
+        version: this.opts.version,
+        ffmpegVersion: this.opts.ffmpegVersion ?? "",
         hardware: await this.opts.hardware(),
         concurrency: this.opts.concurrency(),
         currentJobId: runningJobIds[0] ?? null,
@@ -453,6 +456,7 @@ export class WorkerLoop {
       nodeId: this.opts.nodeId,
       name: this.opts.name,
       version: this.opts.version,
+      ffmpegVersion: this.opts.ffmpegVersion ?? "",
       hardware: await this.opts.hardware(),
       concurrency: this.opts.concurrency(),
       preview: await this.currentPreviewCapability(),

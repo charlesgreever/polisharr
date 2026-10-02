@@ -13,6 +13,22 @@ import type { HardwareBackend, HardwareInfo, PreviewH264Encoder } from "./types.
 
 const execFileAsync = promisify(execFile);
 
+export function parseFfmpegVersion(text: string): string {
+  const line = text.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  const match = /^ffmpeg version (\S+)/.exec(line);
+  return match?.[1] ?? "";
+}
+
+export async function probeFfmpegVersion(ffmpeg: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await execFileAsync(ffmpeg, ["-version"], { timeout: 8000 });
+    return parseFfmpegVersion(`${stdout}\n${stderr}`);
+  } catch (error) {
+    const failed = error && typeof error === "object" ? error as { stdout?: unknown; stderr?: unknown } : {};
+    return parseFfmpegVersion(`${String(failed.stdout ?? "")}\n${String(failed.stderr ?? "")}`);
+  }
+}
+
 export type HardwareProbe = () => Promise<HardwareInfo>;
 
 export type EncoderListing = {

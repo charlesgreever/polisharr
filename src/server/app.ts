@@ -161,6 +161,7 @@ export type AppOptions = {
   extractSubtitleSup?: (args: string[]) => Promise<void>;
   runPgsOcr?: (supPath: string) => Promise<string>;
   version?: string;
+  ffmpegVersion?: string;
   playbackPollMs?: number;
   playbackTimeoutMs?: number;
   playbackStaleMs?: number;
@@ -293,6 +294,7 @@ export function createApp(opts: AppOptions) {
     nodeId: store.localNodeId(),
     name: opts.env.nodeName || localHostname(),
     version,
+    ffmpegVersion: opts.ffmpegVersion ?? "",
     masterUrl: opts.env.masterUrl,
     token: opts.env.clusterTokenEnv,
     hardware,
@@ -786,6 +788,7 @@ export function createApp(opts: AppOptions) {
       concurrency: existing?.concurrency ?? parsed.hello.concurrency,
       enabled: existing?.enabled ?? true,
       version: parsed.hello.version,
+      ffmpegVersion: parsed.hello.ffmpegVersion !== undefined ? parsed.hello.ffmpegVersion : existing?.ffmpegVersion ?? "",
       currentJobId: null,
       preview: parsed.hello.preview,
     });
@@ -809,7 +812,8 @@ export function createApp(opts: AppOptions) {
       lastSeen: now,
       hardware: parsed.beat.hardware,
       currentJobId: parsed.beat.currentJobId,
-      version: existing.version,
+      version: parsed.beat.version ? parsed.beat.version : existing.version,
+      ffmpegVersion: parsed.beat.ffmpegVersion !== undefined ? parsed.beat.ffmpegVersion : existing.ffmpegVersion ?? "",
       preview: parsed.beat.preview,
     });
     store.renewNodeLeases(parsed.beat.nodeId, parsed.beat.runningJobIds, now + LEASE_MS);
@@ -2267,6 +2271,7 @@ export function createApp(opts: AppOptions) {
       concurrency: existing?.concurrency ?? Math.max(1, store.getSettings().concurrency),
       enabled: existing?.enabled ?? true,
       version,
+      ffmpegVersion: opts.ffmpegVersion ?? "",
       currentJobId: running?.id ?? null,
       preview: await resolvePreviewCapability(),
     };

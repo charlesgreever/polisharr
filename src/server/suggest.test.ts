@@ -236,13 +236,107 @@ describe("suggestion engine", () => {
       av1Available: false,
       audioMix: "surround",
     });
-    expect(house?.actions ?? []).not.toContain("add_stereo");
+    expect(house?.actions).toEqual(["add_stereo"]);
+    expect(house?.keepAudio).toEqual([1]);
+    expect(house?.stripAudio).toEqual([]);
+    expect(house?.reasons.some((reason) => /Add an AAC stereo track/i.test(reason))).toBe(true);
     expect(kids?.actions).toEqual(["tracks", "add_stereo"]);
     expect(kids?.keepAudio).toEqual([]);
     expect(kids?.stripAudio).toEqual([1]);
     expect(kids?.stereoSource).toBe(1);
     expect(kids?.reasons.some((reason) => /Replace surround/i.test(reason))).toBe(true);
     expect(surround?.actions ?? []).not.toContain("add_stereo");
+    const keepSurroundFivePointOne = buildSuggestion({
+      item: movie,
+      report: fivePointOne,
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+      audioMix: "surround",
+    });
+    expect(keepSurroundFivePointOne?.actions ?? []).not.toContain("add_stereo");
+  });
+
+  it("suggests an added stereo track for a surround-only episode on house default", () => {
+    const episode: LibraryItem = {
+      ...movie,
+      id: "e-surround",
+      type: "episode",
+      title: "Pilot",
+      showTitle: "Kids Show",
+      season: 1,
+      episode: 1,
+      episodeTitle: "Pilot",
+      path: "/tv/kids.mkv",
+      quality: "HDTV-1080p",
+      resolution: "1080",
+    };
+    const suggestion = buildSuggestion({
+      item: episode,
+      report: report({
+        sizePerHourGb: 0.4,
+        videoCodec: "hevc",
+        width: 1920,
+        height: 1080,
+        bitDepth: 8,
+        hdr: "none",
+        audio: [{ index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false }],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: false,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+    });
+    expect(suggestion?.actions).toEqual(["add_stereo"]);
+    expect(suggestion?.keepAudio).toEqual([1]);
+    expect(suggestion?.stripAudio).toEqual([]);
+    expect(suggestion?.reasons.some((reason) => /Add an AAC stereo track/i.test(reason))).toBe(true);
+  });
+
+  it("leaves a surround file healthy when a preferred-language stereo track is already there", () => {
+    const suggestion = buildSuggestion({
+      item: movie,
+      report: report({
+        sizePerHourGb: 1,
+        videoCodec: "hevc",
+        audio: [
+          { index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false },
+          { index: 2, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false },
+        ],
+        subtitles: [],
+      }),
+      settings: DEFAULT_SETTINGS,
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+    });
+    expect(suggestion?.actions ?? []).not.toContain("add_stereo");
+  });
+
+  it("does not suggest stereo for surround-only audio when the checkbox is off", () => {
+    const suggestion = buildSuggestion({
+      item: movie,
+      report: report({
+        sizePerHourGb: 1,
+        videoCodec: "hevc",
+        audio: [{ index: 1, language: "eng", channels: 6, codec: "ac3", title: "", untagged: false, commentary: false }],
+        subtitles: [],
+      }),
+      settings: {
+        ...DEFAULT_SETTINGS,
+        suggestionDefaults: { ...DEFAULT_SETTINGS.suggestionDefaults, addStereo: false },
+      },
+      sizeExempt: true,
+      excluded: false,
+      videoTarget: "hevc",
+      av1Available: false,
+    });
+    expect(suggestion).toBeNull();
   });
 
   it("replaces surround with a downmix and discards included stereo when the series prefers stereo", () => {
@@ -818,7 +912,7 @@ describe("suggestion engine", () => {
         videoTarget: "hevc",
         av1Available: false,
       });
-      expect(suggestion?.actions).toEqual(["tracks"]);
+      expect(suggestion?.actions).toEqual(["tracks", "add_stereo"]);
       expect(suggestion?.actions ?? []).not.toContain("transcode");
       expect(suggestion?.after.sizeBytes).toBeNull();
       expect(suggestion?.after.sizePerHourGb).toBeNull();
@@ -848,7 +942,7 @@ describe("suggestion engine", () => {
         videoTarget: "hevc",
         av1Available: false,
       });
-      expect(suggestion?.actions).toEqual(["transcode", "tracks"]);
+      expect(suggestion?.actions).toEqual(["transcode", "tracks", "add_stereo"]);
       expect(suggestion?.reasons.some((reason) => /after dropping extra languages/i.test(reason))).toBe(true);
       expect(suggestion?.reasons.some((reason) => reason.includes("2.50"))).toBe(true);
       expect(suggestion?.after.sizePerHourGb).toBe(2.5);

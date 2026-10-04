@@ -100,7 +100,7 @@ A series header has the same **Encode target**. It applies to every episode of t
 
 Series headers also have **Preferred audio**:
 
-- **House default** follows Settings **Add stereo from surround audio**. The house rule adds AAC stereo for Atmos, TrueHD, EAC3, or more than 5.1, and keeps the original mix.
+- **House default** follows Settings **Add stereo from surround audio**. When that box is on, Polisharr adds an AAC stereo track to any surround layout that has no stereo track in your preferred language, including ordinary 5.1, and keeps the original mix.
 - **Prefer stereo** replaces surround with AAC stereo on every episode, including 5.1 kids shows, and drops the original mix. When surround is present, Polisharr always builds that stereo from the surround mix and discards a stereo track that was already on the file (commentary or otherwise).
 - **Keep surround** turns automatic stereo off for that show.
 

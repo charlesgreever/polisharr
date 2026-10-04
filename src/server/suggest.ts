@@ -257,9 +257,7 @@ export function shouldSuggestStereo(opts: {
   if (opts.audioMix === "surround") return false;
   const hasSurround = opts.audio.some((track) => track.channels > 2);
   if (opts.audioMix === "stereo") return hasSurround;
-  return opts.addStereoDefault && opts.audio.some(
-    (track) => track.channels > 6 || /atmos|truehd|eac3/i.test(`${track.codec} ${track.title}`),
-  );
+  return opts.addStereoDefault && hasSurround;
 }
 
 export function codecIsAtLeastHevc(codec: string): boolean {

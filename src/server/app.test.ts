@@ -1936,7 +1936,19 @@ describe("public HTTP behavior", () => {
       sizeExempt: false,
     });
     await created.inspectPending();
-    expect(((await (await created.app.request("/api/suggestions", { headers })).json()) as { items: unknown[] }).items).toHaveLength(0);
+    const before = (await (await created.app.request("/api/suggestions", { headers })).json()) as {
+      items: Array<{ actions?: string[]; keepAudio?: number[]; stripAudio?: number[]; reasons?: string[] }>;
+    };
+    expect(before.items).toHaveLength(1);
+    expect(before.items[0]?.actions).toEqual(["add_stereo"]);
+    expect(before.items[0]?.keepAudio).toEqual([1]);
+    expect(before.items[0]?.stripAudio).toEqual([]);
+    expect(before.items[0]?.reasons?.some((reason) => /Add an AAC stereo track/i.test(reason))).toBe(true);
+    const seriesBefore = (await (await created.app.request("/api/library/series", { headers })).json()) as {
+      items: Array<{ healthyCount?: number; suggestionCount?: number }>;
+    };
+    expect(seriesBefore.items[0]?.healthyCount).toBe(0);
+    expect(seriesBefore.items[0]?.suggestionCount).toBe(1);
     const saved = await created.app.request(`/api/library/series/${instanceId}/42/audio-mix`, {
       method: "POST",
       headers,
@@ -1960,6 +1972,95 @@ describe("public HTTP behavior", () => {
     expect(suggestions.items[0]?.reasons?.some((reason) => /Replace surround/i.test(reason))).toBe(true);
     expect(suggestions.items[0]?.after?.tracks?.some((track) => /AAC 2\.0/i.test(track))).toBe(true);
     expect(suggestions.items[0]?.after?.tracks?.some((track) => /5\.1|ac3/i.test(track))).toBe(false);
+  });
+
+  it("marks a surround-only movie unhealthy while Add stereo from surround audio is on", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
+    const created = createApp({
+      env,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
+      readable: async () => true,
+      probe: async () => ({
+        format: { duration: "3600" },
+        streams: [
+          { codec_type: "video", codec_name: "hevc", width: 1920, height: 1080 },
+          { codec_type: "audio", codec_name: "ac3", channels: 6, tags: { language: "eng" }, index: 1 },
+        ],
+      }),
+      fetch: (async (url: string) => {
+        if (String(url).includes("system/status")) return new Response(JSON.stringify({ appName: "Radarr", version: "5" }));
+        return new Response("[]");
+      }) as typeof fetch,
+    });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        languageConfirmed: true,
+        preferredLanguage: "eng",
+        reviewPath: join(dir, "review"),
+        suggestionDefaults: { addStereo: true, transcodeToSizeCap: false, transcodeBelowHevc: false },
+      }),
+    });
+    const instanceId = created.store.listInstances()[0]?.id ?? "";
+    created.store.upsertItem({
+      id: `${instanceId}:movie:10`,
+      instanceId,
+      arrId: 10,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Surround Only",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: "/mnt/nas/movies/surround-only.mkv",
+      sizeBytes: 1_000_000_000,
+      quality: "Bluray-1080p",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    await created.inspectPending();
+
+    const unhealthy = (await (await created.app.request("/api/library/movies", { headers })).json()) as {
+      healthyCount: number;
+      suggestionCount: number;
+      items: Array<{ reasons?: string[] }>;
+    };
+    expect(unhealthy.healthyCount).toBe(0);
+    expect(unhealthy.suggestionCount).toBe(1);
+    expect(unhealthy.items[0]?.reasons?.some((reason) => /Add an AAC stereo track/i.test(reason))).toBe(true);
+
+    const saved = await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ suggestionDefaults: { addStereo: false } }),
+    });
+    expect(saved.status).toBe(200);
+    const healthy = (await (await created.app.request("/api/library/movies", { headers })).json()) as {
+      healthyCount: number;
+      suggestionCount: number;
+      items: Array<{ reasons?: string[] }>;
+    };
+    expect(healthy.healthyCount).toBe(1);
+    expect(healthy.suggestionCount).toBe(0);
+    expect(healthy.items[0]?.reasons ?? []).toEqual([]);
   });
 
   it("rejects a do-nothing custom plan with a field error", async () => {

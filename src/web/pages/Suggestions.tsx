@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, type ClusterNode, type SuggestionFilters, type SuggestionRow } from "../api";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
@@ -6,6 +6,14 @@ import { bulkEncodeNeed } from "../encode-node";
 import { PagedListControls } from "../components/PagedListControls";
 import { Help, PageHead } from "../components/Shell";
 import { FilterChip, MediaSnapshot } from "../components/ui";
+import {
+  loadedSelection,
+  queueAllConfirmCopy,
+  queueBatchCopy,
+  selectLoaded,
+  suggestionViewIsFiltered,
+  toggleRange,
+} from "../suggestion-selection";
 import { usePagedList } from "../use-paged-list";
 
 export function SuggestionsPage() {
@@ -13,7 +21,13 @@ export function SuggestionsPage() {
   const [q, setQ] = useState(params.get("q") ?? "");
   const [debouncedQ, setDebouncedQ] = useState(q);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [anchorId, setAnchorId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmAll, setConfirmAll] = useState(false);
   const [msg, setMsg] = useState("");
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const headerRef = useRef<HTMLInputElement>(null);
+  const busyRef = useRef(false);
   const [filters, setFilters] = useState<SuggestionFilters>({});
   const [sort, setSort] = useState<"title" | "savings">(params.get("sort") === "savings" ? "savings" : "title");
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
@@ -28,6 +42,7 @@ export function SuggestionsPage() {
       setParams(next);
       setDebouncedQ(q);
       setSelected({});
+      setAnchorId(null);
     }, 280);
     return () => clearTimeout(t);
   }, [q, sort, setParams]);
@@ -44,12 +59,49 @@ export function SuggestionsPage() {
     keyOf: (row: SuggestionRow) => row.id,
   });
   const items = list.items;
+  const loadedIds = items.map((row) => row.id);
+  const selectedIds = loadedIds.filter((id) => selected[id]);
+  const header = loadedSelection(loadedIds, selected);
+  const filteredView = suggestionViewIsFiltered(debouncedQ, filters);
+  const nodeId = encodeNodeId || undefined;
+
+  useEffect(() => {
+    if (headerRef.current) headerRef.current.indeterminate = header === "some";
+  }, [header]);
+
+  useEffect(() => {
+    if (!confirmAll) return;
+    confirmRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setConfirmAll(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmAll]);
+
+  async function runBatch(action: () => Promise<{ queued: number; skipped: number }>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      const result = await action();
+      setMsg(queueBatchCopy(result.queued, result.skipped));
+      setSelected({});
+      setAnchorId(null);
+      await list.reload();
+    } catch (error) {
+      setMsg(error instanceof Error ? error.message : "The queue request failed.");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
 
   return (
     <section>
       <PageHead title="Suggestions" />
       <Help>
-        Suggestions is the work list: only titles that still need something. Open a title for custom work. Tracks-only means keep the video and clean languages. After size stays blank when the video will not shrink. Largest savings puts the biggest estimated disk wins first.
+        Suggestions is the work list: only titles that still need something. Open a title for custom work. Tracks-only means keep the video and clean languages. After size stays blank when the video will not shrink. Largest savings puts the biggest estimated disk wins first. Queue next 10 takes the first 10 rows in the current sort. Queue all asks before it adds the rest of this list. Checked rows queue on their own.
       </Help>
       <div className="mt-5 space-y-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-theme-sm dark:border-gray-800 dark:bg-white/[0.03]">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -83,24 +135,29 @@ export function SuggestionsPage() {
               need={bulkEncodeNeed(items.map((row) => row.after.codec))}
               onChange={setEncodeNodeId}
             />
-            <button className="btn-secondary" type="button" onClick={() => void api.queueFiltered(debouncedQ, filters, encodeNodeId || undefined).then((result) => {
-              setMsg(`Queued ${result.queued}; skipped ${result.skipped}.`);
-              return list.reload();
-            }).catch((error: Error) => setMsg(error.message))}>Queue filtered</button>
+            <button
+              className="btn-secondary"
+              type="button"
+              disabled={busy || list.total === 0}
+              onClick={() => void runBatch(() => api.queueFiltered(debouncedQ, filters, nodeId, { sort, limit: 10 }))}
+            >
+              Queue next 10
+            </button>
+            <button
+              className="btn-secondary"
+              type="button"
+              disabled={busy || list.total === 0}
+              onClick={() => setConfirmAll(true)}
+            >
+              {`Queue all (${list.total})`}
+            </button>
             <button
               className="btn"
               type="button"
-              disabled={!Object.values(selected).some(Boolean)}
-              onClick={() => {
-                const ids = items.filter((i) => selected[i.id]).map((i) => i.id);
-                void Promise.all(ids.map((id) => api.queue({ suggestionId: id, assignedNodeId: encodeNodeId || undefined }))).then(() => {
-                  setMsg(`Queued ${ids.length}.`);
-                  setSelected({});
-                  return list.reload();
-                });
-              }}
+              disabled={busy || selectedIds.length === 0}
+              onClick={() => void runBatch(() => api.queueSelected(selectedIds, nodeId))}
             >
-              Add selected to queue
+              {`Queue selected (${selectedIds.length})`}
             </button>
           </div>
         </div>
@@ -109,13 +166,47 @@ export function SuggestionsPage() {
             <FilterChip
               key={key}
               pressed={filters[key] === true}
-              onToggle={() => setFilters((current) => ({ ...current, [key]: current[key] ? undefined : true }))}
+              onToggle={() => {
+                setSelected({});
+                setAnchorId(null);
+                setFilters((current) => ({ ...current, [key]: current[key] ? undefined : true }));
+              }}
             >
               {filterLabel(key)}
             </FilterChip>
           ))}
         </div>
       </div>
+      {confirmAll && (
+        <div className="modal-scrim" role="presentation" onClick={() => setConfirmAll(false)}>
+          <div
+            className="modal-card glass space-y-3 p-5"
+            role="dialog"
+            aria-labelledby="queue-all-title"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="queue-all-title" className="text-sm font-semibold tracking-wide text-ink">Queue all suggestions?</h2>
+            <p className="m-0 text-sm leading-5 text-muted">{queueAllConfirmCopy(list.total, filteredView)}</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                ref={confirmRef}
+                className="btn"
+                type="button"
+                onClick={() => {
+                  setConfirmAll(false);
+                  void runBatch(() => api.queueFiltered(debouncedQ, filters, nodeId, { sort }));
+                }}
+              >
+                Queue all
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => setConfirmAll(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {items.length === 0 && list.loading && <div className="empty">Loading suggestions…</div>}
       {items.length === 0 && !list.loading && !list.error && <div className="empty">No open work. Healthy files stay off this list.</div>}
       {items.length > 0 && (
@@ -123,7 +214,20 @@ export function SuggestionsPage() {
           <table>
             <thead>
               <tr>
-                <th className="w-10"></th>
+                <th className="w-10">
+                  <input
+                    ref={headerRef}
+                    className="size-4 accent-accent"
+                    type="checkbox"
+                    checked={header === "all"}
+                    aria-label="Select loaded suggestions"
+                    onChange={() => undefined}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      setSelected((current) => selectLoaded(loadedIds, current, header !== "all"));
+                    }}
+                  />
+                </th>
                 <th>Title</th>
                 <th>Why</th>
                 <th>Now</th>
@@ -143,8 +247,18 @@ export function SuggestionsPage() {
                       className="size-4 accent-accent"
                       type="checkbox"
                       checked={Boolean(selected[item.id])}
-                      onChange={(e) => setSelected((s) => ({ ...s, [item.id]: e.target.checked }))}
                       aria-label={`Select ${item.displayTitle}`}
+                      onChange={() => undefined}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        const checked = !selected[item.id];
+                        setSelected((current) => (
+                          event.shiftKey
+                            ? toggleRange(loadedIds, current, anchorId, item.id, checked)
+                            : selectLoaded([item.id], current, checked)
+                        ));
+                        setAnchorId(item.id);
+                      }}
                     />
                   </td>
                   <td className="min-w-44">
@@ -189,6 +303,7 @@ export function SuggestionsPage() {
 
   function setFilter(key: "type" | "resolution" | "hdr" | "codec", value: string) {
     setSelected({});
+    setAnchorId(null);
     if (key === "type" && (value === "" || value === "movie" || value === "episode")) {
       setFilters((current) => ({ ...current, type: value || undefined }));
     }

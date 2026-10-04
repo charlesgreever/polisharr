@@ -950,12 +950,7 @@ export class Store {
     const filtered = suggestionWhere(query, filters, this.getSettings());
     const joins = "FROM suggestions s LEFT JOIN library_items i ON i.id = s.item_id LEFT JOIN instances n ON n.id = i.instance_id LEFT JOIN inspections ins ON ins.item_id = i.id";
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${joins} WHERE ${filtered.where}`).get(...filtered.params) as { n: number }).n);
-    const order = sort === "savings"
-      ? `CASE WHEN json_extract(s.payload, '$.estimatedSavingsBytes') IS NULL
-              OR json_extract(s.payload, '$.estimatedSavingsBytes') <= 0 THEN 1 ELSE 0 END,
-         json_extract(s.payload, '$.estimatedSavingsBytes') DESC,
-         LOWER(COALESCE(i.show_title, i.title, s.item_id)), i.season, i.episode, s.id`
-      : "LOWER(COALESCE(i.show_title, i.title, s.item_id)), i.season, i.episode, s.id";
+    const order = suggestionOrder(sort);
     const rows = this.db.prepare(
       `SELECT s.payload, i.type AS item_type, i.title AS item_title, i.show_title AS item_show_title,
               i.season AS item_season, i.episode AS item_episode, i.episode_title AS item_episode_title,
@@ -986,7 +981,7 @@ export class Store {
     }), total, offset, limit);
   }
 
-  suggestionIds(query = "", filters: SuggestionFilters = {}): string[] {
+  suggestionIds(query = "", filters: SuggestionFilters = {}, sort: "title" | "savings" = "title"): string[] {
     const filtered = suggestionWhere(query, filters, this.getSettings());
     const rows = this.db.prepare(
       `SELECT s.id FROM suggestions s
@@ -994,7 +989,7 @@ export class Store {
        LEFT JOIN instances n ON n.id = i.instance_id
        LEFT JOIN inspections ins ON ins.item_id = i.id
        WHERE ${filtered.where}
-       ORDER BY s.id`,
+       ORDER BY ${suggestionOrder(sort)}`,
     ).all(...filtered.params) as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }
@@ -2862,6 +2857,15 @@ function joinedDisplayTitle(row: Record<string, unknown>, fallback: string): str
     episode: row.item_episode == null ? null : Number(row.item_episode),
     episodeTitle: row.item_episode_title == null ? null : String(row.item_episode_title),
   });
+}
+
+function suggestionOrder(sort: "title" | "savings"): string {
+  const title = "LOWER(COALESCE(i.show_title, i.title, s.item_id)), i.season, i.episode, s.id";
+  if (sort !== "savings") return title;
+  return `CASE WHEN json_extract(s.payload, '$.estimatedSavingsBytes') IS NULL
+              OR json_extract(s.payload, '$.estimatedSavingsBytes') <= 0 THEN 1 ELSE 0 END,
+         json_extract(s.payload, '$.estimatedSavingsBytes') DESC,
+         ${title}`;
 }
 
 function suggestionWhere(query: string, filters: SuggestionFilters, settings: Settings): { where: string; params: unknown[] } {

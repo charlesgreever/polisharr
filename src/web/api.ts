@@ -111,9 +111,19 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value !== undefined) params.set(key, String(value));
     return req<LibraryPage<SuggestionRow>>(`/api/suggestions?${params}`);
   },
-  queueFiltered: (q: string, filters: SuggestionFilters, assignedNodeId?: string) =>
+  queueFiltered: (
+    q: string,
+    filters: SuggestionFilters,
+    assignedNodeId?: string,
+    batch?: { sort?: "title" | "savings"; limit?: number },
+  ) =>
     req<{ queued: number; skipped: number }>("/api/suggestions/queue-filtered", {
-      method: "POST", body: JSON.stringify({ q, filters, assignedNodeId }),
+      method: "POST",
+      body: JSON.stringify({ q, filters, assignedNodeId, sort: batch?.sort, limit: batch?.limit }),
+    }),
+  queueSelected: (ids: string[], assignedNodeId?: string) =>
+    req<{ queued: number; skipped: number }>("/api/suggestions/queue-selected", {
+      method: "POST", body: JSON.stringify({ ids, assignedNodeId }),
     }),
   dismiss: (id: string) => req(`/api/suggestions/${id}/dismiss`, { method: "POST" }),
   queue: (body: Record<string, unknown>) => req("/api/queue", { method: "POST", body: JSON.stringify(body) }),

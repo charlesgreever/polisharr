@@ -13,6 +13,78 @@ function cookie(res: Response): string {
   return raw.split(";")[0] ?? "";
 }
 
+async function readyToQueue(ctx: Awaited<ReturnType<typeof setup>>): Promise<{ cookie: string; "content-type": string }> {
+  ctx.app.jobs.stop();
+  const setupRes = await ctx.app.app.request("/api/auth/setup", {
+    method: "POST",
+    body: JSON.stringify({ username: "ada", password: "secret12" }),
+  });
+  ctx.store.upsertInstance({ id: "radarr-a", kind: "radarr", name: "Radarr", url: "http://radarr", enabled: true });
+  ctx.store.saveSettings({
+    ...ctx.store.getSettings(),
+    languageConfirmed: true,
+    reviewPath: join(ctx.dir, "review"),
+  });
+  return { cookie: cookie(setupRes), "content-type": "application/json" };
+}
+
+function seedSuggestion(ctx: Awaited<ReturnType<typeof setup>>, row: {
+  id: string;
+  title: string;
+  savings: number | null;
+  arrId: number;
+  type?: "movie" | "episode";
+  season?: number | null;
+  episode?: number | null;
+  path?: string;
+}): void {
+  const type = row.type ?? "movie";
+  ctx.store.upsertItem({
+    id: row.id,
+    instanceId: "radarr-a",
+    arrId: row.arrId,
+    arrSeriesId: type === "episode" ? 1 : null,
+    arrEpisodeFileId: type === "episode" ? row.arrId : null,
+    type,
+    title: row.title,
+    showTitle: type === "episode" ? row.title : null,
+    season: row.season ?? null,
+    episode: row.episode ?? null,
+    episodeTitle: type === "episode" ? `Part ${row.episode}` : null,
+    path: row.path ?? `/movies/${row.id}.mkv`,
+    sizeBytes: 1_000,
+    quality: "HD",
+    resolution: "1080",
+    profile: "HD",
+    tags: [],
+    posterRemoteUrl: null,
+    sizeExempt: false,
+  });
+  ctx.store.saveSuggestion(row.id, {
+    id: `sug-${row.id}`,
+    itemId: row.id,
+    actions: ["transcode"],
+    reasons: ["Over the size cap."],
+    warning: null,
+    category: type === "episode" ? "tv1080p" : "movie1080p",
+    estimatedSavingsBytes: row.savings,
+    now: { codec: "h264", quality: "HD", sizeBytes: 1_000, sizePerHourGb: 1 },
+    after: { codec: "hevc", quality: "HD", sizeBytes: 500, sizePerHourGb: 0.5 },
+    dismissed: false,
+    keepAudio: [],
+    stripAudio: [],
+    keepSubs: [],
+    stripSubs: [],
+  });
+}
+
+async function queuedItemIds(ctx: Awaited<ReturnType<typeof setup>>, headers: { cookie: string }): Promise<string[]> {
+  const body = (await (await ctx.app.app.request("/api/jobs?limit=100", { headers })).json()) as {
+    items: Array<{ itemId: string }>;
+  };
+  return body.items.map((item) => item.itemId);
+}
+
 async function setup() {
   const dir = mkdtempSync(join(tmpdir(), "opt-"));
   const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
@@ -499,6 +571,114 @@ describe("public HTTP behavior", () => {
       await ctx.app.app.request("/api/suggestions?type=movie&sort=savings", { headers })
     ).json()) as { items: Array<{ itemId: string }> };
     expect(moviesOnly.items.map((item) => item.itemId)).toEqual(["movie-b", "movie-a", "movie-c"]);
+  });
+
+  it("queues the next savings batch, then the following titles", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await readyToQueue(ctx);
+    for (let index = 1; index <= 11; index += 1) {
+      seedSuggestion(ctx, {
+        id: `film-${index}`,
+        title: `Film ${String(index).padStart(2, "0")}`,
+        savings: index * 1_000,
+        arrId: index,
+      });
+    }
+    const first = await ctx.app.app.request("/api/suggestions/queue-filtered", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ filters: {}, sort: "savings", limit: 10 }),
+    });
+    expect(await first.json()).toEqual({ queued: 10, skipped: 0 });
+    expect(await queuedItemIds(ctx, headers)).toEqual([
+      "film-11", "film-10", "film-9", "film-8", "film-7", "film-6", "film-5", "film-4", "film-3", "film-2",
+    ]);
+    const second = await ctx.app.app.request("/api/suggestions/queue-filtered", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ filters: {}, sort: "savings", limit: 10 }),
+    });
+    expect(await second.json()).toEqual({ queued: 1, skipped: 10 });
+    expect(await queuedItemIds(ctx, headers)).toEqual([
+      "film-11", "film-10", "film-9", "film-8", "film-7", "film-6", "film-5", "film-4", "film-3", "film-2", "film-1",
+    ]);
+  });
+
+  it("queues every filtered suggestion in savings order when no limit is set", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await readyToQueue(ctx);
+    seedSuggestion(ctx, { id: "low", title: "Alpha", savings: 10, arrId: 1 });
+    seedSuggestion(ctx, { id: "high", title: "Bravo", savings: 90, arrId: 2 });
+    seedSuggestion(ctx, { id: "mid", title: "Charlie", savings: 40, arrId: 3 });
+    const listed = (await (await ctx.app.app.request("/api/suggestions?sort=savings", { headers })).json()) as {
+      items: Array<{ itemId: string }>;
+    };
+    const queued = await ctx.app.app.request("/api/suggestions/queue-filtered", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ filters: {}, sort: "savings" }),
+    });
+    expect(await queued.json()).toEqual({ queued: 3, skipped: 0 });
+    expect(await queuedItemIds(ctx, headers)).toEqual(listed.items.map((item) => item.itemId));
+  });
+
+  it("queues selected suggestions in request order and skips an unknown id", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await readyToQueue(ctx);
+    seedSuggestion(ctx, { id: "low", title: "Alpha", savings: 10, arrId: 1 });
+    seedSuggestion(ctx, { id: "high", title: "Bravo", savings: 90, arrId: 2 });
+    const selected = await ctx.app.app.request("/api/suggestions/queue-selected", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ids: ["sug-low", "missing", "sug-high"] }),
+    });
+    expect(await selected.json()).toEqual({ queued: 2, skipped: 1 });
+    expect(await queuedItemIds(ctx, headers)).toEqual(["low", "high"]);
+  });
+
+  it("queues one episode of a shared file and skips the sibling", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await readyToQueue(ctx);
+    seedSuggestion(ctx, {
+      id: "ep-1", title: "Show", savings: 10, arrId: 1, type: "episode", season: 1, episode: 1, path: "/tv/Show/same.mkv",
+    });
+    seedSuggestion(ctx, {
+      id: "ep-2", title: "Show", savings: 10, arrId: 2, type: "episode", season: 1, episode: 2, path: "/tv/Show/same.mkv",
+    });
+    const selected = await ctx.app.app.request("/api/suggestions/queue-selected", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ids: ["sug-ep-1", "sug-ep-2"] }),
+    });
+    expect(await selected.json()).toEqual({ queued: 1, skipped: 1 });
+    expect(await queuedItemIds(ctx, headers)).toEqual(["ep-1"]);
+  });
+
+  it("refuses batch queue until language is confirmed", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    ctx.app.jobs.stop();
+    const setupRes = await ctx.app.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
+    const filtered = await ctx.app.app.request("/api/suggestions/queue-filtered", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ filters: {}, sort: "savings", limit: 10 }),
+    });
+    const selected = await ctx.app.app.request("/api/suggestions/queue-selected", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ids: ["sug-1"] }),
+    });
+    expect(filtered.status).toBe(403);
+    expect(selected.status).toBe(403);
   });
 
   it("bounds every work-list response and exposes continuation metadata", async () => {

@@ -230,6 +230,27 @@ export class JobService {
     return { id };
   }
 
+  enqueueSuggestions(
+    ids: string[],
+    options: { assignedNodeId?: string; limit?: number } = {},
+  ): { queued: number; skipped: number } {
+    let queued = 0;
+    let skipped = 0;
+    for (const id of ids) {
+      // limit counts successful queues so Queue next 10 walks past titles already queued.
+      if (options.limit !== undefined && queued >= options.limit) break;
+      const suggestion = this.opts.store.getSuggestion(id);
+      if (!suggestion || suggestion.dismissed) {
+        skipped += 1;
+        continue;
+      }
+      const result = this.enqueue(suggestion.itemId, suggestion, { assignedNodeId: options.assignedNodeId });
+      if ("id" in result) queued += 1;
+      else skipped += 1;
+    }
+    return { queued, skipped };
+  }
+
   reassign(id: string, nodeId: string): { ok: true } | { error: string; status: number } {
     const job = this.opts.store.getJob(id);
     if (!job) return { error: "That job does not exist.", status: 404 };

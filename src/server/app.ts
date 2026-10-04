@@ -1757,21 +1757,29 @@ export function createApp(opts: AppOptions) {
     const parsed = parseSuggestionFilters(raw.filters);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     if (raw.q !== undefined && typeof raw.q !== "string") return c.json({ error: "The suggestion search is invalid." }, 400);
-    let queued = 0;
-    let skipped = 0;
-    for (const id of store.suggestionIds(typeof raw.q === "string" ? raw.q : "", parsed.filters)) {
-      const suggestion = store.getSuggestion(id);
-      if (!suggestion || suggestion.dismissed) {
-        skipped += 1;
-        continue;
-      }
-      const result = jobs.enqueue(suggestion.itemId, suggestion, {
-        assignedNodeId: typeof raw.assignedNodeId === "string" ? raw.assignedNodeId : undefined,
-      });
-      if ("id" in result) queued += 1;
-      else skipped += 1;
-    }
-    return c.json({ queued, skipped });
+    const sort = readSuggestionSort(raw.sort);
+    if (!sort.ok) return c.json({ error: sort.error }, 400);
+    const limit = readSuggestionLimit(raw.limit);
+    if (!limit.ok) return c.json({ error: limit.error }, 400);
+    const node = readAssignedNode(raw.assignedNodeId);
+    if (!node.ok) return c.json({ error: node.error }, 400);
+    return c.json(jobs.enqueueSuggestions(
+      store.suggestionIds(typeof raw.q === "string" ? raw.q : "", parsed.filters, sort.sort),
+      { assignedNodeId: node.assignedNodeId, limit: limit.limit },
+    ));
+  });
+
+  app.post("/api/suggestions/queue-selected", async (c) => {
+    const blocked = gateOptimize();
+    if (blocked) return c.json({ error: blocked }, 403);
+    const body: unknown = await c.req.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "The selected queue request is invalid." }, 400);
+    const raw = body as Record<string, unknown>;
+    const ids = readSuggestionIds(raw.ids);
+    if (!ids.ok) return c.json({ error: ids.error }, 400);
+    const node = readAssignedNode(raw.assignedNodeId);
+    if (!node.ok) return c.json({ error: node.error }, 400);
+    return c.json(jobs.enqueueSuggestions(ids.ids, { assignedNodeId: node.assignedNodeId }));
   });
 
   app.post("/api/suggestions/:id/dismiss", (c) => {
@@ -2414,6 +2422,33 @@ function playbackQuery(c: Context): Record<string, string | undefined> {
     itemId: c.req.query("itemId"),
     unmatched: c.req.query("unmatched"),
   };
+}
+
+function readSuggestionSort(raw: unknown): { ok: true; sort: "title" | "savings" } | { ok: false; error: string } {
+  if (raw === undefined || raw === "title") return { ok: true, sort: "title" };
+  if (raw === "savings") return { ok: true, sort: "savings" };
+  return { ok: false, error: "That suggestion sort is invalid." };
+}
+
+function readSuggestionLimit(raw: unknown): { ok: true; limit?: number } | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true };
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) {
+    return { ok: false, error: "That suggestion limit is invalid." };
+  }
+  return { ok: true, limit: raw };
+}
+
+function readSuggestionIds(raw: unknown): { ok: true; ids: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.some((id) => typeof id !== "string" || id.length === 0)) {
+    return { ok: false, error: "Choose at least one suggestion." };
+  }
+  return { ok: true, ids: raw };
+}
+
+function readAssignedNode(raw: unknown): { ok: true; assignedNodeId?: string } | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true };
+  if (typeof raw !== "string") return { ok: false, error: "That encode node is invalid." };
+  return { ok: true, assignedNodeId: raw };
 }
 
 function pageRequest(rawOffset: string | undefined, rawLimit: string | undefined): { offset: number; limit: number } {

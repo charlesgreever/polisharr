@@ -1,5 +1,4 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { createServer as createTlsServer, type TLSSocket } from "node:tls";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -320,20 +319,63 @@ describe("alert settings HTTP", () => {
   });
 });
 
+// Throwaway certificate for 127.0.0.1. The image build runs the suite on
+// node:22-bookworm-slim, which does not include openssl.
+const MAIL_TEST_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCobERnRMQoI22U
+rBZReDv3LiCcXS2jIWRFvoBrS446s8L8BAqYXOCHHPfoziGM0vlfYP3Mp6NLkmfV
+62e+HhHpr8T5mGjvxZy+o7h9gSvrgWI9dN55LXmzjoP5tj02UtUpf6zwrq6VZD3G
+6v2U1EHVOZUZuOg5kGuA91FjkHOc07znvBlVYIJV2wTTBq8EZFBNELeOU9LbNEX0
+b++4h9drya/2rOqORTN28QLEsg7avQpbkaoRtuDc7hzfWJ9k+p8XTQ+BDnxgz/vb
+uyjlk4vi1jdCYZKwNCopiQEwVcPH4Ny7KOJgwN0inFXvio/jQ656OUkxXqO82U+V
+/msjZGPjAgMBAAECggEAFziaM8d06M3TAXZlO1qsSze7vPinNACEw+LwmhqC49AT
+baNxrIZ9ryiiJkx+rrJgjzMfEF+lRuRK1wvhCVg5rbJozOWjw49HkwydVrHVEuA2
+DHV3vlWz8RA7XQCwhDQRJMAa4Yehatffy/Rr/bWdgAmzkiYpin+W0Diz1YTok8dv
+133igN4hhiYL7wPJh1ktY4blWeXYbWE3Qj+dmIwHmSxMO58NUHcJlvbFZROfFE8F
+OFsBvMPgwXDvzdPFspN1hatqabsvDQPXSM6ZFxJ1vKQx6Yhbh8AjtyUi9jVvQjv3
+UWD8SQFVZfPbqlwhyDKZOg2T04jiXOfohRYOmiQ5xQKBgQDRvfVAghzsZA9u3TSK
+HVfjVdp5/NPkLWAPElH9Fd1QdyANj+fc3JrmcG90J1BQfdl0A9Hn8xcVh9L1yJ8T
+D06fQgcnFiaxNBx0pjjr0XME4xx1Y7BovPvf1QmDGS7/UGLb9t40dpMl7qutPJJE
+r7iIGRsVv1W5S1lsUfNhEigx7wKBgQDNkW5bon3ztHNVyY5NhE6SxLnsuaKoYIp4
+/wTRO4akGm1LnU4HhGjeDhftMxXzuQaBVWoqbwpQ4Pbo2dB3wFTTJ7mCEfIxXHi0
+BBs956UcVQeGsVvGdeA6JQcfXjNgPldFrHhqiG5Y+lgSI3nSbt+W/RbWkQE6BgBq
+llqTOEuRTQKBgHjD/n25LTwzVOuJtKG9yYgdO+G3YK3mLoQfEVQ/DaIyJSOJ84Ap
+CYubu6DOriDahaWWOXtrbaQ5A4//hxBrZOKwGvw3dencTnIf73BgtfBfcFhrIPz9
+q60ytfplOrlJKNLsbv8YMxvJM9JYqQOhhgffJMg91fcN2pxTB2aiFMDDAoGAdmZk
+TM0rhFmT8H5VwxoIc4pxmAJXyGlKeGRR7v09EHnUJ7AjyDqgd/1gFJPO+gDA2W9L
+5cLtCyZ3sCf8ZWzWroP72gniGEItl2miEya/t7DV0+OFe6pbCsJW9t838iAV/iBX
+fuyzufX/Efty6BxKFdoR9GWyciwQw1N0OcU76SUCgYBZuHa5fQSvv0n8WZIqqI5g
+T09FLymEl2ckLAo2LIRfKd2LYUj5fWA8kuQ1BY8Y2Fzgu92j0fmZvqTdWUVnK5+i
+K2vZlYEi45gLZmm7WPWhsBXbxNeM3h2l1BM1z2R3mZ3/AOuoaPbqJhxXqhNSDyEQ
+cyKzNEnaE8qBxQBHU9gXMw==
+-----END PRIVATE KEY-----
+`;
+
+const MAIL_TEST_CERT = `-----BEGIN CERTIFICATE-----
+MIIDGjCCAgKgAwIBAgIUBnJcgONmziDELg8qRbBJCkEMfi8wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MTAwNjE3NTk1MVoXDTM2MTAw
+MzE3NTk1MVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAqGxEZ0TEKCNtlKwWUXg79y4gnF0toyFkRb6Aa0uOOrPC
+/AQKmFzghxz36M4hjNL5X2D9zKejS5Jn1etnvh4R6a/E+Zho78WcvqO4fYEr64Fi
+PXTeeS15s46D+bY9NlLVKX+s8K6ulWQ9xur9lNRB1TmVGbjoOZBrgPdRY5BznNO8
+57wZVWCCVdsE0wavBGRQTRC3jlPS2zRF9G/vuIfXa8mv9qzqjkUzdvECxLIO2r0K
+W5GqEbbg3O4c31ifZPqfF00PgQ58YM/727so5ZOL4tY3QmGSsDQqKYkBMFXDx+Dc
+uyjiYMDdIpxV74qP40OuejlJMV6jvNlPlf5rI2Rj4wIDAQABo2QwYjAdBgNVHQ4E
+FgQUb3U7/ZOEg3AOaialIboBcR/dZnQwHwYDVR0jBBgwFoAUb3U7/ZOEg3AOaial
+IboBcR/dZnQwDwYDVR0TAQH/BAUwAwEB/zAPBgNVHREECDAGhwR/AAABMA0GCSqG
+SIb3DQEBCwUAA4IBAQA6v8+maJnmJN7DUwE0+V2y8DAezn+Ne34Lh6UjDy4G0axB
+EOP6GLCwhjg1D7COQwR6aiekeHvJQaKmUc0Rqziq3RwOuWUaGvLVn5xEd+9o6UUA
+kRug1Nzhxl3xII+Px5Ij9n4gN38/bYnMUGtbejeM9chRM2QkDfrraexXuSPv0CUs
+RdebL8/4H4guMUTnCGxNR73i2HOKygc8ipaxhro5YXV31mPmExwGbjlhmmiTv2YU
+jtCWmybxX4X0I9i7f0Dp6dWOTMSzLIjOyd1oEKDalZGOxa9ZfNccG05DFCqf9vEk
+iuer/Q3sq7pu8Jc6jUR+bpZa9r6PGVsENWTEqa5b
+-----END CERTIFICATE-----
+`;
+
 describe("email delivery", () => {
   it("sends one email after two Review finishes inside the digest window", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "opt-alert-mail-"));
-    execFileSync("openssl", [
-      "req", "-x509", "-newkey", "rsa:2048",
-      "-keyout", join(dir, "key.pem"),
-      "-out", join(dir, "cert.pem"),
-      "-days", "1", "-nodes", "-subj", "/CN=127.0.0.1",
-      "-addext", "subjectAltName=IP:127.0.0.1",
-    ]);
-    const cert = readFileSync(join(dir, "cert.pem"), "utf8");
-    const key = readFileSync(join(dir, "key.pem"), "utf8");
     const received: string[] = [];
-    const server = createTlsServer({ key, cert }, (socket: TLSSocket) => {
+    const server = createTlsServer({ key: MAIL_TEST_KEY, cert: MAIL_TEST_CERT }, (socket: TLSSocket) => {
       socket.write("220 localhost ESMTP\r\n");
       let mode: "line" | "data" = "line";
       let buf = "";
@@ -378,7 +420,7 @@ describe("email delivery", () => {
       password: "app-password",
       from: "polisharr@example.com",
       to: "ada@example.com",
-      ca: cert,
+      ca: MAIL_TEST_CERT,
     });
     const alerts = new AlertService(harness.gateway, () => now, ZONE);
     alerts.noteReview(review("Arrival"), now);

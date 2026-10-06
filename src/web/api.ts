@@ -18,6 +18,9 @@ export const api = {
   logout: () => req("/api/auth/logout", { method: "POST" }),
   settings: () => req<SettingsPayload>("/api/settings"),
   saveSettings: (body: Record<string, unknown>) => req("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
+  testAlert: () => req<{ ok: true }>("/api/alerts/test", { method: "POST" }),
+  testAlertEmail: () => req<{ ok: true }>("/api/alerts/test-email", { method: "POST" }),
+  testAlertDiscord: () => req<{ ok: true }>("/api/alerts/test-discord", { method: "POST" }),
   mintWebhookToken: () => req<{ token: string; url: string }>("/api/settings/webhook-token", { method: "POST" }),
   mintWidgetKey: () => req<{ key: string }>("/api/settings/widget-key", { method: "POST" }),
   mintClusterToken: () => req<{ token: string }>("/api/settings/cluster-token", { method: "POST" }),
@@ -328,6 +331,30 @@ export type NodesPayload = {
 };
 /** How an automatic Arr import finishes. `default` follows Write finished files when the job starts. */
 export type ImportWriteMode = "sidecar" | "default" | "direct";
+export type AlertSettings = {
+  reviewReady: boolean;
+  stillWaiting: boolean;
+  jobFailed: boolean;
+  directWrite: boolean;
+  replaceWaiting: boolean;
+  quietEnabled: boolean;
+  quietStart: string;
+  quietEnd: string;
+  reminderTime: string;
+  reviewUrl: string;
+  digestMinutes: number;
+  smtpHost: string;
+  smtpPort: number;
+  smtpSecurity: "starttls" | "tls";
+  smtpUsername: string;
+  smtpFrom: string;
+  smtpTo: string;
+  hasWebhookUrl: boolean;
+  hasWebhookToken: boolean;
+  hasSmtpPassword: boolean;
+  hasDiscordWebhook: boolean;
+  lastError: string | null;
+};
 export type SettingsPayload = {
   preferredLanguage: string;
   languageConfirmed: boolean;
@@ -365,6 +392,7 @@ export type SettingsPayload = {
   firstRun: FirstRun;
   profilePreviews?: Array<{ category: string; name: string; gbPerHour: number; mbPerMin: number }>;
   storage?: { sameVolume: boolean; note: string };
+  alerts?: AlertSettings;
 };
 export type ExternalLink = { label: string; href: string };
 export type LibraryRow = {

@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { defaultAlertState, parseAlertState, type AlertState } from "./alerts.ts";
 import type {
   ActivityOutcome,
   ExclusionKind,
@@ -1538,6 +1539,43 @@ export class Store {
     return this.reviewCountByStatus("pending");
   }
 
+  reviewAlertSummary(): { count: number; flagged: number } {
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS count,
+              COALESCE(SUM(CASE WHEN status = 'pending' AND flagged = 1 THEN 1 ELSE 0 END), 0) AS flagged
+       FROM reviews`,
+    ).get() as { count: number; flagged: number };
+    return { count: Number(row.count), flagged: Number(row.flagged) };
+  }
+
+  loadAlertState(): AlertState {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = 'alert_state'").get() as { value: string } | undefined;
+    if (!row) return defaultAlertState();
+    try {
+      return parseAlertState(JSON.parse(row.value));
+    } catch {
+      return defaultAlertState();
+    }
+  }
+
+  saveAlertState(state: AlertState): void {
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_state', ?)").run(JSON.stringify(state));
+  }
+
+  alertWebhookCipher(which: "url" | "token" | "smtp" | "discord"): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(alertSecretKey(which)) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setAlertWebhookCipher(which: "url" | "token" | "smtp" | "discord", packed: string | null): void {
+    const key = alertSecretKey(which);
+    if (!packed) {
+      this.db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+      return;
+    }
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, packed);
+  }
+
   reviewCountByStatus(status: ReviewStatus): number {
     return Number((this.db.prepare("SELECT COUNT(*) AS n FROM reviews WHERE status = ?").get(status) as { n: number }).n);
   }
@@ -2772,6 +2810,13 @@ function mapPlaybackOccurrence(row: Record<string, unknown>): PlaybackOccurrence
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
     gap: Number(row.gap) === 1,
   };
+}
+
+function alertSecretKey(which: "url" | "token" | "smtp" | "discord"): string {
+  if (which === "url") return "alert_webhook_url";
+  if (which === "token") return "alert_webhook_token";
+  if (which === "smtp") return "alert_smtp_password";
+  return "alert_discord_url";
 }
 
 function playbackMatch(value: unknown): PlaybackMatchOutcome {

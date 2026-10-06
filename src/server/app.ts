@@ -24,6 +24,7 @@ import {
 import { buildSuggestion } from "./suggest.ts";
 import { deleteArrFileAndSearch, deleteArrTrackedTitle } from "./arr-search.ts";
 import { displayTitle, matchesTitleSearch } from "./titles.ts";
+import { AlertService, readAlertUpdate, type AlertUpdate } from "./alerts.ts";
 import { JobService } from "./jobs.ts";
 import { ffmpegOptimizer, isoRemuxInputs, toolLocaleEnv, type Optimizer } from "./optimize.ts";
 import { isIsoPath } from "./inspect.ts";
@@ -194,6 +195,41 @@ export function createApp(opts: AppOptions) {
     connectionName: (id) => store.getInstance(id)?.name ?? id,
   });
   const playbackRefresh: { run: () => void } = { run: () => undefined };
+  function decryptAlert(which: "url" | "token" | "smtp" | "discord"): string {
+    const packed = store.alertWebhookCipher(which);
+    if (!packed) return "";
+    try {
+      return decryptSecret(secret, packed);
+    } catch {
+      return "";
+    }
+  }
+  const alerts = new AlertService({
+    load: () => store.loadAlertState(),
+    save: (state) => store.saveAlertState(state),
+    webhook: () => {
+      const url = decryptAlert("url");
+      if (!url) return null;
+      return { url, token: decryptAlert("token") };
+    },
+    pendingReviews: () => store.reviewAlertSummary(),
+    smtp: () => {
+      const password = decryptAlert("smtp");
+      const prefs = store.loadAlertState().prefs;
+      if (!prefs.smtpHost || !password || !prefs.smtpUsername || !prefs.smtpFrom || !prefs.smtpTo) return null;
+      return {
+        host: prefs.smtpHost,
+        port: prefs.smtpPort,
+        security: prefs.smtpSecurity,
+        username: prefs.smtpUsername,
+        password,
+        from: prefs.smtpFrom,
+        to: prefs.smtpTo,
+      };
+    },
+    hasSmtpPassword: () => decryptAlert("smtp").length > 0,
+    discord: () => decryptAlert("discord") || null,
+  }, opts.clock ?? (() => Date.now()), Intl.DateTimeFormat().resolvedOptions().timeZone);
   const jobs = new JobService({
     store,
     optimizer,
@@ -205,6 +241,7 @@ export function createApp(opts: AppOptions) {
     reinspectChangedItem: inspections.reinspectChangedItem,
     inspectOne: inspections.inspectOne,
     localNodeId: () => store.localNodeId(),
+    alerts,
     playback: {
       nodeAdmission: (nodeId) => playbackPolicy.nodeAdmission(nodeId, store.getPlaybackSettings()),
       blockedNodeIds: () => playbackPolicy.blockedNodeIds(store.getPlaybackSettings()),
@@ -249,6 +286,7 @@ export function createApp(opts: AppOptions) {
   if (!isWorker) {
     jobs.start();
     previews.start();
+    alerts.start(httpFetch);
   }
   const jellyfinPlayback = createJellyfinPlayback({
     fetch: httpFetch,
@@ -456,6 +494,8 @@ export function createApp(opts: AppOptions) {
   app.use("/api/queue", authed);
   app.use("/api/playback", authed);
   app.use("/api/playback/*", authed);
+  app.use("/api/alerts", authed);
+  app.use("/api/alerts/*", authed);
 
   function gateOptimize(): string | null {
     const state = firstRunState();
@@ -925,6 +965,7 @@ export function createApp(opts: AppOptions) {
       hasWidgetKey: Boolean(store.widgetKeyHash()),
       hasClusterToken: Boolean(store.clusterTokenHash()),
       hasMcpToken: Boolean(store.mcpTokenHash()),
+      alerts: alerts.publicView(),
       username: store.onlyUser()?.username ?? "",
       instances: publicInstances(),
       firstRun: firstRunState(),
@@ -955,6 +996,8 @@ export function createApp(opts: AppOptions) {
 
   app.put("/api/settings", async (c) => {
     const body: unknown = await c.req.json();
+    const alertParsed = readAlertBody(body);
+    if (!alertParsed.ok) return c.json({ error: alertParsed.error }, 400);
     const current = store.getSettings();
     const parsed = updateSettings(current, body);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
@@ -974,8 +1017,27 @@ export function createApp(opts: AppOptions) {
     }
     const suggestionsChanged = suggestionSettingsChanged(current, next);
     store.saveSettings(next);
+    if (alertParsed.update) applyAlertUpdate(alertParsed.update);
     if (suggestionsChanged) recomputeAllSuggestions();
     return c.json({ ok: true, settings: next, firstRun: firstRunState() });
+  });
+
+  app.post("/api/alerts/test", async (c) => {
+    const result = await alerts.sendTest(httpFetch);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/alerts/test-email", async (c) => {
+    const result = await alerts.sendTestEmail();
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/alerts/test-discord", async (c) => {
+    const result = await alerts.sendTestDiscord(httpFetch);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ ok: true });
   });
 
   app.post("/api/auth/password", async (c) => {
@@ -2375,7 +2437,31 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
-  return { app, store, jobs, previews, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy };
+  function readAlertBody(body: unknown): { ok: true; update: AlertUpdate | null } | { ok: false; error: string } {
+    if (body === null || typeof body !== "object" || Array.isArray(body) || !("alerts" in body)) {
+      return { ok: true, update: null };
+    }
+    const parsed = readAlertUpdate(store.loadAlertState().prefs, body.alerts);
+    return parsed.ok ? { ok: true, update: parsed.update } : parsed;
+  }
+
+  function applyAlertUpdate(update: AlertUpdate): void {
+    alerts.replacePrefs(update.prefs);
+    if (update.webhookUrl !== undefined) {
+      store.setAlertWebhookCipher("url", update.webhookUrl ? encryptSecret(secret, update.webhookUrl) : null);
+    }
+    if (update.webhookToken !== undefined) {
+      store.setAlertWebhookCipher("token", update.webhookToken ? encryptSecret(secret, update.webhookToken) : null);
+    }
+    if (update.smtpPassword !== undefined) {
+      store.setAlertWebhookCipher("smtp", update.smtpPassword ? encryptSecret(secret, update.smtpPassword) : null);
+    }
+    if (update.discordUrl !== undefined) {
+      store.setAlertWebhookCipher("discord", update.discordUrl ? encryptSecret(secret, update.discordUrl) : null);
+    }
+  }
+
+  return { app, store, jobs, previews, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy, alerts };
 }
 
 async function readJson(c: Context): Promise<unknown> {

@@ -3,6 +3,7 @@ import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, ty
 import { Help, PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
+import { NotificationSettings } from "../components/NotificationSettings";
 import { SuggestionDefaultsSettings } from "../components/SuggestionDefaultsSettings";
 import {
   FIELD_CONTROL,
@@ -246,6 +247,13 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         av1Available={Boolean(nodes.some((node) => node.online && node.enabled && node.hardware.av1) || hw?.av1)}
         onChange={(patch) => setData({ ...data, ...patch })}
         onSave={save}
+      />
+      <NotificationSettings
+        alerts={data.alerts}
+        onSaved={(message) => {
+          setMsg(message);
+          load();
+        }}
       />
       <div className="glass space-y-4 p-5">
         <h2 className="font-semibold">Nodes</h2>

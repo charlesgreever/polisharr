@@ -233,3 +233,44 @@ You can also send `X-Api-Key` with the same token. Regenerating the token in Set
 ## Homepage
 
 Polisharr exposes `GET /api/widget` for a Homepage `customapi` tile. Example YAML: [docs/homepage.md](docs/homepage.md).
+
+## Notifications
+
+Settings → **Notifications** sends a message when a finished file is waiting in Review, when a job fails, when a direct write has already replaced a library file, and once a day while Review still has files. Several Review finishes inside the digest window share one message. Quiet hours hold messages until the next open minute. That clock is separate from the encode off-peak window.
+
+The computer that holds your library sends the messages. A joined GPU box keeps encoding. A refused send leaves the Review copy and the library file as they are.
+
+### Review link
+
+Type the address you use to open Polisharr, such as `http://192.168.1.10:7373`. Messages include that link.
+
+### Webhook
+
+A webhook is a web address that receives a message. Paste it into **Webhook URL**. Add a token only when the receiver asks for one. Polisharr stores both encrypted and shows them again only as “saved”. **Send test** posts one message and shows the error on the card when the receiver refuses it. Leave the boxes blank to keep the saved address and token. **Clear saved webhook** removes them.
+
+The message is JSON:
+
+```json
+{
+  "event": "review-ready",
+  "title": "2 files are waiting in Review",
+  "count": 2,
+  "flagged": 1,
+  "reviewUrl": "http://192.168.1.10:7373",
+  "error": null,
+  "titles": ["Arrival", "Blade Runner"],
+  "nodeName": null
+}
+```
+
+`event` is `review-ready`, `still-waiting`, `job-failed`, `direct-write`, or `replace-waiting`. `files` lists the title and the original and finished sizes when Polisharr has them.
+
+Home Assistant can receive that JSON with a webhook trigger and call `notify.mobile_app_…`. ntfy can show it at a long private topic such as `https://ntfy.sh/your-private-topic`. Keep and Discard stay on the Review page.
+
+### Email
+
+Polisharr sends mail through a mailbox you already read. In the same Notifications card, set the provider's submission host, port, and security. STARTTLS usually uses port 587. Implicit TLS usually uses port 465. Use an app password from that mailbox. From is the address the message comes from. To is the one address that receives it. **Send test email** shows the mail server's error on the card when the message is refused. The password is stored encrypted and the settings page reports only that a password is saved.
+
+### Discord
+
+In the Discord channel, open **Integrations → Webhooks → New Webhook** and paste that address into **Discord webhook**. Polisharr stores it encrypted and posts one embed: the title, original and finished size, a line when the file missed the size target, the node name, and the Review link. A burst is one embed. **Send Discord test** posts that sample. Keep and Discard stay on the Review page until a Discord application and a tunnel hostname are set up for buttons.

@@ -137,10 +137,11 @@ async function setup() {
 }
 
 describe("public HTTP behavior", () => {
-  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; previews?: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
+  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; alerts?: { stop: () => void }; previews?: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
   afterEach(async () => {
     for (const a of apps) {
       a.app.jobs.stop();
+      a.app.alerts?.stop();
       a.app.previews?.stop();
       a.app.workerLoop?.stop();
       await a.app.playbackMonitor?.stop();

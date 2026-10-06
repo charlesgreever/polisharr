@@ -3,6 +3,7 @@ import { access, stat } from "node:fs/promises";
 import type { Store } from "./store.ts";
 import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewAudioTrack, ReviewItem, Settings, Suggestion } from "./types.ts";
 import { isTruncatedSourceError } from "./inspect.ts";
+import type { AlertSink } from "./alerts.ts";
 import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
 import { CancelledError, cleanReviewLeftovers, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
@@ -84,6 +85,7 @@ export type JobServiceOptions = {
   localNodeId?: () => string;
   playback?: JobPlaybackGate;
   previews?: PreviewCoordinator;
+  alerts?: AlertSink;
 };
 
 export const SHARED_FILE_BUSY = "This file is already in the queue or Review. Another episode uses the same file.";
@@ -347,6 +349,11 @@ export class JobService {
     this.opts.store.saveSuggestion(itemId, null);
   }
 
+  private notifyJobFailed(title: string, error: string, nodeId: string | null | undefined): void {
+    const node = nodeId ? this.opts.store.getNode(nodeId) : undefined;
+    this.opts.alerts?.noteFailure({ title, error, nodeName: node?.name ?? null }, this.now());
+  }
+
   private enqueueLock(item: NonNullable<ReturnType<Store["getItem"]>>): { error: string; status: number } | undefined {
     if (this.opts.store.pendingReviewForItem(item.id)) {
       return { error: "This title already has a sidecar waiting in Review.", status: 409 };
@@ -518,6 +525,7 @@ export class JobService {
       this.noteTruncatedSource(item.id, message);
       this.opts.store.releaseJobLease(id);
       this.opts.store.addHistory(item.id, "failed", 0, this.now());
+      this.notifyJobFailed(displayTitle(item), message, job.nodeId);
       await this.sweepReviewLeftovers();
       return { ok: true };
     }
@@ -531,6 +539,8 @@ export class JobService {
     this.opts.store.updateJob(id, { status: "failed", error, nodeId: job.nodeId });
     this.noteTruncatedSource(job.itemId, error);
     this.opts.store.addHistory(job.itemId, "failed", 0, this.now());
+    const failedItem = this.opts.store.getItem(job.itemId);
+    this.notifyJobFailed(failedItem ? displayTitle(failedItem) : job.displayTitle, error, job.nodeId);
     void this.sweepReviewLeftovers();
     return { ok: true };
   }
@@ -628,7 +638,9 @@ export class JobService {
       if (relist.ok) report = relist.report;
     }
     if (!item || !report) {
-      this.opts.store.updateJob(id, { status: "failed", error: "This title has no completed inspection." });
+      const message = "This title has no completed inspection.";
+      this.opts.store.updateJob(id, { status: "failed", error: message });
+      this.notifyJobFailed(item ? displayTitle(item) : job.displayTitle, message, job.nodeId ?? this.localNodeId());
       return;
     }
     this.running.add(id);
@@ -697,6 +709,7 @@ export class JobService {
         this.opts.store.updateJob(id, { status: "failed", error: message });
         this.noteTruncatedSource(item.id, message);
         this.opts.store.addHistory(item.id, "failed", 0, this.now());
+        this.notifyJobFailed(displayTitle(item), message, this.localNodeId());
       }
     } finally {
       this.running.delete(id);
@@ -856,6 +869,7 @@ export class JobService {
   private parkWaiting(reviewId: string, origin: ReplacementOrigin, reason: string): void {
     const review = this.opts.store.getReview(reviewId);
     if (!review) return;
+    const alreadyWaiting = review.status === "waiting";
     this.opts.store.updateReview(reviewId, {
       status: "waiting",
       intentOrigin: origin,
@@ -864,9 +878,11 @@ export class JobService {
       mutationStarted: false,
       error: null,
     });
+    if (!alreadyWaiting) this.opts.alerts?.noteReplaceWaiting({ title: review.displayTitle }, this.now());
   }
 
   private failReplacement(reviewId: string, error: string): void {
+    const review = this.opts.store.getReview(reviewId);
     this.opts.store.updateReview(reviewId, {
       status: "pending",
       error,
@@ -875,6 +891,9 @@ export class JobService {
       waitReason: null,
       mutationStarted: false,
     });
+    if (!review) return;
+    const job = this.opts.store.getJob(review.jobId);
+    this.notifyJobFailed(review.displayTitle, error, job?.nodeId ?? job?.assignedNodeId ?? null);
   }
 
   private async dispatchWaitingIntents(): Promise<void> {
@@ -963,6 +982,13 @@ export class JobService {
           if (!outcome.replaced) {
             this.failReplacement(reviewId, outcome.error ?? "Keep could not replace the library file.");
             return;
+          }
+          if (claimed.intentOrigin === "direct") {
+            this.opts.alerts?.noteDirectWrite({
+              title: claimed.displayTitle,
+              sourceBytes: claimed.source.sizeBytes,
+              finishedBytes: claimed.sidecar.sizeBytes,
+            }, this.now());
           }
           if (job && outcome.placeMethod) this.opts.store.appendJobLog(job.id, placeMethodSentence(outcome.placeMethod));
           const saved = outcome.savedBytes;
@@ -1224,6 +1250,7 @@ export class JobService {
       targetBytes,
     });
     const id = randomUUID();
+    const provenance = this.reviewProvenance(input.job);
     this.opts.store.insertReview({
       id,
       jobId: input.job.id,
@@ -1253,8 +1280,18 @@ export class JobService {
         audio: reviewAudioTracks(input.output),
       },
       error: null,
-      ...this.reviewProvenance(input.job),
+      ...provenance,
     });
+    if (input.writeMode !== "direct") {
+      this.opts.alerts?.noteReview({
+        title: displayTitle(input.item),
+        sourceBytes: input.report.sizeBytes,
+        finishedBytes: input.output.sizeBytes,
+        sizePerHourGb: input.output.sizePerHourGb,
+        flagged,
+        nodeName: provenance.nodeName ?? null,
+      }, this.now());
+    }
     if (flagged && input.writeMode !== "direct") this.opts.store.addHistory(input.item.id, "flagged", 0, this.now());
     return this.opts.store.getReviewForJob(input.job.id)?.id ?? id;
   }

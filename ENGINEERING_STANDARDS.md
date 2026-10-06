@@ -89,6 +89,9 @@ Empty `catch` is forbidden unless the next line documents why ignore is safe (`u
 | Player token | same | `hasToken: true` only |
 | Homepage widget key | SHA-256 | never (shown once on mint) |
 | Arr webhook token | SHA-256 | `hasWebhookToken: true` only (raw token shown once on mint) |
+| Notification webhook URL and bearer token | encrypted | `hasWebhookUrl` / `hasWebhookToken` only |
+| Notification mailbox password | encrypted | `hasSmtpPassword` only |
+| Discord incoming webhook URL | encrypted | `hasDiscordWebhook` only |
 | Cluster token | SHA-256 | `hasClusterToken: true` only (raw token shown once on mint) |
 | MCP agent token | SHA-256 | `hasMcpToken: true` only (raw token shown once on mint) |
 | Session | random id, httpOnly cookie | cookie only |

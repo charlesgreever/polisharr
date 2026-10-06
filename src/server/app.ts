@@ -1185,10 +1185,12 @@ export function createApp(opts: AppOptions) {
   function afterInspect(itemId: string): Suggestion | null {
     const suggestion = recomputeSuggestion(itemId);
     const item = store.getItem(itemId);
-    if (!item || !suggestion || !shouldQueueNewImport({ settings: store.getSettings(), item, suggestion })) {
+    const settings = store.getSettings();
+    if (!item || !suggestion || !shouldQueueNewImport({ settings, item, suggestion })) {
       return suggestion;
     }
-    jobs.enqueue(itemId, suggestion, { writeMode: "sidecar", runNow: false });
+    const mode = settings.queueNewImportWriteMode;
+    jobs.enqueue(itemId, suggestion, mode === "default" ? { runNow: false } : { writeMode: mode, runNow: false });
     return suggestion;
   }
 

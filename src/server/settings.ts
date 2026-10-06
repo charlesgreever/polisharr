@@ -24,6 +24,9 @@ export function parseStoredSettings(value: unknown): Settings {
   }
   if (raw.videoTarget === "hevc" || raw.videoTarget === "av1") valid.videoTarget = raw.videoTarget;
   if (raw.writeMode === "sidecar" || raw.writeMode === "direct") valid.writeMode = raw.writeMode;
+  if (raw.queueNewImportWriteMode === "sidecar" || raw.queueNewImportWriteMode === "default" || raw.queueNewImportWriteMode === "direct") {
+    valid.queueNewImportWriteMode = raw.queueNewImportWriteMode;
+  }
   if (integerInRange(raw.concurrency, 1, 16)) valid.concurrency = raw.concurrency;
   if (integerInRange(raw.inspectConcurrency, 1, 16)) valid.inspectConcurrency = raw.inspectConcurrency;
   if (typeof raw.queueNewImportsSince === "number" && Number.isFinite(raw.queueNewImportsSince) && raw.queueNewImportsSince >= 0) {
@@ -53,6 +56,12 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
   if ("reviewPath" in raw && typeof raw.reviewPath !== "string") return invalid("reviewPath");
   if ("videoTarget" in raw && raw.videoTarget !== "hevc" && raw.videoTarget !== "av1") return invalid("videoTarget");
   if ("writeMode" in raw && raw.writeMode !== "sidecar" && raw.writeMode !== "direct") return invalid("writeMode");
+  if (
+    "queueNewImportWriteMode" in raw
+    && raw.queueNewImportWriteMode !== "sidecar"
+    && raw.queueNewImportWriteMode !== "default"
+    && raw.queueNewImportWriteMode !== "direct"
+  ) return invalid("queueNewImportWriteMode");
   if ("defaultEncodeNodeId" in raw && typeof raw.defaultEncodeNodeId !== "string") return invalid("defaultEncodeNodeId");
   if ("concurrency" in raw && !integerInRange(raw.concurrency, 1, 16)) return invalid("concurrency");
   if ("inspectConcurrency" in raw && !integerInRange(raw.inspectConcurrency, 1, 16)) return invalid("inspectConcurrency");
@@ -81,6 +90,9 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
       localAuthBypass: booleanValue(raw.localAuthBypass, current.localAuthBypass),
       inspectConcurrency: integerValue(raw.inspectConcurrency, current.inspectConcurrency),
       writeMode: raw.writeMode === "direct" || raw.writeMode === "sidecar" ? raw.writeMode : current.writeMode,
+      queueNewImportWriteMode: raw.queueNewImportWriteMode === "direct" || raw.queueNewImportWriteMode === "default" || raw.queueNewImportWriteMode === "sidecar"
+        ? raw.queueNewImportWriteMode
+        : current.queueNewImportWriteMode,
       profileAutoAssign: booleanValue(raw.profileAutoAssign, current.profileAutoAssign),
       queueNewImportsSince: !current.suggestionDefaults.queueNewImports && suggestionDefaults.queueNewImports
         ? Date.now()

@@ -326,6 +326,8 @@ export type NodesPayload = {
   av1Available?: boolean;
   nodes: ClusterNode[];
 };
+/** How an automatic Arr import finishes. `default` follows Write finished files when the job starts. */
+export type ImportWriteMode = "sidecar" | "default" | "direct";
 export type SettingsPayload = {
   preferredLanguage: string;
   languageConfirmed: boolean;
@@ -350,6 +352,7 @@ export type SettingsPayload = {
   offPeakEnd: string;
   localAuthBypass: boolean;
   writeMode: "sidecar" | "direct";
+  queueNewImportWriteMode: ImportWriteMode;
   profileAutoAssign: boolean;
   hasWebhookToken?: boolean;
   hasWidgetKey?: boolean;

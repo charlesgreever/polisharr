@@ -155,7 +155,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             <option value="direct">Direct write after integrity check</option>
           </select>
         </Field>
-        <p className="help m-0">Direct write replaces the library file only after the new file passes an integrity check. Waiting bulk jobs pick this up when they start. Queue new Arr imports still writes a sidecar. Arr refresh failures stay as a warning.</p>
+        <p className="help m-0">Direct write replaces the library file only after the new file passes an integrity check. Waiting bulk jobs pick this up when they start. Queue new Arr imports uses the choice under that checkbox: a Review sidecar, this setting, or a direct replace after the same check. Jobs already in Queue keep the choice they were queued with. Radarr or Sonarr refresh failures stay as a warning.</p>
         <button
           className="btn"
           type="button"
@@ -221,8 +221,10 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         </div>
         <SuggestionDefaultsSettings
           value={data.suggestionDefaults}
+          writeMode={data.queueNewImportWriteMode ?? "sidecar"}
           videoTarget={data.videoTarget}
           onChange={(suggestionDefaults) => setData({ ...data, suggestionDefaults })}
+          onWriteModeChange={(queueNewImportWriteMode) => setData({ ...data, queueNewImportWriteMode })}
           onSave={save}
         />
         <label className="flex items-center gap-2 text-sm">

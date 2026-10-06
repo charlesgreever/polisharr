@@ -154,6 +154,7 @@ export type Settings = {
   writeMode: WriteMode;
   profileAutoAssign: boolean;
   queueNewImportsSince: number;
+  queueNewImportWriteMode: ImportWriteMode;
   /** Empty means this machine. Set when a second encode node exists. */
   defaultEncodeNodeId: string;
 };
@@ -175,6 +176,7 @@ export const DEFAULT_SETTINGS: Settings = {
   writeMode: "sidecar",
   profileAutoAssign: true,
   queueNewImportsSince: 0,
+  queueNewImportWriteMode: "sidecar",
   defaultEncodeNodeId: "",
 };
 
@@ -438,6 +440,8 @@ export type SearchHit = {
 
 export type PlanOrigin = "bulk" | "custom";
 export type WriteMode = "sidecar" | "direct";
+/** How an automatic Arr import finishes. `default` follows Write finished files when the job starts. */
+export type ImportWriteMode = "sidecar" | "default" | "direct";
 export type OutputContainer = "mkv";
 
 export type VideoCopy = { kind: "copy" };

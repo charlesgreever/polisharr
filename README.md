@@ -28,7 +28,7 @@ This tree is a greenfield rewrite. Do not import the previous application code.
 - Queue pins running jobs in Working now, then waiting jobs, then finished jobs, so a long batch does not hide the encode in progress
 - Size-mode encode reserves room for copied audio. A file within 5% of its GB-per-hour cap counts as meeting it.
 - Muxes tracks with MKVtoolnix and encodes video with the GPU or Mac media engine you pass in. mkvmerge and ffmpeg run with a UTF-8 locale so titles such as 烧烤 are not truncated.
-- Writes a sidecar for Review by default, or replaces the library file after an integrity check when **Write finished files** is Direct write. Waiting bulk jobs use that setting when they start. Queue new Arr imports still writes a sidecar. Keep then asks Radarr or Sonarr to refresh media info and rename the library file so tokens such as `EAC3 5.1` or `H264` match the new audio and video.
+- Writes a sidecar for Review by default, or replaces the library file after an integrity check when **Write finished files** is Direct write. Waiting bulk jobs use that setting when they start. Queue new Arr imports uses the choice under that checkbox: a Review sidecar, that same setting, or a direct replace after the integrity check. Keep then asks Radarr or Sonarr to refresh media info and rename the library file so tokens such as `EAC3 5.1` or `H264` match the new audio and video.
 - Lets you Keep one sidecar, Keep selected, or Keep all waiting sidecars after a confirm. Flagged results can queue a smaller encode. Review shows duration and GB per hour. Keep selected reports how many were skipped.
 - Checks review-volume free space before work. After restart, interrupted jobs return to the queue. Interrupted Keep cards return to Review so you can retry or discard them. A Keep that already replaced the library file counts as kept.
 - Can create named Arr quality profiles from the current size caps without starting a search
@@ -114,7 +114,7 @@ One Polisharr is the **master**: UI, settings, library sync, Suggestions, Review
 
 On the master, Settings → Nodes generates a cluster token. Copy it once into `POLISHARR_CLUSTER_TOKEN` on the worker, with `POLISHARR_MASTER_URL` pointing at the master. Do not share `/config` or `polisharr.db` across containers. Webhooks still hit the master.
 
-A worker writes a sidecar on the shared review path. Direct write still replaces the library file on the master after the integrity check, then refreshes Arr. Queue new Arr imports still writes a sidecar and uses the house encode node.
+A worker writes a sidecar on the shared review path. Direct write still replaces the library file on the master after the integrity check, then refreshes Arr. Queue new Arr imports uses the finish choice in Settings and the house encode node.
 
 The worker's published port is only a stub page (hardware, master URL, join status). Open the master to manage the library.
 
@@ -182,7 +182,7 @@ CONFIG_DIR=./config npm start
 
 ## Webhooks from Radarr and Sonarr
 
-Polisharr already syncs Radarr and Sonarr every 15 minutes. A Connect webhook tells it about a finished import right away so the new file is inspected without waiting. The webhook itself does not start an encode. Optional: **Queue new Arr imports automatically** in suggestion defaults queues a sidecar when inspect produces a suggestion. Keep still replaces the library file and does not queue that file again. A later Arr upgrade still can.
+Polisharr already syncs Radarr and Sonarr every 15 minutes. A Connect webhook tells it about a finished import right away so the new file is inspected without waiting. The webhook itself does not start an encode. Optional: **Queue new Arr imports automatically** in suggestion defaults queues the suggestion when inspect produces one. The choice under that checkbox writes a Review sidecar, follows **Write finished files**, or replaces the library file after the integrity check. Keep still replaces the library file and does not queue that file again. A later Arr upgrade still can.
 
 ### 1. Generate a token in Polisharr
 

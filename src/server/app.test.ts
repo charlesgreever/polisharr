@@ -928,6 +928,137 @@ describe("public HTTP behavior", () => {
     await vi.waitFor(() => expect(["failed", "succeeded"]).toContain(ctx.store.getJob(queuedBody.id)?.status));
   });
 
+  it("queues an automatic import as a locked direct write when that choice overrides sidecar", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
+    await ctx.app.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    const nodes = (await (await ctx.app.app.request("/api/nodes", { headers })).json()) as { thisNodeId: string };
+    await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        languageConfirmed: true,
+        preferredLanguage: "eng",
+        reviewPath: join(ctx.dir, "review"),
+        writeMode: "sidecar",
+        queueNewImportWriteMode: "direct",
+        suggestionDefaults: { queueNewImports: true },
+      }),
+    });
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    const jobs = ctx.store.listJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({
+      writeMode: "direct",
+      plan: { writeMode: "direct", writeModeLocked: true },
+    });
+  });
+
+  it("follows a later Write finished files change for an unlocked automatic import", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
+    await ctx.app.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    const nodes = (await (await ctx.app.app.request("/api/nodes", { headers })).json()) as { thisNodeId: string };
+    await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        languageConfirmed: true,
+        preferredLanguage: "eng",
+        reviewPath: join(ctx.dir, "review"),
+        writeMode: "sidecar",
+        queueNewImportWriteMode: "default",
+        suggestionDefaults: { queueNewImports: true },
+      }),
+    });
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    const queued = ctx.store.listJobs()[0];
+    expect(queued).toMatchObject({
+      status: "queued",
+      writeMode: "sidecar",
+      plan: { writeModeLocked: false },
+    });
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ writeMode: "direct", queueNewImportWriteMode: "default" }),
+    });
+    await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    await vi.waitFor(() => expect(ctx.store.getJob(queued!.id)?.dispatchedWriteMode).toBe("direct"));
+  });
+
+  it("keeps a queued sidecar import on sidecar after the import choice and Write finished files change", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
+    await ctx.app.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+    });
+    const nodes = (await (await ctx.app.app.request("/api/nodes", { headers })).json()) as { thisNodeId: string };
+    await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        languageConfirmed: true,
+        preferredLanguage: "eng",
+        reviewPath: join(ctx.dir, "review"),
+        writeMode: "sidecar",
+        suggestionDefaults: { queueNewImports: true },
+      }),
+    });
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    const queued = ctx.store.listJobs()[0];
+    expect(queued?.plan).toMatchObject({ writeMode: "sidecar", writeModeLocked: true });
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ writeMode: "direct", queueNewImportWriteMode: "direct" }),
+    });
+    await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    await vi.waitFor(() => expect(ctx.store.getJob(queued!.id)?.dispatchedWriteMode).toBe("sidecar"));
+  });
+
   it("returns running Queue jobs before finished jobs and reports finishedCount", async () => {
     const ctx = await setup();
     apps.push(ctx);

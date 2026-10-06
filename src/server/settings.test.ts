@@ -47,4 +47,14 @@ describe("settings boundary", () => {
     if (!stillOn.ok) return;
     expect(stillOn.settings.queueNewImportsSince).toBe(enabled.settings.queueNewImportsSince);
   });
+
+  it("keeps automatic imports on sidecar until a saved choice says otherwise", () => {
+    expect(parseStoredSettings({}).queueNewImportWriteMode).toBe("sidecar");
+    expect(parseStoredSettings({ queueNewImportWriteMode: "erase" }).queueNewImportWriteMode).toBe("sidecar");
+    const direct = updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "direct" });
+    const house = updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "default" });
+    expect(direct.ok && direct.settings.queueNewImportWriteMode).toBe("direct");
+    expect(house.ok && house.settings.queueNewImportWriteMode).toBe("default");
+    expect(updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "overwrite" }).ok).toBe(false);
+  });
 });

@@ -22,7 +22,7 @@ type ProbeStream = {
 export function parseFfprobe(path: string, sizeBytes: number, probe: Record<string, unknown>): InspectionReport {
   const format = asRecord(probe.format);
   const streams = Array.isArray(probe.streams) ? probe.streams.filter(isRecord) : [];
-  const durationSec = numberOr(format.duration, 0);
+  const durationSec = mediaDurationSec(probe);
   const video = pickPlayableVideo(streams);
   const width = intOr(video?.width, intOr(video?.coded_width, 0));
   const height = intOr(video?.height, intOr(video?.coded_height, 0));
@@ -377,6 +377,90 @@ export function unlistedIsoReport(path: string, sizeBytes: number): InspectionRe
     hasChapters: false,
     hasAttachments: false,
   };
+}
+
+// ffprobe fills format.duration from one stream bitrate when the container has no duration element.
+// A 1536 kb/s DTS tag then describes a few-gigabyte file as several hours. The statistics tag is the recorded length.
+export function mediaDurationSec(probe: Record<string, unknown>): number {
+  const format = asRecord(probe.format);
+  const streams = probeStreams(probe);
+  const formatSec = numberOr(format.duration, 0);
+  const tagSec = taggedDurationSec(streams);
+  const drifted = tagSec > 0 && formatSec > 0 && Math.abs(formatSec - tagSec) / tagSec > 0.1;
+  if (drifted && durationMatchesStreamBitrate(format, streams)) return tagSec;
+  return formatSec > 0 ? formatSec : tagSec;
+}
+
+export function referenceDurationSec(probe: Record<string, unknown>): number {
+  return Math.max(mediaDurationSec(probe), taggedDurationSec(probeStreams(probe)));
+}
+
+export function shouldConfirmMediaEnd(probe: Record<string, unknown>, sizeBytes: number): boolean {
+  const streams = probeStreams(probe);
+  const taggedBytes = taggedMediaBytes(streams);
+  if (sizeBytes > 0 && taggedBytes > sizeBytes * 1.25) return true;
+  const formatSec = numberOr(asRecord(probe.format).duration, 0);
+  const tagSec = taggedDurationSec(streams);
+  return tagSec > 0 && formatSec > 0 && Math.abs(formatSec - tagSec) / tagSec > 0.1;
+}
+
+export function truncatedSourceReason(metadataSec: number, playableSec: number): string | null {
+  if (!(metadataSec > 0) || !(playableSec > 0) || playableSec >= metadataSec * 0.9) return null;
+  const playMin = Math.max(1, Math.round(playableSec / 60));
+  const metaMin = Math.max(1, Math.round(metadataSec / 60));
+  return `The source file ends at ${playMin} minutes. Polisharr's inspection says this title is ${metaMin} minutes. Polisharr did not offer this short copy for review.`;
+}
+
+export function isTruncatedSourceError(message: string): boolean {
+  return message.startsWith("The source file ends at ");
+}
+
+function probeStreams(probe: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(probe.streams) ? probe.streams.filter(isRecord) : [];
+}
+
+function taggedDurationSec(streams: Record<string, unknown>[]): number {
+  const tagged = streams.filter(isTimedMedia).map(streamDurationTag).filter((sec) => sec > 0);
+  return tagged.length > 0 ? Math.max(...tagged) : 0;
+}
+
+function taggedMediaBytes(streams: Record<string, unknown>[]): number {
+  return streams.filter(isTimedMedia).reduce((sum, stream) => sum + intOr(tagValue(stream, "NUMBER_OF_BYTES"), 0), 0);
+}
+
+function isTimedMedia(stream: Record<string, unknown>): boolean {
+  return stream.codec_type === "video" || stream.codec_type === "audio";
+}
+
+function durationMatchesStreamBitrate(format: Record<string, unknown>, streams: Record<string, unknown>[]): boolean {
+  const formatRate = numberOr(format.bit_rate, 0);
+  if (formatRate <= 0) return false;
+  return streams.some((stream) => {
+    const rate = numberOr(stream.bit_rate, 0);
+    return rate > 0 && Math.abs(formatRate - rate) / rate < 0.05;
+  });
+}
+
+function streamDurationTag(stream: Record<string, unknown>): number {
+  return clockDurationSec(tagValue(stream, "DURATION"));
+}
+
+function tagValue(stream: Record<string, unknown>, key: string): unknown {
+  const tags = asRecord(stream.tags);
+  if (tags[key] != null) return tags[key];
+  const lower = key.toLowerCase();
+  if (tags[lower] != null) return tags[lower];
+  // mkvmerge writes the statistics tag as DURATION-eng, with the language after the name.
+  const prefixed = Object.entries(tags).find(([name]) => name.toLowerCase().startsWith(`${lower}-`));
+  return prefixed?.[1];
+}
+
+function clockDurationSec(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value !== "string") return 0;
+  const match = /^(\d+):(\d+):(\d+(?:\.\d+)?)$/.exec(value.trim());
+  if (!match) return numberOr(value, 0);
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

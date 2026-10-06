@@ -922,3 +922,63 @@ describe("remote worker complete", () => {
   });
 });
 
+describe("truncated source file error", () => {
+  it("refuses another queue and keeps the short-copy error after the worker reports it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-truncated-job-"));
+    const store = new Store(join(dir, "polisharr.db"));
+    const now = 90_000;
+    const hardware = { backend: "cuda" as const, cuda: true, vaapi: false, av1: false, reason: null };
+    store.upsertNode({
+      id: "4070", name: "4070", role: "worker", lastSeen: now, hardware, concurrency: 1, enabled: true, version: "1", currentJobId: null,
+    });
+    store.saveSettings({ ...store.getSettings(), reviewPath: dir, offPeakEnabled: false, defaultEncodeNodeId: "4070" });
+    const instanceId = store.upsertInstance({ kind: "radarr", name: "Radarr", url: "http://radarr", secret: null, enabled: true });
+    const itemId = `${instanceId}:movie:396`;
+    const path = join(dir, "crystal-skull.mkv");
+    store.upsertItem({
+      id: itemId, instanceId, arrId: 396, arrSeriesId: null, arrEpisodeFileId: null, type: "movie",
+      title: "Indiana Jones and the Kingdom of the Crystal Skull", showTitle: null, season: null, episode: null, episodeTitle: null,
+      path, sizeBytes: 8, quality: "HD", resolution: "1080", profile: "HD", tags: [], posterRemoteUrl: null, sizeExempt: false,
+    });
+    const jobs = new JobService({
+      store,
+      optimizer: async () => {
+        throw new Error("must not encode");
+      },
+      clock: () => now,
+      hardware: async () => hardware,
+      tools: { ffmpeg: "ffmpeg", ffprobe: "ffprobe", mkvmerge: "mkvmerge" },
+      decrypt: () => "",
+      fetch: (async () => new Response("{}")) as typeof fetch,
+      reinspectChangedItem: async () => ({ ok: true }),
+    });
+    const suggestion = {
+      id: "s1",
+      itemId,
+      actions: ["add_stereo" as const],
+      reasons: ["Add stereo."],
+      warning: null,
+      category: "movie1080p" as const,
+      estimatedSavingsBytes: null,
+      now: { codec: "hevc", quality: "HD", sizeBytes: 8, sizePerHourGb: 1 },
+      after: { codec: "hevc", quality: null, sizeBytes: null, sizePerHourGb: null },
+      dismissed: false,
+      keepAudio: [1],
+      stripAudio: [],
+      keepSubs: [],
+      stripSubs: [],
+    };
+    const queued = jobs.enqueue(itemId, suggestion, { writeMode: "sidecar", assignedNodeId: "4070" });
+    expect("id" in queued).toBe(true);
+    if (!("id" in queued)) return;
+    const claimed = store.claimQueuedJobs("4070", 1, now, 60_000);
+    expect(claimed).toHaveLength(1);
+    const message = "The source file ends at 48 minutes. Polisharr's inspection says this title is 126 minutes. Polisharr did not offer this short copy for review.";
+    expect(jobs.failRemote(queued.id, claimed[0]!.leaseToken, message)).toEqual({ ok: true });
+    expect(store.getJob(queued.id)?.error).toBe(message);
+    expect(store.fileErrorReason(path)).toBe(message);
+    expect(jobs.enqueue(itemId, suggestion, { writeMode: "sidecar" })).toEqual({ error: message, status: 409 });
+    store.close();
+  });
+});
+

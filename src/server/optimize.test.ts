@@ -58,6 +58,73 @@ const suggestion: Suggestion = {
   stripSubs: [],
 };
 
+describe("truncated source", () => {
+  it("stops the stereo mux when ffmpeg reaches the end of the source early", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "polisharr-truncated-source-"));
+    try {
+      const sourcePath = join(dir, "crystal-skull.mkv");
+      const reviewDir = join(dir, "review");
+      const ffmpeg = join(dir, "ffmpeg.cjs");
+      const ffprobe = join(dir, "ffprobe.cjs");
+      const mkvmerge = join(dir, "mkvmerge.cjs");
+      await writeFile(sourcePath, "source");
+      await writeFile(ffmpeg, [
+        "#!/usr/bin/env node",
+        "process.stderr.write('[in#0/matroska,webm] File ended prematurely\\n');",
+        "process.stdout.write('out_time_us=2898688333\\nprogress=end\\n');",
+        "process.exit(0);",
+      ].join("\n"));
+      await writeFile(ffprobe, "#!/usr/bin/env node\nprocess.exit(1);\n");
+      await writeFile(mkvmerge, "#!/usr/bin/env node\nprocess.stderr.write('mux should not run\\n'); process.exit(2);\n");
+      await Promise.all([chmod(ffmpeg, 0o755), chmod(ffprobe, 0o755), chmod(mkvmerge, 0o755)]);
+      const optimizer = ffmpegOptimizer({ capacity: async () => 10 * 1024 ** 3 });
+      const task = optimizer({
+        sourcePath,
+        reviewDir,
+        plan: planFromSuggestion({
+          ...suggestion,
+          actions: ["tracks", "add_stereo"],
+          keepAudio: [1],
+          stripAudio: [],
+          keepSubs: [],
+          stripSubs: [],
+        }),
+        report: {
+          sourceSig: "crystal-skull.mkv|13",
+          sourceMethod: "ffprobe",
+          listingState: "complete",
+          durationSec: 2 * 3600 + 6 * 60 + 1.718,
+          sizeBytes: 13,
+          sizePerHourGb: 1,
+          videoCodec: "hevc",
+          width: 1920,
+          height: 800,
+          bitDepth: 8,
+          hdr: "none",
+          audio: [{ index: 1, language: "eng", channels: 6, codec: "dts", title: "", untagged: false, commentary: false }],
+          subtitles: [],
+          hasChapters: false,
+          hasAttachments: false,
+        },
+        target: "hevc",
+        backend: "none",
+        ffmpeg,
+        ffprobe,
+        mkvmerge,
+        conservative: false,
+        jobId: "job-skull",
+        nodeId: "4070",
+      });
+      await expect(task).rejects.toThrow(
+        "The source file ends at 48 minutes. Polisharr's inspection says this title is 126 minutes. Polisharr did not offer this short copy for review.",
+      );
+      expect(existsSync(join(reviewDir, "crystal-skull-job-skull.mkv"))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("optimizer work directory", () => {
   it("namespaces temp files per node and job so two GPUs do not share .work", () => {
     expect(optimizerWorkDir("/review", "worker-1", "job-9")).toBe(join("/review", ".work", "worker-1", "job-9"));

@@ -1,7 +1,7 @@
 import { access, stat } from "node:fs/promises";
 import type { Store } from "./store.ts";
 import type { InspectionReport, LibraryItem } from "./types.ts";
-import { isIsoPath, isMediaFilePath, isoInspectionLooksStale, isoListingLooksUsable, parseFfmpegListing, parseFfprobe, unlistedIsoReport } from "./inspect.ts";
+import { isIsoPath, isMediaFilePath, isoInspectionLooksStale, isoListingLooksUsable, parseFfmpegListing, parseFfprobe, referenceDurationSec, shouldConfirmMediaEnd, truncatedSourceReason, unlistedIsoReport } from "./inspect.ts";
 import { isoInputAttempts, toolLocaleEnv } from "./optimize.ts";
 
 export type InspectionRunnerOptions = {
@@ -10,6 +10,7 @@ export type InspectionRunnerOptions = {
   ffprobe: string;
   readable?: (path: string) => Promise<boolean>;
   probe?: (path: string, size: number) => Promise<Record<string, unknown>>;
+  probeEnd?: (path: string) => Promise<number | null>;
   listIso?: (path: string, size: number) => Promise<string>;
   recomputeSuggestion: (itemId: string) => unknown;
 };
@@ -128,23 +129,30 @@ export function createInspectionRunner(opts: InspectionRunnerOptions) {
       return { ok: false, warning };
     }
     try {
-      const report = isIsoPath(item.path)
-        ? parseFfmpegListing(
+      const probed = isIsoPath(item.path) ? null : (
+        opts.probe
+          ? await opts.probe(item.path, item.sizeBytes)
+          : await defaultProbe(opts.ffprobe, item.path)
+      );
+      const report = probed
+        ? parseFfprobe(item.path, item.sizeBytes, probed)
+        : parseFfmpegListing(
             item.path,
             item.sizeBytes,
             opts.listIso
               ? await opts.listIso(item.path, item.sizeBytes)
               : await defaultIsoListing(opts.ffmpeg, item.path),
-          )
-        : parseFfprobe(
-            item.path,
-            item.sizeBytes,
-            opts.probe
-              ? await opts.probe(item.path, item.sizeBytes)
-              : await defaultProbe(opts.ffprobe, item.path),
           );
       applyReport(item, report);
       applyReportToPathSiblings(item, report);
+      const reason = probed ? await truncatedCopyReason(opts, item.path, item.sizeBytes, probed) : null;
+      if (reason) {
+        opts.store.setFileError(item.path, item.id, reason);
+        opts.store.saveSuggestion(item.id, null);
+        for (const sibling of opts.store.itemsForPath(item.path, item.instanceId)) {
+          if (sibling.id !== item.id) opts.store.saveSuggestion(sibling.id, null);
+        }
+      }
       return { ok: true, report };
     } catch (error) {
       if (isIsoPath(item.path)) {
@@ -220,6 +228,42 @@ async function pathAccess(path: string): Promise<"ok" | "missing" | "denied"> {
     const code = (error as { code?: string }).code;
     if (code === "ENOENT") return "missing";
     return "denied";
+  }
+}
+
+async function truncatedCopyReason(
+  opts: InspectionRunnerOptions,
+  path: string,
+  sizeBytes: number,
+  probe: Record<string, unknown>,
+): Promise<string | null> {
+  if (!shouldConfirmMediaEnd(probe, sizeBytes)) return null;
+  const playableSec = opts.probeEnd
+    ? await opts.probeEnd(path)
+    : await defaultPlayableEnd(opts.ffprobe, path);
+  if (playableSec == null) return null;
+  return truncatedSourceReason(referenceDurationSec(probe), playableSec);
+}
+
+async function defaultPlayableEnd(ffprobe: string, path: string): Promise<number | null> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  try {
+    const { stdout } = await run(ffprobe, [
+      "-v", "error",
+      "-read_intervals", "999999%+#1",
+      "-select_streams", "v:0",
+      "-show_entries", "packet=pts_time",
+      "-of", "csv=p=0",
+      path,
+    ], { timeout: 20_000, maxBuffer: 64 * 1024, env: toolLocaleEnv() });
+    const line = String(stdout).trim().split("\n").filter(Boolean).at(-1) ?? "";
+    const pts = Number(line.split(",")[0]);
+    return Number.isFinite(pts) && pts > 0 ? pts : null;
+  } catch {
+    // A seek that times out is not proof the file is whole. The encode still refuses a short source.
+    return null;
   }
 }
 

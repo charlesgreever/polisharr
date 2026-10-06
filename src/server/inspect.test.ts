@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   featureDurationSec,
+  mediaDurationSec,
+  referenceDurationSec,
+  shouldConfirmMediaEnd,
+  truncatedSourceReason,
   isIsoPath,
   isMediaFilePath,
   isoInspectionLooksStale,
@@ -19,6 +23,52 @@ import {
 import { isoFailedFfmpeg, isoListedFfmpeg, mkv4kHdrFfprobe, mkvNormalFfprobe } from "./fixtures/index.ts";
 
 describe("parseFfprobe", () => {
+  it("uses the statistics duration when ffprobe estimated the container duration from one stream bitrate", () => {
+    const probe = {
+      format: { duration: "16984.729", bit_rate: "1536001", size: "3261071360" },
+      streams: [
+        {
+          index: 0,
+          codec_type: "video",
+          codec_name: "hevc",
+          width: 1920,
+          height: 800,
+          tags: { "DURATION-eng": "02:06:01.679000000", "NUMBER_OF_BYTES-eng": "10863736220" },
+        },
+        {
+          index: 1,
+          codec_type: "audio",
+          codec_name: "dts",
+          channels: 6,
+          bit_rate: "1536000",
+          tags: { language: "eng", "DURATION-eng": "02:06:01.718000000", "NUMBER_OF_BYTES-eng": "1426329000" },
+        },
+      ],
+    };
+    const report = parseFfprobe("/mnt/nas/Crystal Skull.mkv", 3_261_071_360, probe);
+    expect(report.durationSec).toBeCloseTo(2 * 3600 + 6 * 60 + 1.718, 2);
+    expect(mediaDurationSec(probe)).toBeCloseTo(report.durationSec, 2);
+    expect(referenceDurationSec(probe)).toBeCloseTo(report.durationSec, 2);
+    expect(shouldConfirmMediaEnd(probe, 3_261_071_360)).toBe(true);
+    expect(truncatedSourceReason(report.durationSec, 2896.894)).toBe(
+      "The source file ends at 48 minutes. Polisharr's inspection says this title is 126 minutes. Polisharr did not offer this short copy for review.",
+    );
+  });
+
+  it("keeps a container duration that already matches the statistics tag", () => {
+    const probe = {
+      format: { duration: "7351.392", bit_rate: "1902198" },
+      streams: [
+        { index: 0, codec_type: "video", codec_name: "hevc", width: 1920, height: 1080, tags: { DURATION: "02:02:31.386000000", NUMBER_OF_BYTES: "30781087989" } },
+        { index: 1, codec_type: "audio", codec_name: "dts", channels: 6, bit_rate: "4093466", tags: { DURATION: "02:02:31.392000000", NUMBER_OF_BYTES: "3761584712" } },
+      ],
+    };
+    expect(parseFfprobe("/mnt/nas/Inception.mkv", 1_747_976_192, probe).durationSec).toBeCloseTo(7351.392, 2);
+    expect(shouldConfirmMediaEnd(probe, 1_747_976_192)).toBe(true);
+    expect(truncatedSourceReason(7351.392, 824.824)).toMatch(/ends at 14 minutes/);
+    expect(truncatedSourceReason(7351.392, 7200)).toBeNull();
+  });
+
   it("records the playable video stream instead of cover art", () => {
     const report = parseFfprobe("movie.mkv", 1, {
       format: { duration: "10" },

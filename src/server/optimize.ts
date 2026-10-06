@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readdir, rm, rmdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe } from "./inspect.ts";
+import { isDolbyVisionProfile5, isIsoPath, MAX_FEATURE_SEC, parseFfprobe, truncatedSourceReason } from "./inspect.ts";
 import type { ExecutablePlan, InspectionReport, Suggestion, WriteMode } from "./types.ts";
 import { keepWritesLanguage, planHasVideoTranscode } from "./types.ts";
 import {
@@ -340,7 +340,8 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
         });
         current = remuxed;
       }
-      const extras = await createAudioExtras(req, plan, workDir, current, temps);
+      const sourceRead: SourceRead = { sec: 0, ended: false };
+      const extras = await createAudioExtras(req, plan, workDir, current, temps, sourceRead);
       const subtitleExtras = needsMux(plan) ? await createSubtitleExtras(req, plan, workDir, current, temps) : [];
       if (needsMux(plan) || extras.length || subtitleExtras.length) {
         emit("muxing", 0.3);
@@ -387,13 +388,18 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
           );
           const durationSec = Math.max(durationReport.durationSec, 1);
           await run(req.ffmpeg, encodeArgs(current, encoded, { ...req, plan: encodePlan, report: durationReport }), {
-            onLog: req.onLog,
+            onLog: (text) => {
+              noteSourceRead(sourceRead, text);
+              req.onLog?.(text);
+            },
             onChunk: (text) => {
+              noteSourceRead(sourceRead, text);
               const sec = parseFfmpegProgress(text);
               if (sec != null) emit("transcoding", scaleProgress(0.45, 0.92, sec / durationSec));
             },
             isCancelled: req.isCancelled,
           });
+          throwIfSourceEndedEarly(sourceRead, req.report.durationSec);
           current = encoded;
         }
       }
@@ -407,6 +413,7 @@ export function ffmpegOptimizer(options: { capacity?: CapacityProbe } = {}): Opt
         req.onLog?.(placeMethodSentence(placed.method));
       }
       const output = await probeOutput(req.ffprobe, sidecarPath);
+      throwIfSourceEndedEarly(sourceRead, req.report.durationSec);
       if (output.durationSec <= 0 || (req.report.durationSec > 0 && output.durationSec < req.report.durationSec * 0.9)) {
         const srcMin = Math.round(req.report.durationSec / 60);
         const outMin = Math.round(output.durationSec / 60);
@@ -450,12 +457,27 @@ function assertTrackIntegrity(plan: ExecutablePlan, output: InspectionReport): v
   }
 }
 
+type SourceRead = { sec: number; ended: boolean };
+
+function noteSourceRead(read: SourceRead, text: string): void {
+  if (/File ended prematurely/i.test(text)) read.ended = true;
+  const sec = parseFfmpegProgress(text);
+  if (sec != null) read.sec = Math.max(read.sec, sec);
+}
+
+function throwIfSourceEndedEarly(read: SourceRead, metadataSec: number): void {
+  if (!read.ended) return;
+  const reason = truncatedSourceReason(metadataSec, read.sec);
+  if (reason) throw new Error(reason);
+}
+
 async function createAudioExtras(
   req: OptimizeRequest,
   plan: ExecutablePlan,
   workDir: string,
   source: string,
   temps: string[],
+  sourceRead: SourceRead,
 ): Promise<AudioExtra[]> {
   const extras: AudioExtra[] = [];
   for (const op of plan.audio) {
@@ -470,13 +492,18 @@ async function createAudioExtras(
     const language = sourceTrack?.language || "und";
     const durationSec = Math.max(req.report.durationSec, 1);
     await run(req.ffmpeg, audioAacArgs(source, dest, op.index, channels, req.conservative ? "128k" : "160k", language), {
-      onLog: req.onLog,
+      onLog: (text) => {
+        noteSourceRead(sourceRead, text);
+        req.onLog?.(text);
+      },
       onChunk: (text) => {
+        noteSourceRead(sourceRead, text);
         const sec = parseFfmpegProgress(text);
         if (sec != null) req.onPhase?.("creating_stereo", scaleProgress(0.12, 0.28, sec / durationSec));
       },
       isCancelled: req.isCancelled,
     });
+    throwIfSourceEndedEarly(sourceRead, req.report.durationSec);
     extras.push({ path: dest, language });
   }
   return extras;

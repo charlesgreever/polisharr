@@ -6,6 +6,76 @@ import { createInspectionRunner } from "./inspection-runner.ts";
 import { Store } from "./store.ts";
 
 describe("inspection runner", () => {
+  it("records a file error when the bytes end before the inspected duration", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-truncated-"));
+    const store = new Store(join(dir, "polisharr.db"));
+    const instanceId = store.upsertInstance({
+      kind: "radarr",
+      name: "Radarr",
+      url: "http://radarr",
+      secret: "packed",
+      enabled: true,
+    });
+    const itemId = `${instanceId}:movie:396`;
+    const path = join(dir, "crystal-skull.mkv");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, "short");
+    store.upsertItem({
+      id: itemId,
+      instanceId,
+      arrId: 396,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Indiana Jones and the Kingdom of the Crystal Skull",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path,
+      sizeBytes: 3_261_071_360,
+      quality: "Remux-1080p",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    const ends: string[] = [];
+    const runner = createInspectionRunner({
+      store,
+      ffmpeg: "ffmpeg",
+      ffprobe: "ffprobe",
+      readable: async () => true,
+      probe: async () => ({
+        format: { duration: "16984.729", bit_rate: "1536001" },
+        streams: [
+          { index: 0, codec_type: "video", codec_name: "hevc", width: 1920, height: 800, tags: { "DURATION-eng": "02:06:01.679000000", "NUMBER_OF_BYTES-eng": "10863736220" } },
+          { index: 1, codec_type: "audio", codec_name: "dts", channels: 6, bit_rate: "1536000", tags: { "DURATION-eng": "02:06:01.718000000", "NUMBER_OF_BYTES-eng": "1426329000" } },
+        ],
+      }),
+      probeEnd: async (file) => {
+        ends.push(file);
+        return 2896.894;
+      },
+      recomputeSuggestion: () => undefined,
+    });
+
+    const result = await runner.inspectOne(itemId);
+
+    expect(result.ok).toBe(true);
+    expect(result.report?.durationSec).toBeCloseTo(2 * 3600 + 6 * 60 + 1.718, 2);
+    expect(ends).toEqual([path]);
+    expect(store.listErrors()).toEqual([
+      expect.objectContaining({
+        itemId,
+        path,
+        reason: "The source file ends at 48 minutes. Polisharr's inspection says this title is 126 minutes. Polisharr did not offer this short copy for review.",
+      }),
+    ]);
+    store.close();
+  });
+
   it("reinspects the promoted path before reporting success", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-reinspect-"));
     const store = new Store(join(dir, "polisharr.db"));

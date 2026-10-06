@@ -994,6 +994,14 @@ export class Store {
     return rows.map((row) => row.id);
   }
 
+  fileErrorReason(path: string): string | null {
+    if (!path) return null;
+    const row = this.db.prepare(
+      `SELECT reason FROM file_errors e WHERE e.path = ? AND ${currentFileErrorSql("e")}`,
+    ).get(path) as { reason: string } | undefined;
+    return row ? String(row.reason) : null;
+  }
+
   setFileError(path: string, itemId: string | null, reason: string): void {
     this.db.prepare("INSERT OR REPLACE INTO file_errors (path, item_id, reason) VALUES (?, ?, ?)").run(path, itemId, reason);
   }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { access, stat } from "node:fs/promises";
 import type { Store } from "./store.ts";
 import type { HardwareInfo, InspectionReport, Job, JobPhase, ReviewAudioTrack, ReviewItem, Settings, Suggestion } from "./types.ts";
+import { isTruncatedSourceError } from "./inspect.ts";
 import { displayTitle } from "./titles.ts";
 import type { Optimizer } from "./optimize.ts";
 import { CancelledError, cleanReviewLeftovers, isExecutablePlan, planFromSuggestion, removeReviewArtifact, resolvePlan } from "./optimize.ts";
@@ -156,6 +157,8 @@ export class JobService {
   ): { id: string } | { error: string; status: number } {
     const item = this.opts.store.getItem(itemId);
     if (!item) return { error: "That title is not in the library.", status: 404 };
+    const blocked = this.fileErrorBlock(item.path);
+    if (blocked) return blocked;
     const busy = this.enqueueLock(item);
     if (busy) return busy;
     if (isArrSearchOnly(suggestion.actions)) {
@@ -200,6 +203,8 @@ export class JobService {
   ): { id: string } | { error: string; status: number } {
     const item = this.opts.store.getItem(itemId);
     if (!item) return { error: "That title is not in the library.", status: 404 };
+    const blocked = this.fileErrorBlock(item.path);
+    if (blocked) return blocked;
     const busy = this.enqueueLock(item);
     if (busy) return busy;
     this.dismissOpenSuggestionsForItem(item);
@@ -326,6 +331,20 @@ export class JobService {
     if (!node) return undefined;
     if (nodeCanEncode(node, encodeNeedFromPlan(plan))) return undefined;
     return { error: "That encode node cannot run this plan.", status: 400 };
+  }
+
+  private fileErrorBlock(path: string): { error: string; status: number } | undefined {
+    const reason = this.opts.store.fileErrorReason(path);
+    if (!reason) return undefined;
+    return { error: reason, status: 409 };
+  }
+
+  private noteTruncatedSource(itemId: string, message: string): void {
+    if (!isTruncatedSourceError(message)) return;
+    const item = this.opts.store.getItem(itemId);
+    if (!item?.path) return;
+    this.opts.store.setFileError(item.path, item.id, message);
+    this.opts.store.saveSuggestion(itemId, null);
   }
 
   private enqueueLock(item: NonNullable<ReturnType<Store["getItem"]>>): { error: string; status: number } | undefined {
@@ -496,6 +515,7 @@ export class JobService {
       }
       const message = error instanceof Error ? error.message : "The job failed.";
       this.opts.store.updateJob(id, { status: "failed", error: message, nodeId: job.nodeId });
+      this.noteTruncatedSource(item.id, message);
       this.opts.store.releaseJobLease(id);
       this.opts.store.addHistory(item.id, "failed", 0, this.now());
       await this.sweepReviewLeftovers();
@@ -509,6 +529,7 @@ export class JobService {
     if (job.status === "cancelled" || this.cancelled.has(id)) return { cancelled: true };
     if (!this.opts.store.leaseMatches(id, leaseToken)) return { error: "That job lease is not valid.", status: 409 };
     this.opts.store.updateJob(id, { status: "failed", error, nodeId: job.nodeId });
+    this.noteTruncatedSource(job.itemId, error);
     this.opts.store.addHistory(job.itemId, "failed", 0, this.now());
     void this.sweepReviewLeftovers();
     return { ok: true };
@@ -674,6 +695,7 @@ export class JobService {
       } else {
         const message = error instanceof Error ? error.message : "The job failed.";
         this.opts.store.updateJob(id, { status: "failed", error: message });
+        this.noteTruncatedSource(item.id, message);
         this.opts.store.addHistory(item.id, "failed", 0, this.now());
       }
     } finally {

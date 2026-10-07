@@ -54,7 +54,12 @@ export const Icons = {
     <Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 1 1 3.3 2.4c-.8.4-1.3 1-1.3 1.8V14M12 17h.01" /></Svg>
   ),
   stereo: (p?: SVGProps<SVGSVGElement>) => (
-    <Svg {...p}><rect x="3" y="8" width="6" height="8" rx="1" /><rect x="15" y="8" width="6" height="8" rx="1" /></Svg>
+    <Svg {...p}>
+      <path d="M3 8.5h3.2L9 11v2l-2.8 2.5H3a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z" />
+      <circle cx="4.4" cy="12" r="1" />
+      <path d="M21 8.5h-3.2L15 11v2l2.8 2.5H21a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1z" />
+      <circle cx="19.6" cy="12" r="1" />
+    </Svg>
   ),
   exempt: (p?: SVGProps<SVGSVGElement>) => (
     <Svg {...p}><path d="M12 3 4 7v5c0 5 3.5 8 8 9 4.5-1 8-4 8-9V7z" /></Svg>

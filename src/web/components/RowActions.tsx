@@ -1,97 +1,91 @@
-import { Link } from "react-router-dom";
 import { useState } from "react";
 import { api, type LibraryRow } from "../api";
 import { arrAppName, replaceSearchConfirm, untrackConfirm } from "../library-replace";
-import { EncodeTargetSelect } from "./EncodeTargetSelect";
 import { Icons } from "./icons";
+import { ActionNote } from "./ui";
 
-const iconBtn =
-  "inline-flex h-11 w-11 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 transition-colors hover:border-brand-300 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-800 dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/5";
+const gridBtn =
+  "inline-flex h-11 items-center justify-center gap-1 rounded-lg px-2.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-40 lg:h-8";
 const queueBtn =
-  "inline-flex h-11 items-center justify-center gap-1 rounded-lg border border-brand-500 bg-brand-500 px-2.5 text-xs font-semibold text-white transition-colors hover:border-brand-600 hover:bg-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-40";
+  `${gridBtn} border border-brand-500 bg-brand-500 text-white hover:border-brand-600 hover:bg-brand-600`;
 const textBtn =
-  "inline-flex h-11 items-center justify-center rounded-lg border border-gray-200 bg-white px-2.5 text-xs font-semibold text-gray-700 transition-colors hover:border-brand-300 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 dark:border-gray-800 dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/5";
+  `${gridBtn} border border-gray-200 bg-white text-gray-700 hover:border-brand-300 hover:bg-gray-50 dark:border-gray-800 dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/5`;
+const dangerBtn =
+  `${gridBtn} border border-error-300 bg-error-50 text-error-600 hover:bg-error-100 dark:border-error-500/35 dark:bg-error-500/10 dark:text-error-500`;
+
+type Note = { tone: "ok" | "bad"; text: string };
 
 export function RowActions({
   item,
   onDone,
   onHealth,
-  houseVideoTarget = "hevc",
-  av1Available = false,
 }: {
   item: LibraryRow;
   onDone: () => void;
   onHealth?: (health: { healthyCount: number; suggestionCount: number }) => void;
-  houseVideoTarget?: "hevc" | "av1";
-  av1Available?: boolean;
 }) {
-  const [msg, setMsg] = useState("");
+  const [note, setNote] = useState<Note | null>(null);
   const locked = Boolean(item.error) || !item.inspected;
-  const href = item.href || (item.type === "movie" ? `/movies/${item.id}` : `/series/episodes/${item.id}`);
   const arrName = arrAppName(item.type);
 
   async function run(label: string, fn: () => Promise<unknown>) {
     try {
       await fn();
-      setMsg(label);
+      setNote({ tone: "ok", text: label });
       onDone();
     } catch (error) {
-      setMsg(error instanceof Error ? error.message : "The action failed.");
+      setNote({ tone: "bad", text: error instanceof Error ? error.message : "The action failed." });
     }
   }
 
   return (
-    <div className="flex flex-col items-start gap-1">
-      <div className="flex flex-nowrap items-center gap-1" role="group" aria-label="Title actions">
-        <Link className={iconBtn} to={href} title="Open" aria-label="Open">
-          {Icons.open({ width: 14, height: 14 })}
-        </Link>
+    <div className="flex w-[22rem] max-w-full flex-col items-start gap-2">
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Optimize">
         <button
           className={queueBtn}
           type="button"
           disabled={locked || !item.suggestion}
-          title="Queue"
           aria-label="Queue"
           onClick={() => void run("Added to queue.", () => api.queue({ itemId: item.id }))}
         >
-          {Icons.queue({ width: 14, height: 14 })}
+          <span aria-hidden="true">{Icons.queue({ width: 16, height: 16 })}</span>
           Queue
-        </button>
-        <button
-          className={iconBtn}
-          type="button"
-          disabled={locked}
-          title="Force suggestion"
-          aria-label="Force suggestion"
-          onClick={() => void run("Added this title to Suggestions.", () => api.force(item.id))}
-        >
-          {Icons.suggestions({ width: 14, height: 14 })}
-        </button>
-        <button
-          className={iconBtn}
-          type="button"
-          disabled={locked}
-          title="Add stereo"
-          aria-label="Add stereo"
-          onClick={() => void run("Added stereo to the plan.", () => api.stereo(item.id))}
-        >
-          {Icons.stereo({ width: 14, height: 14 })}
-        </button>
-        <button
-          className={`${iconBtn} ${item.sizeExempt ? "border-brand-200 bg-brand-50 text-brand-500 dark:border-brand-500/30 dark:bg-brand-500/10 dark:text-brand-400" : ""}`}
-          type="button"
-          title={item.sizeExempt ? "Clear size exemption" : "Exempt size"}
-          aria-label={item.sizeExempt ? "Clear exemption" : "Exempt"}
-          aria-pressed={item.sizeExempt}
-          onClick={() => void run(item.sizeExempt ? "Cleared exemption." : "Size cap exemption saved.", () => api.exempt(item.id, !item.sizeExempt))}
-        >
-          {Icons.exempt({ width: 14, height: 14 })}
-          {item.sizeExempt ? "Clear exemption" : "Exempt"}
         </button>
         <button
           className={textBtn}
           type="button"
-          title={`Ask ${arrName} to delete this file and search for another copy`}
+          disabled={locked}
+          aria-label="Force suggestion"
+          onClick={() => void run("Added this title to Suggestions.", () => api.force(item.id))}
+        >
+          <span aria-hidden="true">{Icons.suggestions({ width: 16, height: 16 })}</span>
+          Force
+        </button>
+        <button
+          className={textBtn}
+          type="button"
+          disabled={locked}
+          aria-label="Add stereo"
+          onClick={() => void run("Added stereo to the plan.", () => api.stereo(item.id))}
+        >
+          <span aria-hidden="true">{Icons.stereo({ width: 16, height: 16 })}</span>
+          Stereo
+        </button>
+        <button
+          className={`${textBtn} min-w-[10.5rem] ${item.sizeExempt ? "border-brand-200 bg-brand-50 text-brand-500 dark:border-brand-500/30 dark:bg-brand-500/10 dark:text-brand-400" : ""}`}
+          type="button"
+          aria-label={item.sizeExempt ? "Clear exemption" : "Exempt"}
+          aria-pressed={item.sizeExempt}
+          onClick={() => void run(item.sizeExempt ? "Cleared exemption." : "Size cap exemption saved.", () => api.exempt(item.id, !item.sizeExempt))}
+        >
+          <span aria-hidden="true">{Icons.exempt({ width: 16, height: 16 })}</span>
+          {item.sizeExempt ? "Clear exemption" : "Exempt"}
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Library">
+        <button
+          className={textBtn}
+          type="button"
           aria-label={`Replace this file in ${arrName}`}
           onClick={() => {
             if (!window.confirm(replaceSearchConfirm(arrName, item.sharedFileLabel))) return;
@@ -106,9 +100,8 @@ export function RowActions({
           Replace this file
         </button>
         <button
-          className={`${textBtn} text-error-600 dark:text-error-500`}
+          className={dangerBtn}
           type="button"
-          title={`${arrName} will delete the files and stop keeping this ${item.type === "episode" ? "series" : "movie"}`}
           aria-label={`Remove this ${item.type === "episode" ? "series" : "movie"} from ${arrName}`}
           onClick={() => {
             const kind = item.type === "episode" ? "series" : "movie";
@@ -125,21 +118,7 @@ export function RowActions({
           {`Remove from ${arrName}`}
         </button>
       </div>
-      {item.type === "movie" && (
-        <EncodeTargetSelect
-          value={item.videoTarget ?? null}
-          houseTarget={houseVideoTarget}
-          av1Available={av1Available}
-          onChange={(videoTarget) => {
-            void api.setItemVideoTarget(item.id, videoTarget).then((result) => {
-              setMsg("Encode target saved.");
-              onHealth?.(result);
-              onDone();
-            }).catch((error: Error) => setMsg(error.message));
-          }}
-        />
-      )}
-      {msg && <p className="text-xs text-muted">{msg}</p>}
+      {note ? <ActionNote tone={note.tone}>{note.text}</ActionNote> : null}
     </div>
   );
 }

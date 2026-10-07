@@ -7,6 +7,7 @@ export function EncodeTargetSelect({
   av1Available,
   disabled,
   tip,
+  showLabel = true,
   onChange,
 }: {
   value: "hevc" | "av1" | null;
@@ -14,15 +15,18 @@ export function EncodeTargetSelect({
   av1Available: boolean;
   disabled?: boolean;
   tip?: string;
+  showLabel?: boolean;
   onChange: (value: "hevc" | "av1" | null) => void;
 }) {
   const houseLabel = houseTarget === "av1" && av1Available ? "AV1" : "HEVC";
   return (
     <label className="block min-w-[10rem] text-sm">
-      <span className="mb-1 flex items-center gap-1 font-medium text-muted">
-        Encode target
-        {tip ? <Tip label="Encode target">{tip}</Tip> : null}
-      </span>
+      {showLabel ? (
+        <span className="mb-1 flex items-center gap-1 font-medium text-muted">
+          Encode target
+          {tip ? <Tip label="Encode target">{tip}</Tip> : null}
+        </span>
+      ) : null}
       <select
         className={FIELD_CONTROL}
         value={value ?? ""}

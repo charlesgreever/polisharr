@@ -171,7 +171,9 @@ export function MoviesPage() {
                 <LibraryMediaHeaders
                   onQuality={() => setSort("quality")}
                   onSize={() => setSort("size")}
-                  actionsTip="Encode target chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Queue uses the automatic suggestion. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo."
+                  encodeTarget
+                  encodeTargetTip="Chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Queue uses the automatic suggestion."
+                  actionsTip="Queue uses the automatic suggestion. Force adds the title to Suggestions. Stereo adds a stereo track to the plan. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo. Replace and Remove change the movie in Radarr."
                 />
               </tr>
             </thead>
@@ -193,6 +195,7 @@ export function MoviesPage() {
                   </td>
                   <LibraryMediaCells
                     item={item}
+                    encodeTarget
                     onDone={() => void refreshLoaded()}
                     onHealth={(health) => {
                       setHealthyCount(health.healthyCount);

@@ -26,4 +26,17 @@ describe("encode target select", () => {
     expect(html).toContain("AV1");
     expect(html).toContain("value=\"av1\"");
   });
+
+  it("keeps the accessible name when the visible label is hidden", () => {
+    const html = renderToStaticMarkup(createElement(EncodeTargetSelect, {
+      value: null,
+      houseTarget: "hevc",
+      av1Available: false,
+      showLabel: false,
+      onChange: () => undefined,
+    }));
+    expect(html).toContain("aria-label=\"Encode target\"");
+    expect(html).not.toContain(">Encode target<");
+    expect(html).toContain("House default (HEVC)");
+  });
 });

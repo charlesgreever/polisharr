@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type AlertSettings } from "../api";
 import { FIELD_CONTROL } from "../settings-copy";
-import { Tip } from "./ui";
+import { ActionNote, Tip } from "./ui";
 
 const EMPTY_ALERTS: AlertSettings = {
   reviewReady: true,
@@ -41,7 +41,7 @@ export function NotificationSettings({
   onSaved,
 }: {
   alerts?: AlertSettings;
-  onSaved: (message: string) => void;
+  onSaved: () => void;
 }) {
   const [prefs, setPrefs] = useState(alerts);
   const [webhookUrl, setWebhookUrl] = useState("");
@@ -49,6 +49,7 @@ export function NotificationSettings({
   const [smtpPassword, setSmtpPassword] = useState("");
   const [discordUrl, setDiscordUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ tone: "ok" | "bad"; text: string } | null>(null);
 
   useEffect(() => {
     setPrefs(alerts);
@@ -63,7 +64,8 @@ export function NotificationSettings({
     try {
       await work();
     } catch (error) {
-      onSaved(error instanceof Error ? error.message : fallback);
+      setNote({ tone: "bad", text: error instanceof Error ? error.message : fallback });
+      onSaved();
     } finally {
       setBusy(false);
     }
@@ -99,28 +101,32 @@ export function NotificationSettings({
       setWebhookToken("");
       setSmtpPassword("");
       setDiscordUrl("");
-      onSaved("Notifications saved.");
+      setNote({ tone: "ok", text: "Notifications saved." });
+      onSaved();
     }, "Notifications could not be saved.");
   }
 
   async function sendTest() {
     await run(async () => {
       await api.testAlert();
-      onSaved("Test message sent.");
+      setNote({ tone: "ok", text: "Test message sent." });
+      onSaved();
     }, "The test message could not be sent.");
   }
 
   async function sendTestEmail() {
     await run(async () => {
       await api.testAlertEmail();
-      onSaved("Test email sent.");
+      setNote({ tone: "ok", text: "Test email sent." });
+      onSaved();
     }, "The test email could not be sent.");
   }
 
   async function sendTestDiscord() {
     await run(async () => {
       await api.testAlertDiscord();
-      onSaved("Test Discord message sent.");
+      setNote({ tone: "ok", text: "Test Discord message sent." });
+      onSaved();
     }, "The Discord test could not be sent.");
   }
 
@@ -130,7 +136,8 @@ export function NotificationSettings({
       setWebhookUrl("");
       setWebhookToken("");
       setDiscordUrl("");
-      onSaved("Saved webhooks cleared.");
+      setNote({ tone: "ok", text: "Saved webhooks cleared." });
+      onSaved();
     }, "The saved webhook could not be cleared.");
   }
 
@@ -305,6 +312,7 @@ export function NotificationSettings({
           <button className="btn" type="button" disabled={busy} onClick={() => void clearWebhook()}>Clear saved webhooks</button>
         )}
       </div>
+      {note ? <ActionNote tone={note.tone}>{note.text}</ActionNote> : null}
     </div>
   );
 }

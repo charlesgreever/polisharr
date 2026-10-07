@@ -51,6 +51,15 @@ const pillTone = {
   accent: "border-brand-100 bg-brand-50 text-brand-500 dark:border-brand-500/20 dark:bg-brand-500/10 dark:text-brand-400",
 } as const;
 
+export function ActionNote({ tone, children }: { tone: "ok" | "bad"; children: string }) {
+  if (!children) return null;
+  return (
+    <p role="status" aria-live="polite" className={tone === "bad" ? "form-error" : "ok text-sm"}>
+      {children}
+    </p>
+  );
+}
+
 export function Pill({
   children,
   tone = "neutral",

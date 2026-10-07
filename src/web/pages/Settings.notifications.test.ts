@@ -145,6 +145,13 @@ describe("notification settings", () => {
       },
     });
     expect(host.textContent).toContain("Notifications saved.");
+    expect(host.querySelector("#alerts")?.textContent).toContain("Notifications saved.");
+    expect(host.querySelector("#agent")?.textContent ?? "").not.toContain("Notifications saved.");
+    let afterAgent = host.querySelector("#agent")?.nextElementSibling ?? null;
+    while (afterAgent) {
+      expect(afterAgent.textContent ?? "").not.toContain("Notifications saved.");
+      afterAgent = afterAgent.nextElementSibling;
+    }
     expect(host.textContent).not.toContain("secret-token");
     expect(host.textContent).not.toContain("hooks.test");
   });

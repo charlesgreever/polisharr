@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { SettingsPayload } from "../api";
 import { FIELD_CONTROL } from "../settings-copy";
 import { Tip } from "./ui";
@@ -13,12 +14,14 @@ export function EncodeSettings({
   av1Available = true,
   onChange,
   onSave,
+  status = null,
 }: {
   data: EncodeSettingsData;
   hardwareLabel: string;
   av1Available?: boolean;
   onChange: (patch: Partial<EncodeSettingsData>) => void;
   onSave: () => void;
+  status?: ReactNode;
 }) {
   return (
     <div className="glass space-y-3 p-4">
@@ -74,6 +77,7 @@ export function EncodeSettings({
         </label>
       </div>
       <button className="btn" type="button" onClick={onSave}>Save encode settings</button>
+      {status}
     </div>
   );
 }

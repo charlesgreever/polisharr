@@ -1,3 +1,10 @@
+async function connectionTest(path: string): Promise<{ ok: boolean; message?: string }> {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" } });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
+  if (!res.ok) return { ok: false, message: data.message || data.error || `Request failed (${res.status})` };
+  return { ok: data.ok !== false, message: data.message };
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -30,7 +37,7 @@ export const api = {
     req("/api/auth/password", { method: "POST", body: JSON.stringify({ username, password }) }),
   hardware: () => req<Hardware>("/api/hardware"),
   saveInstance: (body: Record<string, unknown>) => req<{ ok: true; id: string }>("/api/integrations", { method: "POST", body: JSON.stringify(body) }),
-  testInstance: (id: string) => req<{ ok: boolean; message?: string }>(`/api/integrations/${id}/test`, { method: "POST" }),
+  testInstance: (id: string) => connectionTest(`/api/integrations/${id}/test`),
   deleteInstance: (id: string) => req(`/api/integrations/${id}`, { method: "DELETE" }),
   refresh: () => req<{ errors: string[] }>("/api/library/refresh", { method: "POST" }),
   movies: (offset = 0, limit = 50, sort: "title" | "size" | "quality" = "title", work = false) =>

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type PlaybackSettingsPayload, type SettingsPayload } from "../api";
 import { PageHead } from "../components/Shell";
-import { Pill, Tip } from "../components/ui";
+import { ActionNote, Pill, Tip } from "../components/ui";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { NotificationSettings } from "../components/NotificationSettings";
@@ -24,6 +24,15 @@ import {
 } from "../settings-copy";
 import { ANY_OPEN_NODE_ID } from "../encode-node";
 
+type NoteTone = "ok" | "bad";
+type Note = { tone: NoteTone; text: string };
+
+function ActionSlot({ notes, id }: { notes: Record<string, Note>; id: string }) {
+  const note = notes[id];
+  if (!note?.text) return null;
+  return <ActionNote tone={note.tone}>{note.text}</ActionNote>;
+}
+
 function nodeBuildText(node: ClusterNode): string {
   const polisharr = node.version.trim();
   const ffmpeg = node.ffmpegVersion?.trim() ?? "";
@@ -34,7 +43,10 @@ function nodeBuildText(node: ClusterNode): string {
 export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onChange: () => void }) {
   const [data, setData] = useState<SettingsPayload | null>(null);
   const [hw, setHw] = useState<Hardware | null>(null);
-  const [msg, setMsg] = useState("");
+  const [notes, setNotes] = useState<Record<string, Note>>({});
+  const setNote = (id: string, tone: NoteTone, text: string) => {
+    setNotes((current) => ({ ...current, [id]: { tone, text } }));
+  };
   const [inst, setInst] = useState<{ kind: "radarr" | "sonarr" | "plex" | "jellyfin"; name: string; url: string; apiKey: string }>({
     kind: "radarr",
     name: "",
@@ -70,14 +82,14 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
     return () => clearInterval(id);
   }, []);
 
-  const save = () => {
+  const save = (noteId: string) => {
     if (!data) return;
     void api.saveSettings(data).then(() => api.settings()).then((payload) => {
       setData(payload);
       setUsername(payload.username ?? "");
-      setMsg("Settings saved.");
+      setNote(noteId, "ok", "Settings saved.");
       onChange();
-    }).catch((error: Error) => setMsg(error.message));
+    }).catch((error: Error) => setNote(noteId, "bad", error.message));
   };
 
   const savePlaybackConnection = (connectionId: string, patch: {
@@ -89,6 +101,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
     coveredArrInstanceIds?: string[];
   }, savedMsg = "Playback settings saved.") => {
     if (!playback) return Promise.resolve();
+    const noteId = `playback:${connectionId}`;
     return api.savePlaybackSettings({
       connections: playback.connections.map((row) => row.connectionId === connectionId ? { ...row, ...patch } : {
         connectionId: row.connectionId,
@@ -101,8 +114,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
       }),
     }).then((payload) => {
       setPlayback(payload);
-      setMsg(savedMsg);
-    }).catch((error: Error) => setMsg(error.message));
+      setNote(noteId, "ok", savedMsg);
+    }).catch((error: Error) => setNote(noteId, "bad", error.message));
   };
 
   if (!data) return <p>Loading settings…</p>;
@@ -176,24 +189,26 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             const next = { ...data, writeMode: value as "sidecar" | "direct" };
             setData(next);
             void api.saveSettings(next).then(() => {
-              setMsg(value === "direct"
+              setNote("language-write", "ok", value === "direct"
                 ? "Direct write saved. Waiting bulk jobs replace the library file after the integrity check."
                 : "Sidecar write saved. Finished copies wait in Review for Keep.");
               onChange();
-            }).catch((error: Error) => setMsg(error.message));
+            }).catch((error: Error) => setNote("language-write", "bad", error.message));
           }}>
             <option value="sidecar">Sidecar for Review (default)</option>
             <option value="direct">Direct write after integrity check</option>
           </select>
         </Field>
+        <ActionSlot notes={notes} id="language-write" />
         <p className="help m-0">Direct write replaces the library file only after the new file passes an integrity check. Waiting bulk jobs pick this up when they start. Queue new Arr imports uses the choice under that checkbox: a Review sidecar, this setting, or a direct replace after the same check. Jobs already in Queue keep the choice they were queued with. Radarr or Sonarr refresh failures stay as a warning.</p>
         <button
           className="btn"
           type="button"
-          onClick={save}
+          onClick={() => save("language-save")}
         >
           Save settings
         </button>
+        <ActionSlot notes={notes} id="language-save" />
       </div>
       <div id="account" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="flex items-center gap-1 font-semibold">
@@ -212,12 +227,13 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           disabled={!username.trim() || password.length < 8}
           onClick={() => void api.changePassword(username.trim(), password).then(() => {
             setPassword("");
-            setMsg("Username and password saved.");
+            setNote("account", "ok", "Username and password saved.");
             onChange();
-          }).catch((e: Error) => setMsg(e.message))}
+          }).catch((e: Error) => setNote("account", "bad", e.message))}
         >
           Save username and password
         </button>
+        <ActionSlot notes={notes} id="account" />
       </div>
       <div id="caps" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="flex items-center gap-1 font-semibold">
@@ -261,7 +277,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           videoTarget={data.videoTarget}
           onChange={(suggestionDefaults) => setData({ ...data, suggestionDefaults })}
           onWriteModeChange={(queueNewImportWriteMode) => setData({ ...data, queueNewImportWriteMode })}
-          onSave={save}
+          onSave={() => save("caps-defaults")}
+          status={<ActionSlot notes={notes} id="caps-defaults" />}
         />
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -272,11 +289,12 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           Assign a Polisharr profile after an eligible video transcode
         </label>
         <div className="flex flex-wrap items-center gap-2">
-          <button className="btn" type="button" onClick={() => void api.syncProfiles().then((r) => setMsg(r.results.map((x) => `${x.created.length} created, ${x.updated.length} updated`).join(" · ") || "Profiles synced.")).catch((e: Error) => setMsg(e.message))}>
+          <button className="btn" type="button" onClick={() => void api.syncProfiles().then((r) => setNote("caps-sync", "ok", r.results.map((x) => `${x.created.length} created, ${x.updated.length} updated`).join(" · ") || "Profiles synced.")).catch((e: Error) => setNote("caps-sync", "bad", e.message))}>
             Sync quality profiles
           </button>
           <Tip label="Sync quality profiles">Sync creates or repairs Polisharr-named profiles without changing other profiles or global quality-size limits. Auto-assign applies only after a video transcode and never starts a search. Sonarr assigns the profile to the whole series.</Tip>
         </div>
+        <ActionSlot notes={notes} id="caps-sync" />
       </div>
       <div id="encode" className="scroll-mt-24">
       <EncodeSettings
@@ -284,16 +302,14 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         hardwareLabel={hw ? `${hardwareBackendLabel(hw.backend)}${hw.av1 ? ", AV1 encoder listed" : ", AV1 encoder not listed"}` : "checking…"}
         av1Available={Boolean(nodes.some((node) => node.online && node.enabled && node.hardware.av1) || hw?.av1)}
         onChange={(patch) => setData({ ...data, ...patch })}
-        onSave={save}
+        onSave={() => save("encode")}
+        status={<ActionSlot notes={notes} id="encode" />}
       />
       </div>
       <div id="alerts" className="scroll-mt-24">
       <NotificationSettings
         alerts={data.alerts}
-        onSaved={(message) => {
-          setMsg(message);
-          load();
-        }}
+        onSaved={load}
       />
       </div>
       <div id="nodes" className="glass scroll-mt-24 space-y-4 p-5">
@@ -302,6 +318,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <Tip label="Nodes">This computer is one encode node: a GPU box that can run optimize jobs. Settings, the library, Review, and Keep stay here. On the always-on host set POLISHARR_ROLE=master so another GPU box can join. Generate a cluster token, then set that token on the worker. The token is shown once. Remove a worker that will not come back. An online worker joins again on its next hello. Move or cancel that node’s waiting jobs first.</Tip>
         </h2>
         {nodes.length > 1 && (
+          <>
           <Field label="Default encode node" tip="New jobs run on the default encode node. A named default waits for that machine. Any open node uses the next free capable slot. Jobs already in Queue keep the node they were given.">
             <select
               className={FIELD_CONTROL}
@@ -310,9 +327,9 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                 const next = { ...data, defaultEncodeNodeId: event.target.value };
                 setData(next);
                 void api.saveSettings(next).then(() => {
-                  setMsg("Default encode node saved. Jobs already in Queue keep the node they were given.");
+                  setNote("nodes-default", "ok", "Default encode node saved. Jobs already in Queue keep the node they were given.");
                   onChange();
-                }).catch((error: Error) => setMsg(error.message));
+                }).catch((error: Error) => setNote("nodes-default", "bad", error.message));
               }}
             >
               <option value={ANY_OPEN_NODE_ID}>Any open node</option>
@@ -323,6 +340,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
               ))}
             </select>
           </Field>
+          <ActionSlot notes={notes} id="nodes-default" />
+          </>
         )}
         <ul className="grid grid-cols-1 gap-3 text-sm lg:grid-cols-2">
           {nodes.map((node) => (
@@ -347,8 +366,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                       const concurrency = Number(event.target.value);
                       void api.saveNode(node.id, { concurrency }).then((result) => {
                         setNodes((current) => current.map((row) => row.id === node.id ? result.node : row));
-                        setMsg("Node slots saved.");
-                      }).catch((error: Error) => setMsg(error.message));
+                        setNote(`node:${node.id}`, "ok", "Node slots saved.");
+                      }).catch((error: Error) => setNote(`node:${node.id}`, "bad", error.message));
                     }}
                   />
                 </label>
@@ -358,8 +377,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                   onClick={() => {
                     void api.saveNode(node.id, { enabled: !node.enabled }).then((result) => {
                       setNodes((current) => current.map((row) => row.id === node.id ? result.node : row));
-                      setMsg(result.node.enabled ? `${node.name} can take new jobs.` : `${node.name} is drained. Waiting jobs stay assigned.`);
-                    }).catch((error: Error) => setMsg(error.message));
+                      setNote(`node:${node.id}`, "ok", result.node.enabled ? `${node.name} can take new jobs.` : `${node.name} is drained. Waiting jobs stay assigned.`);
+                    }).catch((error: Error) => setNote(`node:${node.id}`, "bad", error.message));
                   }}
                 >
                   {node.enabled ? "Drain" : "Enable"}
@@ -374,23 +393,25 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                         if (data && payload.defaultEncodeNodeId !== data.defaultEncodeNodeId) {
                           setData({ ...data, defaultEncodeNodeId: payload.defaultEncodeNodeId });
                         }
-                        setMsg(`${node.name} removed.`);
-                      }).catch((error: Error) => setMsg(error.message));
+                        setNote("nodes-removed", "ok", `${node.name} removed.`);
+                      }).catch((error: Error) => setNote(`node:${node.id}`, "bad", error.message));
                     }}
                   >
                     Remove
                   </button>
                 )}
               </div>
+              <ActionSlot notes={notes} id={`node:${node.id}`} />
             </li>
           ))}
         </ul>
+        <ActionSlot notes={notes} id="nodes-removed" />
         {clusterToken ? (
           <SecretOnce
             label="Cluster token (shown once)"
             value={clusterToken}
-            onCopied={() => setMsg("Cluster token copied.")}
-            onFailed={() => setMsg("Copy failed. Select the token and copy it yourself.")}
+            onCopied={() => setNote("nodes-token", "ok", "Cluster token copied.")}
+            onFailed={() => setNote("nodes-token", "bad", "Copy failed. Select the token and copy it yourself.")}
           />
         ) : (
           <p className="help">{data.hasClusterToken ? "A cluster token is saved. Generate a new one to replace it." : "No cluster token yet. Generate one before you add another GPU box."}</p>
@@ -402,12 +423,13 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             void api.mintClusterToken().then((result) => {
               setClusterToken(result.token);
               load();
-              setMsg("Cluster token generated. Copy it now; Polisharr will not show it again.");
-            }).catch((e: Error) => setMsg(e.message))
+              setNote("nodes-token", "ok", "Cluster token generated. Copy it now; Polisharr will not show it again.");
+            }).catch((e: Error) => setNote("nodes-token", "bad", e.message))
           }
         >
           {data.hasClusterToken ? "Rotate cluster token" : "Generate cluster token"}
         </button>
+        <ActionSlot notes={notes} id="nodes-token" />
       </div>
       <div id="exclusions" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="flex items-center gap-1 font-semibold">
@@ -434,8 +456,9 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <button className="btn h-10" type="button" disabled={!exclusion.value.trim()} onClick={() => void api.addExclusion(exclusion.kind, exclusion.value).then((result) => {
             setExclusions(result.exclusions);
             setExclusion({ ...exclusion, value: "" });
-          }).catch((error: Error) => setMsg(error.message))}>Add exclusion</button>
+          }).catch((error: Error) => setNote("exclusions", "bad", error.message))}>Add exclusion</button>
         </div>
+        <ActionSlot notes={notes} id="exclusions" />
         <ul className="space-y-2 text-sm">
           {exclusions.map((rule) => <li key={rule.id} className="flex items-center justify-between gap-2">
             <span>{rule.kind}: {rule.value}</span>
@@ -482,14 +505,19 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                 onChange();
                 if (inst.kind === "radarr" || inst.kind === "sonarr") {
                   const result = await api.refresh();
-                  setMsg(result.errors.length ? result.errors.join(" ") : `${inst.name} saved. Library lists updated.`);
+                  setNote(
+                    "connections-save",
+                    result.errors.length ? "bad" : "ok",
+                    result.errors.length ? result.errors.join(" ") : `${inst.name} saved. Library lists updated.`,
+                  );
                 }
               })
-              .catch((e: Error) => setMsg(e.message))
+              .catch((e: Error) => setNote("connections-save", "bad", e.message))
           }
         >
           Save connection
         </button>
+        <ActionSlot notes={notes} id="connections-save" />
         <ul className="space-y-2 text-sm">
           {data.instances.map((row) => (
             <li key={row.id} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
@@ -512,18 +540,29 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                   }).then(() => {
                     load();
                     onChange();
-                    setMsg(row.enabled ? `${row.name} paused.` : `${row.name} enabled.`);
-                  }).catch((e: Error) => setMsg(e.message))}
+                    setNote(`instance:${row.id}`, "ok", row.enabled ? `${row.name} paused.` : `${row.name} enabled.`);
+                  }).catch((e: Error) => setNote(`instance:${row.id}`, "bad", e.message))}
                 >
                   {row.enabled ? "Pause" : "Enable"}
                 </button>
-                <button className="btn-secondary" type="button" onClick={() => void api.testInstance(row.id).then((r) => setMsg(r.ok ? `${row.name} is reachable.` : r.message || "Test failed."))}>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => void api.testInstance(row.id).then((result) => {
+                    setNote(
+                      `instance:${row.id}`,
+                      result.ok ? "ok" : "bad",
+                      result.ok ? `${row.name} is reachable.` : result.message || "Test failed.",
+                    );
+                  }).catch((error: Error) => setNote(`instance:${row.id}`, "bad", error.message))}
+                >
                   Test
                 </button>
                 <button className="btn-secondary danger" type="button" onClick={() => void api.deleteInstance(row.id).then(load)}>
                   Remove
                 </button>
               </span>
+              <ActionSlot notes={notes} id={`instance:${row.id}`} />
             </li>
           ))}
         </ul>
@@ -569,13 +608,16 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                   className="btn-secondary"
                   type="button"
                   onClick={() => void api.testPlaybackAccess(row.connectionId).then((result) => {
-                    setMsg(result.ok
-                      ? `${row.name} can see household playback.`
-                      : result.playback?.message || "Playback access failed.");
-                  }).catch((error: Error) => setMsg(error.message))}
+                    setNote(
+                      `playback:${row.connectionId}`,
+                      result.ok ? "ok" : "bad",
+                      result.ok ? `${row.name} can see household playback.` : result.playback?.message || "Playback access failed.",
+                    );
+                  }).catch((error: Error) => setNote(`playback:${row.connectionId}`, "bad", error.message))}
                 >
                   Test playback access
                 </button>
+                <ActionSlot notes={notes} id={`playback:${row.connectionId}`} />
                 <label className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
@@ -652,12 +694,13 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             onClick={() => {
               if (!window.confirm(PLAYBACK_HISTORY_CONFIRM)) return;
               void api.clearPlaybackHistory().then(() => {
-                setMsg(PLAYBACK_HISTORY_CLEARED);
-              }).catch((error: Error) => setMsg(error.message));
+                setNote("playback-history", "ok", PLAYBACK_HISTORY_CLEARED);
+              }).catch((error: Error) => setNote("playback-history", "bad", error.message));
             }}
           >
             Clear viewing history
           </button>
+          <ActionSlot notes={notes} id="playback-history" />
         </div>
       )}
       <div id="webhooks" className="glass scroll-mt-24 space-y-4 p-5">
@@ -673,8 +716,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <SecretOnce
             label="Token (shown once)"
             value={webhookToken}
-            onCopied={() => setMsg("Webhook token copied.")}
-            onFailed={() => setMsg("Copy failed. Select the token and copy it yourself.")}
+            onCopied={() => setNote("webhooks", "ok", "Webhook token copied.")}
+            onFailed={() => setNote("webhooks", "bad", "Copy failed. Select the token and copy it yourself.")}
           />
         ) : (
           <p className="help">{data.hasWebhookToken ? "A token is saved. Generate a new one to replace it." : "No token yet. Generate one before you add the Connect webhook."}</p>
@@ -686,12 +729,13 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             void api.mintWebhookToken().then((result) => {
               setWebhookToken(result.token);
               load();
-              setMsg("Webhook token generated. Copy it now; Polisharr will not show it again.");
-            }).catch((e: Error) => setMsg(e.message))
+              setNote("webhooks", "ok", "Webhook token generated. Copy it now; Polisharr will not show it again.");
+            }).catch((e: Error) => setNote("webhooks", "bad", e.message))
           }
         >
           {data.hasWebhookToken ? "Rotate webhook token" : "Generate webhook token"}
         </button>
+        <ActionSlot notes={notes} id="webhooks" />
       </div>
       <div id="widget" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="flex items-center gap-1 font-semibold">
@@ -702,8 +746,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <SecretOnce
             label="Key (shown once)"
             value={widgetKey}
-            onCopied={() => setMsg("Widget key copied.")}
-            onFailed={() => setMsg("Copy failed. Select the key and copy it yourself.")}
+            onCopied={() => setNote("widget", "ok", "Widget key copied.")}
+            onFailed={() => setNote("widget", "bad", "Copy failed. Select the key and copy it yourself.")}
           />
         ) : (
           <p className="help">{data.hasWidgetKey ? "A widget key is saved. Generate a new one to replace it." : "No widget key yet. Generate one before you add the Homepage tile."}</p>
@@ -715,12 +759,13 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             void api.mintWidgetKey().then((result) => {
               setWidgetKey(result.key);
               load();
-              setMsg("Widget key generated. Copy it now; Polisharr will not show it again.");
-            }).catch((e: Error) => setMsg(e.message))
+              setNote("widget", "ok", "Widget key generated. Copy it now; Polisharr will not show it again.");
+            }).catch((e: Error) => setNote("widget", "bad", e.message))
           }
         >
           {data.hasWidgetKey ? "Rotate widget key" : "Generate widget key"}
         </button>
+        <ActionSlot notes={notes} id="widget" />
       </div>
       <div id="agent" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="flex items-center gap-1 font-semibold">
@@ -731,8 +776,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <SecretOnce
             label="Token (shown once)"
             value={mcpToken}
-            onCopied={() => setMsg("MCP token copied.")}
-            onFailed={() => setMsg("Copy failed. Select the token and copy it yourself.")}
+            onCopied={() => setNote("agent", "ok", "MCP token copied.")}
+            onFailed={() => setNote("agent", "bad", "Copy failed. Select the token and copy it yourself.")}
           />
         ) : (
           <p className="help">{data.hasMcpToken ? "An MCP token is saved. Generate a new one to replace it." : "No MCP token yet. Generate one before an agent can connect."}</p>
@@ -744,14 +789,14 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             void api.mintMcpToken().then((result) => {
               setMcpToken(result.token);
               load();
-              setMsg("MCP token generated. Copy it now; Polisharr will not show it again.");
-            }).catch((e: Error) => setMsg(e.message))
+              setNote("agent", "ok", "MCP token generated. Copy it now; Polisharr will not show it again.");
+            }).catch((e: Error) => setNote("agent", "bad", e.message))
           }
         >
           {data.hasMcpToken ? "Rotate MCP token" : "Generate MCP token"}
         </button>
+        <ActionSlot notes={notes} id="agent" />
       </div>
-      {msg && <p className="ok text-sm">{msg}</p>}
       </div>
     </section>
   );

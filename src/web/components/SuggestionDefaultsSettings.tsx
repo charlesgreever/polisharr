@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { ImportWriteMode, SettingsPayload } from "../api";
 import { FIELD_CONTROL, transcodeBelowTargetLabel } from "../settings-copy";
 import { Tip } from "./ui";
@@ -11,6 +12,7 @@ export function SuggestionDefaultsSettings({
   onWriteModeChange,
   onSave,
   videoTarget = "hevc",
+  status = null,
 }: {
   value: SuggestionDefaults;
   writeMode: ImportWriteMode;
@@ -18,6 +20,7 @@ export function SuggestionDefaultsSettings({
   onWriteModeChange: (mode: ImportWriteMode) => void;
   onSave: () => void;
   videoTarget?: "hevc" | "av1";
+  status?: ReactNode;
 }) {
   const checkbox = (field: keyof SuggestionDefaults, label: string, tip: string) => (
     <label className="flex items-center gap-2 text-sm">
@@ -63,6 +66,7 @@ export function SuggestionDefaultsSettings({
         </select>
       </label>
       <button className="btn" type="button" onClick={onSave}>Save suggestion defaults</button>
+      {status}
     </div>
   );
 }

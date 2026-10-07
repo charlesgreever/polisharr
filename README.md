@@ -182,7 +182,7 @@ CONFIG_DIR=./config npm start
 
 ## Webhooks from Radarr and Sonarr
 
-Polisharr already syncs Radarr and Sonarr every 15 minutes. A Connect webhook tells it about a finished import right away so the new file is inspected without waiting. The webhook itself does not start an encode. Optional: **Queue new Arr imports automatically** in suggestion defaults queues the suggestion when inspect produces one. The choice under that checkbox writes a Review sidecar, follows **Write finished files**, or replaces the library file after the integrity check. Keep still replaces the library file and does not queue that file again. A later Arr upgrade still can.
+Polisharr already syncs Radarr and Sonarr every 15 minutes. A Connect webhook tells it about a finished import right away so the new file is inspected without waiting. The webhook itself does not start an encode. Optional: **Queue new Arr imports automatically** in suggestion defaults queues the suggestion when inspect produces one. The choice under that checkbox writes a Review sidecar, follows **Write finished files**, or replaces the library file after the integrity check. Keep still replaces the library file. It does not queue that file again. A later Arr upgrade can still queue that file.
 
 ### 1. Generate a token in Polisharr
 
@@ -236,9 +236,9 @@ Polisharr exposes `GET /api/widget` for a Homepage `customapi` tile. Example YAM
 
 ## Notifications
 
-Settings → **Notifications** sends a message when a finished file is waiting in Review, when a job fails, when a direct write has already replaced a library file, and once a day while Review still has files. Several Review finishes inside the digest window share one message. Quiet hours hold messages until the next open minute. That clock is separate from the encode off-peak window.
+Settings → **Notifications** sends a message when a finished file is waiting in Review, when a job fails, or when a direct write has replaced a library file. It also sends one reminder a day while Review still has files. Several Review finishes inside the digest window share one message. Quiet hours hold messages until the next open minute. That clock is separate from the encode off-peak window.
 
-The computer that holds your library sends the messages. A joined GPU box keeps encoding. A refused send leaves the Review copy and the library file as they are.
+The computer that holds your library sends the messages. A joined GPU box keeps encoding. A refused send leaves the Review copy and the library file as they are. Polisharr tries that send five times. The last error then stays on the card.
 
 ### Review link
 
@@ -258,12 +258,13 @@ The message is JSON:
   "flagged": 1,
   "reviewUrl": "http://192.168.1.10:7373",
   "error": null,
+  "detail": null,
   "titles": ["Arrival", "Blade Runner"],
   "nodeName": null
 }
 ```
 
-`event` is `review-ready`, `still-waiting`, `job-failed`, `direct-write`, or `replace-waiting`. `files` lists the title and the original and finished sizes when Polisharr has them.
+`event` is `review-ready`, `still-waiting`, `job-failed`, `direct-write`, or `replace-waiting`. `files` lists the title and the original and finished sizes when Polisharr has them. A direct write sets `detail` to “The library file is already the new one.” A replace that is waiting sets `detail` to “Polisharr will replace it when playback ends.”
 
 Home Assistant can receive that JSON with a webhook trigger and call `notify.mobile_app_…`. ntfy can show it at a long private topic such as `https://ntfy.sh/your-private-topic`. Keep and Discard stay on the Review page.
 
@@ -273,4 +274,4 @@ Polisharr sends mail through a mailbox you already read. In the same Notificatio
 
 ### Discord
 
-In the Discord channel, open **Integrations → Webhooks → New Webhook** and paste that address into **Discord webhook**. Polisharr stores it encrypted and posts one embed: the title, original and finished size, a line when the file missed the size target, the node name, and the Review link. A burst is one embed. **Send Discord test** posts that sample. Keep and Discard stay on the Review page until a Discord application and a tunnel hostname are set up for buttons.
+In the Discord channel, open **Integrations → Webhooks → New Webhook** and paste that address into **Discord webhook**. Polisharr stores it encrypted and posts one embed: the title, original and finished size, a line when the file missed the size target, the node name, and the Review link. A direct write adds “The library file is already the new one.” A waiting replace adds “Polisharr will replace it when playback ends.” A burst is one embed. **Send Discord test** posts that sample. Keep and Discard stay on the Review page until a Discord application and a tunnel hostname are set up for buttons.

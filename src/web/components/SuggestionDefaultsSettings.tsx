@@ -46,7 +46,7 @@ export function SuggestionDefaultsSettings({
       <label className="block space-y-1 pl-6 text-sm">
         <span className="flex items-center gap-1">
           How those imports finish
-          <Tip label="How those imports finish">Sidecar for Review waits in Review, and Keep still replaces the library file and does not queue that file again. Use Write finished files follows the Write finished files setting, including a change you save before the job starts. Direct write replaces the library file after the integrity check. Jobs already in Queue keep the choice they were queued with. A later Arr upgrade still can.</Tip>
+          <Tip label="How those imports finish">Sidecar for Review waits in Review. Keep still replaces the library file. It does not queue that file again. A later Arr upgrade can still queue that file. Use Write finished files follows the Write finished files setting, including a change you save before the job starts. Direct write replaces the library file after the integrity check. Jobs already in Queue keep the choice they were queued with.</Tip>
         </span>
         <select
           className={FIELD_CONTROL}
@@ -54,11 +54,11 @@ export function SuggestionDefaultsSettings({
           disabled={!value.queueNewImports}
           onChange={(event) => {
             const next = event.target.value;
-            if (next === "sidecar" || next === "default" || next === "direct") onWriteModeChange(next);
+            if (next === "sidecar" || next === "follow" || next === "direct") onWriteModeChange(next);
           }}
         >
           <option value="sidecar">Sidecar for Review</option>
-          <option value="default">Use Write finished files</option>
+          <option value="follow">Use Write finished files</option>
           <option value="direct">Direct write</option>
         </select>
       </label>

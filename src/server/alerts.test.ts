@@ -56,6 +56,18 @@ function gateway(pending = { count: 0, flagged: 0 }): {
   };
 }
 
+function mailbox(): SmtpAccount {
+  return {
+    host: "127.0.0.1",
+    port: 2525,
+    security: "tls",
+    username: "ada",
+    password: "app-password",
+    from: "polisharr@example.com",
+    to: "ada@example.com",
+  };
+}
+
 function review(title: string, flagged = false) {
   return {
     title,
@@ -185,19 +197,29 @@ describe("alert delivery", () => {
       error: null,
     };
     store.insertReview(row);
-    const { gateway: port } = gateway();
-    const alerts = new AlertService(port, () => Date.UTC(2026, 0, 2, 12, 0, 0), ZONE);
-    alerts.noteReview(review("Heat"), Date.UTC(2026, 0, 2, 12, 0, 0));
+    let now = Date.UTC(2026, 0, 2, 12, 0, 0);
+    const alerts = new AlertService(persisted(store), () => now, ZONE);
+    alerts.replacePrefs({ ...DEFAULT_ALERT_PREFS, stillWaiting: false, digestMinutes: 1, reviewUrl: "http://192.168.1.10:7373" });
+    alerts.noteReview(review("Heat"), now);
+    now += MINUTE;
     await alerts.flush((async () => new Response("no", { status: 502 })) as typeof fetch);
     expect(store.getReview("rev-1")?.status).toBe("pending");
     expect(store.getReview("rev-1")?.sourcePath).toBe(row.sourcePath);
+    expect(store.loadAlertState().outbox).toEqual([
+      expect.objectContaining({ event: "review-ready", titles: ["Heat"], attempts: 1 }),
+    ]);
     store.close();
   });
 
   it("sends a direct write on its own without waiting for the Review digest", async () => {
     let now = Date.UTC(2026, 0, 2, 15, 0, 0);
-    const { gateway: port } = gateway();
-    const alerts = new AlertService(port, () => now, ZONE);
+    const harness = gateway();
+    const mails: string[] = [];
+    harness.setSmtp(mailbox());
+    const alerts = new AlertService(harness.gateway, () => now, ZONE, async (_account, message) => {
+      mails.push(message.text);
+      return { ok: true };
+    });
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       calls.push({ url: String(url), init });
@@ -207,7 +229,99 @@ describe("alert delivery", () => {
     alerts.noteDirectWrite({ title: "Dune", sourceBytes: 8_000_000_000, finishedBytes: 3_000_000_000 }, now);
     await alerts.flush(fetchImpl);
     expect(calls).toHaveLength(1);
-    expect(posted(calls)[0]).toMatchObject({ event: "direct-write", title: "Dune", count: 1 });
+    expect(posted(calls)[0]).toMatchObject({
+      event: "direct-write",
+      title: "Dune",
+      count: 1,
+      detail: "The library file is already the new one.",
+    });
+    expect(mails[0]).toContain("The library file is already the new one.");
+  });
+
+  it("leaves replace-waiting off until it is saved on", () => {
+    expect(DEFAULT_ALERT_PREFS.replaceWaiting).toBe(false);
+    const harness = gateway();
+    const alerts = new AlertService(harness.gateway, () => Date.UTC(2026, 0, 2, 15, 0, 0), ZONE);
+    alerts.noteReplaceWaiting({ title: "Heat" }, Date.UTC(2026, 0, 2, 15, 0, 0));
+    expect(harness.state().outbox).toEqual([]);
+  });
+
+  it("says when a replace is waiting for playback to end", async () => {
+    const now = Date.UTC(2026, 0, 2, 15, 0, 0);
+    const harness = gateway();
+    harness.setUrl(null);
+    harness.setDiscord("https://discord.test/api/webhooks/1/secret");
+    harness.setSmtp(mailbox());
+    const mails: string[] = [];
+    const alerts = new AlertService(harness.gateway, () => now, ZONE, async (_account, message) => {
+      mails.push(message.text);
+      return { ok: true };
+    });
+    alerts.replacePrefs({ ...DEFAULT_ALERT_PREFS, replaceWaiting: true, reviewUrl: "http://192.168.1.10:7373" });
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    alerts.noteReplaceWaiting({ title: "Heat" }, now);
+    await alerts.flush((async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response("ok");
+    }) as typeof fetch);
+    const body = posted(calls)[0] as { embeds: Array<{ description: string; title: string }> };
+    expect(body.embeds[0]?.title).toBe("Heat");
+    expect(body.embeds[0]?.description).toContain("Polisharr will replace it when playback ends.");
+    expect(mails[0]).toContain("Heat");
+    expect(mails[0]).toContain("Polisharr will replace it when playback ends.");
+  });
+
+  it("stops after five refused deliveries and keeps the error", async () => {
+    let now = Date.UTC(2026, 0, 2, 15, 0, 0);
+    const harness = gateway();
+    const alerts = new AlertService(harness.gateway, () => now, ZONE);
+    const calls: string[] = [];
+    alerts.noteReview(review("Heat"), now);
+    now += 15 * MINUTE;
+    const fetchImpl = (async () => {
+      calls.push("post");
+      return new Response("no", { status: 500 });
+    }) as typeof fetch;
+    for (let attempt = 0; attempt < 5; attempt += 1) await alerts.flush(fetchImpl);
+    expect(calls).toHaveLength(5);
+    expect(harness.state().outbox).toEqual([]);
+    expect(harness.state().lastError).toBe("The webhook returned HTTP 500.");
+    await alerts.flush(fetchImpl);
+    expect(calls).toHaveLength(5);
+    expect(harness.state().lastError).toBe("The webhook returned HTTP 500.");
+  });
+
+  it("sends the full Review list again when a finish arrives after one channel succeeded", async () => {
+    let now = Date.UTC(2026, 0, 2, 15, 0, 0);
+    const harness = gateway();
+    harness.setSmtp(mailbox());
+    const mails: string[] = [];
+    let failMail = true;
+    const alerts = new AlertService(harness.gateway, () => now, ZONE, async (_account, message) => {
+      if (failMail) return { ok: false, error: "The mail server did not answer." };
+      mails.push(message.text);
+      return { ok: true };
+    });
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response("ok");
+    }) as typeof fetch;
+    alerts.noteReview(review("Arrival"), now);
+    now += 15 * MINUTE;
+    await alerts.flush(fetchImpl);
+    await alerts.flush(fetchImpl);
+    expect(calls).toHaveLength(1);
+    expect(posted(calls)[0]).toMatchObject({ titles: ["Arrival"] });
+    alerts.noteReview(review("Blade Runner"), now);
+    now += 15 * MINUTE;
+    failMail = false;
+    await alerts.flush(fetchImpl);
+    expect(calls).toHaveLength(2);
+    expect(posted(calls)[1]).toMatchObject({ titles: ["Arrival", "Blade Runner"], count: 2 });
+    expect(mails).toHaveLength(1);
+    expect(mails[0]).toContain("Arrival");
+    expect(mails[0]).toContain("Blade Runner");
   });
 
   it("sends a Review notice that was queued before a restart", async () => {

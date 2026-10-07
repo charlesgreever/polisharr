@@ -8,7 +8,7 @@ const EMPTY_ALERTS: AlertSettings = {
   stillWaiting: true,
   jobFailed: true,
   directWrite: true,
-  replaceWaiting: true,
+  replaceWaiting: false,
   quietEnabled: false,
   quietStart: "23:00",
   quietEnd: "07:00",
@@ -58,9 +58,19 @@ export function NotificationSettings({
     setPrefs({ ...prefs, ...next });
   }
 
-  async function save() {
+  async function run(work: () => Promise<void>, fallback: string) {
     setBusy(true);
     try {
+      await work();
+    } catch (error) {
+      onSaved(error instanceof Error ? error.message : fallback);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save() {
+    await run(async () => {
       const body: Record<string, unknown> = {
         reviewReady: prefs.reviewReady,
         stillWaiting: prefs.stillWaiting,
@@ -90,62 +100,38 @@ export function NotificationSettings({
       setSmtpPassword("");
       setDiscordUrl("");
       onSaved("Notifications saved.");
-    } catch (error) {
-      onSaved(error instanceof Error ? error.message : "Notifications could not be saved.");
-    } finally {
-      setBusy(false);
-    }
+    }, "Notifications could not be saved.");
   }
 
   async function sendTest() {
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.testAlert();
       onSaved("Test message sent.");
-    } catch (error) {
-      onSaved(error instanceof Error ? error.message : "The test message could not be sent.");
-    } finally {
-      setBusy(false);
-    }
+    }, "The test message could not be sent.");
   }
 
   async function sendTestEmail() {
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.testAlertEmail();
       onSaved("Test email sent.");
-    } catch (error) {
-      onSaved(error instanceof Error ? error.message : "The test email could not be sent.");
-    } finally {
-      setBusy(false);
-    }
+    }, "The test email could not be sent.");
   }
 
   async function sendTestDiscord() {
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.testAlertDiscord();
       onSaved("Test Discord message sent.");
-    } catch (error) {
-      onSaved(error instanceof Error ? error.message : "The Discord test could not be sent.");
-    } finally {
-      setBusy(false);
-    }
+    }, "The Discord test could not be sent.");
   }
 
   async function clearWebhook() {
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.saveSettings({ alerts: { webhookUrl: "", webhookToken: "", discordUrl: "" } });
       setWebhookUrl("");
       setWebhookToken("");
       setDiscordUrl("");
       onSaved("Saved webhooks cleared.");
-    } catch (error) {
-      onSaved(error instanceof Error ? error.message : "The saved webhook could not be cleared.");
-    } finally {
-      setBusy(false);
-    }
+    }, "The saved webhook could not be cleared.");
   }
 
   return (

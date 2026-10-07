@@ -30,7 +30,7 @@ class SmtpRefused extends Error {
 }
 
 export async function sendSmtp(account: SmtpAccount, message: OutboundMail): Promise<Delivery> {
-  if (!emailAddress(account.from) || !emailAddress(account.to)) {
+  if (!isMailboxAddress(account.from) || !isMailboxAddress(account.to)) {
     return { ok: false, error: "The From and To addresses must be mailbox addresses." };
   }
   const holder: { socket: Socket | null } = { socket: null };
@@ -214,6 +214,6 @@ function oneLine(value: string): string {
   return value.replace(/[\r\n]+/g, " ").slice(0, 200);
 }
 
-function emailAddress(value: string): boolean {
+export function isMailboxAddress(value: string): boolean {
   return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(value);
 }

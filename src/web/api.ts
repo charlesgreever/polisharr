@@ -330,7 +330,7 @@ export type NodesPayload = {
   nodes: ClusterNode[];
 };
 /** How an automatic Arr import finishes. `default` follows Write finished files when the job starts. */
-export type ImportWriteMode = "sidecar" | "default" | "direct";
+export type ImportWriteMode = "sidecar" | "follow" | "direct";
 export type AlertSettings = {
   reviewReady: boolean;
   stillWaiting: boolean;

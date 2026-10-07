@@ -455,8 +455,18 @@ export type SearchHit = {
 
 export type PlanOrigin = "bulk" | "custom";
 export type WriteMode = "sidecar" | "direct";
-/** How an automatic Arr import finishes. `default` follows Write finished files when the job starts. */
-export type ImportWriteMode = "sidecar" | "default" | "direct";
+/** How an automatic Arr import finishes. `follow` uses Write finished files when the job starts. */
+export type ImportWriteMode = "sidecar" | "follow" | "direct";
+
+export function isImportWriteMode(value: unknown): value is ImportWriteMode {
+  return value === "sidecar" || value === "follow" || value === "direct";
+}
+
+/** Settings saved before this value was named `follow` stored `default`. */
+export function readImportWriteMode(value: unknown): ImportWriteMode | null {
+  if (value === "default") return "follow";
+  return isImportWriteMode(value) ? value : null;
+}
 export type OutputContainer = "mkv";
 
 export type VideoCopy = { kind: "copy" };
@@ -502,7 +512,7 @@ export type ExecutablePlan = {
   // Jobs saved before MP4 conversion omit this field and retain the old encode path.
   remuxInput?: boolean;
   writeMode: WriteMode;
-  /** When true, Keep this write mode even if Settings later change. Queue new Arr imports locks sidecar. */
+  /** When true, this sidecar or direct choice stays even if Write finished files changes later. Use Write finished files leaves this false. */
   writeModeLocked?: boolean;
   warning: string | null;
   reasons: string[];

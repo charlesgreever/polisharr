@@ -995,6 +995,8 @@ describe("public HTTP behavior", () => {
         suggestionDefaults: { queueNewImports: true },
       }),
     });
+    const saved = await (await ctx.app.app.request("/api/settings", { headers })).json() as { queueNewImportWriteMode: string };
+    expect(saved.queueNewImportWriteMode).toBe("follow");
     await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
     await ctx.app.inspectPending();
     const queued = ctx.store.listJobs()[0];
@@ -1006,7 +1008,7 @@ describe("public HTTP behavior", () => {
     await ctx.app.app.request("/api/settings", {
       method: "PUT",
       headers,
-      body: JSON.stringify({ writeMode: "direct", queueNewImportWriteMode: "default" }),
+      body: JSON.stringify({ writeMode: "direct", queueNewImportWriteMode: "follow" }),
     });
     await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
       method: "PUT",

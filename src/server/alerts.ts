@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { sendSmtp, type OutboundMail, type SmtpAccount, type SmtpSecurity } from "./smtp.ts";
+import { isMailboxAddress, sendSmtp, type OutboundMail, type SmtpAccount, type SmtpSecurity } from "./smtp.ts";
 
 export type AlertEventName = "review-ready" | "still-waiting" | "job-failed" | "direct-write" | "replace-waiting";
 
@@ -37,7 +37,7 @@ export const DEFAULT_ALERT_PREFS: AlertPrefs = {
   stillWaiting: true,
   jobFailed: true,
   directWrite: true,
-  replaceWaiting: true,
+  replaceWaiting: false,
   quietEnabled: false,
   quietStart: "23:00",
   quietEnd: "07:00",
@@ -61,7 +61,9 @@ export type StoredBatch = {
   titles: string[];
   files: AlertTitle[];
   error: string | null;
+  detail: string | null;
   nodeName: string | null;
+  attempts: number;
   sentWebhook: boolean;
   sentEmail: boolean;
   sentDiscord: boolean;
@@ -109,6 +111,9 @@ export type AlertUpdate = {
 
 const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/;
 const TITLE_CAP = 8;
+const DELIVERY_ATTEMPTS = 5;
+const DIRECT_WRITE_DETAIL = "The library file is already the new one.";
+const REPLACE_WAITING_DETAIL = "Polisharr will replace it when playback ends.";
 
 export function defaultAlertState(): AlertState {
   return { prefs: { ...DEFAULT_ALERT_PREFS }, outbox: [], lastError: null, lastReminderDay: null };
@@ -130,8 +135,8 @@ export function parseAlertState(value: unknown): AlertState {
   if (typeof prefsRaw.smtpPort === "number" && integerInRange(prefsRaw.smtpPort, 1, 65535)) prefs.smtpPort = prefsRaw.smtpPort;
   if (prefsRaw.smtpSecurity === "starttls" || prefsRaw.smtpSecurity === "tls") prefs.smtpSecurity = prefsRaw.smtpSecurity;
   if (typeof prefsRaw.smtpUsername === "string") prefs.smtpUsername = prefsRaw.smtpUsername;
-  if (typeof prefsRaw.smtpFrom === "string" && (prefsRaw.smtpFrom === "" || emailAddress(prefsRaw.smtpFrom))) prefs.smtpFrom = prefsRaw.smtpFrom;
-  if (typeof prefsRaw.smtpTo === "string" && (prefsRaw.smtpTo === "" || emailAddress(prefsRaw.smtpTo))) prefs.smtpTo = prefsRaw.smtpTo;
+  if (typeof prefsRaw.smtpFrom === "string" && (prefsRaw.smtpFrom === "" || isMailboxAddress(prefsRaw.smtpFrom))) prefs.smtpFrom = prefsRaw.smtpFrom;
+  if (typeof prefsRaw.smtpTo === "string" && (prefsRaw.smtpTo === "" || isMailboxAddress(prefsRaw.smtpTo))) prefs.smtpTo = prefsRaw.smtpTo;
   const outbox = Array.isArray(raw.outbox) ? raw.outbox.flatMap((row) => parseBatch(row)) : [];
   return {
     prefs,
@@ -184,11 +189,11 @@ export function readAlertUpdate(current: AlertPrefs, value: unknown): { ok: true
     prefs.smtpUsername = raw.smtpUsername;
   }
   if ("smtpFrom" in raw) {
-    if (typeof raw.smtpFrom !== "string" || (raw.smtpFrom !== "" && !emailAddress(raw.smtpFrom))) return { ok: false, error: "The From address must be a mailbox address." };
+    if (typeof raw.smtpFrom !== "string" || (raw.smtpFrom !== "" && !isMailboxAddress(raw.smtpFrom))) return { ok: false, error: "The From address must be a mailbox address." };
     prefs.smtpFrom = raw.smtpFrom.trim();
   }
   if ("smtpTo" in raw) {
-    if (typeof raw.smtpTo !== "string" || (raw.smtpTo !== "" && !emailAddress(raw.smtpTo))) return { ok: false, error: "The To address must be a mailbox address." };
+    if (typeof raw.smtpTo !== "string" || (raw.smtpTo !== "" && !isMailboxAddress(raw.smtpTo))) return { ok: false, error: "The To address must be a mailbox address." };
     prefs.smtpTo = raw.smtpTo.trim();
   }
   let discordUrl: string | null | undefined;
@@ -268,6 +273,12 @@ export class AlertService {
     if (!existing) {
       state.outbox.push(batch("review-ready", sendAfter, title));
     } else {
+      if (existing.sentWebhook || existing.sentEmail || existing.sentDiscord) {
+        existing.sentWebhook = false;
+        existing.sentEmail = false;
+        existing.sentDiscord = false;
+        existing.attempts = 0;
+      }
       existing.count += 1;
       if (title.flagged) existing.flagged += 1;
       if (existing.titles.length < TITLE_CAP) existing.titles.push(title.title);
@@ -289,11 +300,11 @@ export class AlertService {
       sizePerHourGb: null,
       flagged: false,
       nodeName: null,
-    });
+    }, DIRECT_WRITE_DETAIL);
   }
 
   noteReplaceWaiting(input: { title: string }, at: number): void {
-    this.noteSingle("replace-waiting", input.title, null, null, at, (prefs) => prefs.replaceWaiting);
+    this.noteSingle("replace-waiting", input.title, null, null, at, (prefs) => prefs.replaceWaiting, undefined, REPLACE_WAITING_DETAIL);
   }
 
   async flush(httpFetch: typeof fetch): Promise<void> {
@@ -308,6 +319,7 @@ export class AlertService {
     }
     const now = this.now();
     let error: string | null = null;
+    let attempted = false;
     const remain: StoredBatch[] = [];
     for (const item of state.outbox) {
       if (!eventEnabled(state.prefs, item.event)) continue;
@@ -316,7 +328,9 @@ export class AlertService {
         continue;
       }
       let held = false;
+      let tried = false;
       if (hook && !item.sentWebhook) {
+        tried = true;
         const result = await postAlert(hook, payloadFor(item, state.prefs.reviewUrl), httpFetch);
         if (result.ok) item.sentWebhook = true;
         else {
@@ -325,6 +339,7 @@ export class AlertService {
         }
       }
       if (account && !item.sentEmail) {
+        tried = true;
         const result = await this.mailer(account, mailFor(payloadFor(item, state.prefs.reviewUrl)));
         if (result.ok) item.sentEmail = true;
         else {
@@ -333,6 +348,7 @@ export class AlertService {
         }
       }
       if (discord && !item.sentDiscord) {
+        tried = true;
         const result = await postDiscord(discord, payloadFor(item, state.prefs.reviewUrl), httpFetch);
         if (result.ok) item.sentDiscord = true;
         else {
@@ -340,11 +356,14 @@ export class AlertService {
           held = true;
         }
       }
-      if (held) remain.push(item);
-      else if (item.event === "still-waiting") state.lastReminderDay = zonedClock(now, this.zone).day;
+      if (tried) attempted = true;
+      if (held) {
+        item.attempts += 1;
+        if (item.attempts < DELIVERY_ATTEMPTS) remain.push(item);
+      } else if (item.event === "still-waiting") state.lastReminderDay = zonedClock(now, this.zone).day;
     }
     state.outbox = remain;
-    state.lastError = error;
+    if (attempted) state.lastError = error;
     this.gateway.save(state);
   }
 
@@ -359,6 +378,7 @@ export class AlertService {
       flagged: 0,
       reviewUrl: state.prefs.reviewUrl,
       error: null,
+      detail: null,
       titles: ["Polisharr test"],
       files: [],
       nodeName: null,
@@ -379,6 +399,7 @@ export class AlertService {
       flagged: 0,
       reviewUrl: state.prefs.reviewUrl,
       error: null,
+      detail: null,
       titles: ["Polisharr test"],
       files: [],
       nodeName: null,
@@ -410,6 +431,7 @@ export class AlertService {
     at: number,
     enabled: (prefs: AlertPrefs) => boolean,
     file?: AlertTitle,
+    detail: string | null = null,
   ): void {
     const state = this.gateway.load();
     if (!enabled(state.prefs)) return;
@@ -422,6 +444,7 @@ export class AlertService {
       nodeName,
     });
     row.error = error;
+    row.detail = detail;
     row.nodeName = nodeName;
     state.outbox.push(row);
     this.gateway.save(state);
@@ -474,7 +497,9 @@ function batch(event: AlertEventName, sendAfter: number, title: AlertTitle): Sto
     titles: [title.title],
     files: [title],
     error: null,
+    detail: null,
     nodeName: title.nodeName,
+    attempts: 0,
     sentWebhook: false,
     sentEmail: false,
     sentDiscord: false,
@@ -492,6 +517,7 @@ function payloadFor(item: StoredBatch, reviewUrl: string): AlertPayload {
     flagged: item.flagged,
     reviewUrl,
     error: item.error,
+    detail: item.detail,
     titles: item.titles,
     files: item.files,
     nodeName: item.nodeName,
@@ -505,6 +531,7 @@ type AlertPayload = {
   flagged: number;
   reviewUrl: string;
   error: string | null;
+  detail: string | null;
   titles: string[];
   files: AlertTitle[];
   nodeName: string | null;
@@ -555,6 +582,7 @@ function discordEmbed(payload: AlertPayload): { title: string; url?: string; des
     ? payload.files.map((file) => fileLine(file))
     : payload.titles;
   if (payload.error) lines.unshift(payload.error);
+  if (payload.detail) lines.push(payload.detail);
   if (payload.flagged > 0 && payload.files.length === 0) lines.push(`${payload.flagged} flagged.`);
   return {
     title: payload.title,
@@ -630,7 +658,9 @@ function parseBatch(value: unknown): StoredBatch[] {
     titles,
     files,
     error: typeof raw.error === "string" ? raw.error : null,
+    detail: typeof raw.detail === "string" ? raw.detail : null,
     nodeName: typeof raw.nodeName === "string" ? raw.nodeName : null,
+    attempts: typeof raw.attempts === "number" && raw.attempts >= 0 ? raw.attempts : 0,
     sentWebhook: raw.sentWebhook === true,
     sentEmail: raw.sentEmail === true,
     sentDiscord: raw.sentDiscord === true,
@@ -640,6 +670,7 @@ function parseBatch(value: unknown): StoredBatch[] {
 function mailFor(payload: AlertPayload): OutboundMail {
   const lines = [payload.title];
   if (payload.error) lines.push(payload.error);
+  if (payload.detail) lines.push(payload.detail);
   if (payload.files.length > 0) {
     for (const file of payload.files) lines.push(fileLine(file));
   } else {
@@ -679,10 +710,6 @@ function escapeHtml(value: string): string {
 
 function smtpHostOk(value: string): boolean {
   return value === "" || (value.length <= 253 && !value.includes("://") && !/\s/.test(value));
-}
-
-function emailAddress(value: string): boolean {
-  return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(value);
 }
 
 function parseTitle(value: unknown): AlertTitle | null {

@@ -15,7 +15,7 @@ const defaults = {
   queueNewImports: false,
 };
 
-function markup(queueNewImports: boolean, writeMode: "sidecar" | "default" | "direct", videoTarget?: "hevc" | "av1"): string {
+function markup(queueNewImports: boolean, writeMode: "sidecar" | "follow" | "direct", videoTarget?: "hevc" | "av1"): string {
   return renderToStaticMarkup(createElement(SuggestionDefaultsSettings, {
     value: { ...defaults, queueNewImports },
     writeMode,
@@ -39,8 +39,8 @@ describe("suggestion defaults settings", () => {
     expect(html).toContain("Convert MP4 to MKV");
     expect(html).toContain("Convert ISO to MKV");
     expect(html).toContain("Queue new Arr imports automatically");
-    expect(html).toContain("Keep still replaces the library file and does not queue that file again");
-    expect(html).toContain("A later Arr upgrade still can");
+    expect(html).toContain("It does not queue that file again");
+    expect(html).toContain("A later Arr upgrade can still queue that file");
     expect(html).toContain("Turning that on does not queue your existing library");
     expect(html).toContain("Save suggestion defaults");
   });
@@ -55,10 +55,10 @@ describe("suggestion defaults settings", () => {
   });
 
   it("enables the import finish choice while Queue new Arr imports is on", () => {
-    const html = markup(true, "default");
+    const html = markup(true, "follow");
     const select = importSelect(html);
     expect(select).not.toContain("disabled");
-    expect(select).toContain('value="default" selected=""');
+    expect(select).toContain('value="follow" selected=""');
     expect(html).toContain("Sidecar for Review waits in Review");
     expect(html).toContain("Use Write finished files follows the Write finished files setting");
     expect(html).toContain("Direct write replaces the library file after the integrity check");

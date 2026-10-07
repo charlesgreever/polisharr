@@ -1252,7 +1252,7 @@ export function createApp(opts: AppOptions) {
       return suggestion;
     }
     const mode = settings.queueNewImportWriteMode;
-    jobs.enqueue(itemId, suggestion, mode === "default" ? { runNow: false } : { writeMode: mode, runNow: false });
+    jobs.enqueue(itemId, suggestion, mode === "follow" ? { runNow: false } : { writeMode: mode, runNow: false });
     return suggestion;
   }
 

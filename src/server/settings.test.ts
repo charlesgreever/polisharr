@@ -52,9 +52,13 @@ describe("settings boundary", () => {
     expect(parseStoredSettings({}).queueNewImportWriteMode).toBe("sidecar");
     expect(parseStoredSettings({ queueNewImportWriteMode: "erase" }).queueNewImportWriteMode).toBe("sidecar");
     const direct = updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "direct" });
-    const house = updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "default" });
+    const house = updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "follow" });
+    const stored = updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "default" });
     expect(direct.ok && direct.settings.queueNewImportWriteMode).toBe("direct");
-    expect(house.ok && house.settings.queueNewImportWriteMode).toBe("default");
+    expect(house.ok && house.settings.queueNewImportWriteMode).toBe("follow");
+    expect(stored.ok && stored.settings.queueNewImportWriteMode).toBe("follow");
+    expect(parseStoredSettings({ queueNewImportWriteMode: "default" }).queueNewImportWriteMode).toBe("follow");
+    expect(parseStoredSettings({ queueNewImportWriteMode: "follow" }).queueNewImportWriteMode).toBe("follow");
     expect(updateSettings(DEFAULT_SETTINGS, { queueNewImportWriteMode: "overwrite" }).ok).toBe(false);
   });
 });

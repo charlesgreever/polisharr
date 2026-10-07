@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type PlaybackDiagnostic, type PlaybackObservation } from "../api";
 import { PagedListControls } from "../components/PagedListControls";
-import { Help, PageHead } from "../components/Shell";
-import { FilterChip } from "../components/ui";
+import { PageHead } from "../components/Shell";
+import { FilterChip, Tip } from "../components/ui";
 import { playbackFamilyLabel } from "../settings-copy";
 import { usePagedList } from "../use-paged-list";
 
@@ -62,12 +62,10 @@ export function PlaybackPage() {
   return (
     <section>
       <PageHead title="Playback" />
-      <Help>
-        Playback lists Jellyfin conversion problems Polisharr observed. Open a repair plan to review a custom change before anything is queued. Observation never starts work on its own.
-      </Help>
       <div className="mt-5 space-y-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-theme-sm dark:border-gray-800 dark:bg-white/[0.03]">
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <FilterChip pressed={view === "problems"} onToggle={() => setView("problems")}>Recent problems</FilterChip>
+          <Tip label="Recent problems">Observation never starts work. Open a repair plan to review a custom change before anything is queued.</Tip>
           <FilterChip pressed={view === "observations"} onToggle={() => setView("observations")}>Recent observations</FilterChip>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -220,7 +218,11 @@ export function PlaybackObservationList({ items }: { items: PlaybackObservation[
           {items.map((row) => (
             <tr key={row.id}>
               <td>{new Date(row.lastSeenAt).toLocaleString()}</td>
-              <td className="font-medium text-ink">{row.itemName}</td>
+              <td className="font-medium text-ink">
+                {row.href
+                  ? <Link className="hover:text-accent" to={row.href}>{row.itemName}</Link>
+                  : row.itemName}
+              </td>
               <td>{row.deviceLabel}</td>
               <td>{row.summary}{row.stale ? " Connection looks stale." : ""}</td>
             </tr>

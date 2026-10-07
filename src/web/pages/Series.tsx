@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, type ClusterNode, type LibraryRow, type SeriesSummary } from "../api";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
-import { Help, PageHead } from "../components/Shell";
+import { PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { AudioMixSelect } from "../components/AudioMixSelect";
 import { EncodeTargetSelect } from "../components/EncodeTargetSelect";
 import { LibraryHealthCounts, LibraryWorkFilter } from "../components/LibraryHealthPills";
 import { LibraryMediaCells, LibraryMediaHeaders } from "../components/LibraryMediaCells";
-import { Pill } from "../components/ui";
+import { Pill, Tip } from "../components/ui";
 import { loadRetainedPages, mergePage, needsFocusedPage } from "../library-pages";
 import { untrackConfirm } from "../library-replace";
 
@@ -93,7 +93,6 @@ export function SeriesPage() {
       <PageHead title="Series">
         <RefreshLibrary onDone={refreshed} />
       </PageHead>
-      <Help>Series loads show headers first. Expand one show to load its episodes. Encode target on a show chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. Prefer stereo replaces surround with AAC stereo built from the surround mix and drops the original mix, including a stereo track that was already on the file. That is useful for kids TVs when the included stereo is commentary. Keep surround turns that off. House default follows Settings. When Add stereo from surround audio is on, Polisharr adds an AAC stereo track to a surround file that has no stereo track in your language, including a 5.1 mix, and keeps the original mix. Each header counts healthy episodes and open suggestions. After you expand, Show All episodes or Needs work (suggestions, unread files, and files Polisharr could not read). Exempt on an episode keeps that file off the size cap so Polisharr only offers language cleanup and stereo. Optimize all episodes queues that show without expanding it. Remove this series from Sonarr deletes its files and stops Sonarr from keeping the show.</Help>
       {summaries.length === 0 ? (
         <div className="empty">
           <div className="space-y-3">
@@ -310,6 +309,7 @@ function SeriesGroup({
           value={summary.videoTarget ?? null}
           houseTarget={houseVideoTarget}
           av1Available={av1Available}
+          tip="Chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. House default follows Settings."
           onChange={(videoTarget) => {
             void api.setSeriesVideoTarget(summary.instanceId, summary.arrSeriesId, videoTarget).then((result) => {
               onPatch({
@@ -324,6 +324,7 @@ function SeriesGroup({
         />
         <AudioMixSelect
           value={summary.audioMix ?? null}
+          tip="Prefer stereo replaces surround with AAC stereo built from the surround mix and drops the original mix, including a stereo track that was already on the file. Keep surround turns that off. House default follows Settings. When Add stereo from surround audio is on, Polisharr adds an AAC stereo track and keeps the original mix."
           onChange={(audioMix) => {
             void api.setSeriesAudioMix(summary.instanceId, summary.arrSeriesId, audioMix).then((result) => {
               onPatch({
@@ -356,6 +357,7 @@ function SeriesGroup({
         >
           Optimize all episodes
         </button>
+        <Tip label="Optimize all episodes">Queues that show without expanding it.</Tip>
         <button
           className="btn-secondary danger whitespace-nowrap"
           type="button"
@@ -371,6 +373,7 @@ function SeriesGroup({
         >
           Remove this series from Sonarr
         </button>
+        <Tip label="Remove this series from Sonarr">Deletes its files and stops Sonarr from keeping the show.</Tip>
       </div>
       {open && (
         <div className="series-table-wrap">
@@ -396,7 +399,7 @@ function SeriesGroup({
             <thead>
               <tr>
                 <th>Episode</th>
-                <LibraryMediaHeaders />
+                <LibraryMediaHeaders actionsTip="Exempt keeps that file off the size cap so Polisharr only offers language cleanup and stereo." />
               </tr>
             </thead>
             <tbody>

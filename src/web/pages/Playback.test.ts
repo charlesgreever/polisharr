@@ -138,9 +138,14 @@ describe("Playback page copy", () => {
       match: "matched",
       lastSeenAt: Date.UTC(2026, 8, 14),
       stale: false,
+      href: "/movies/film-1080",
     };
-    const html = renderToStaticMarkup(createElement(PlaybackObservationList, { items: [row] }));
+    const unmatched: PlaybackObservation = { ...row, id: "obs-2", itemName: "Missing Film", href: null, libraryItemIds: [] };
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(PlaybackObservationList, { items: [row, unmatched] })));
     expect(html).toContain("Jellyfin played this file directly on Living Room TV.");
+    expect(html).toContain("href=\"/movies/film-1080\"");
+    expect(html).toContain("Missing Film");
+    expect(html).not.toContain("href=\"/movies/missing\"");
     expect(html).not.toContain("unreadable");
   });
 });

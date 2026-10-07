@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type AlertSettings } from "../api";
 import { FIELD_CONTROL } from "../settings-copy";
+import { Tip } from "./ui";
 
 const EMPTY_ALERTS: AlertSettings = {
   reviewReady: true,
@@ -149,10 +150,10 @@ export function NotificationSettings({
 
   return (
     <div className="glass space-y-3 p-4">
-      <h2 className="font-semibold">Notifications</h2>
-      <p className="help">
-        Polisharr sends a message when a finished file is waiting in Review, when a job fails, and when a direct write has already replaced a library file. Several Review finishes inside the digest window share one message. The computer that holds your library sends these messages. A joined GPU box keeps encoding.
-      </p>
+      <h2 className="flex items-center gap-1 font-semibold">
+        Notifications
+        <Tip label="Notifications">Polisharr sends a message when a finished file is waiting in Review, when a job fails, and when a direct write has already replaced a library file. Several Review finishes inside the digest window share one message. The computer that holds your library sends these messages. A joined GPU box keeps encoding.</Tip>
+      </h2>
       {EVENTS.map((event) => (
         <label key={event.key} className="flex items-center gap-2 text-sm">
           <input
@@ -164,7 +165,10 @@ export function NotificationSettings({
         </label>
       ))}
       <label className="block space-y-1.5 text-sm">
-        <span className="font-medium text-muted">Review link</span>
+        <span className="flex items-center gap-1 font-medium text-muted">
+          Review link
+          <Tip label="Review link">Type the address you use to open Polisharr. Messages include this link.</Tip>
+        </span>
         <input
           className={FIELD_CONTROL}
           value={prefs.reviewUrl}
@@ -172,14 +176,16 @@ export function NotificationSettings({
           onChange={(event) => patch({ reviewUrl: event.target.value })}
         />
       </label>
-      <p className="help">Type the address you use to open Polisharr. Messages include this link.</p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block space-y-1.5 text-sm">
           <span className="font-medium text-muted">Daily reminder</span>
           <input className={FIELD_CONTROL} value={prefs.reminderTime} onChange={(event) => patch({ reminderTime: event.target.value })} />
         </label>
         <label className="block space-y-1.5 text-sm">
-          <span className="font-medium text-muted">Digest window (minutes)</span>
+          <span className="flex items-center gap-1 font-medium text-muted">
+            Digest window (minutes)
+            <Tip label="Digest window">Polisharr waits this many minutes so several Review finishes can share one message. Each new finish starts the wait again.</Tip>
+          </span>
           <input
             className={FIELD_CONTROL}
             type="number"
@@ -190,7 +196,6 @@ export function NotificationSettings({
           />
         </label>
       </div>
-      <p className="help">Polisharr waits this many minutes so several Review finishes can share one message. Each new finish starts the wait again.</p>
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
@@ -198,6 +203,7 @@ export function NotificationSettings({
           onChange={(event) => patch({ quietEnabled: event.target.checked })}
         />
         Hold messages during quiet hours
+        <Tip label="Quiet hours">The next open minute sends what was waiting. This clock is separate from the encode off-peak window.</Tip>
       </label>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block space-y-1.5 text-sm">
@@ -209,9 +215,11 @@ export function NotificationSettings({
           <input className={FIELD_CONTROL} value={prefs.quietEnd} onChange={(event) => patch({ quietEnd: event.target.value })} />
         </label>
       </div>
-      <p className="help">The next open minute sends what was waiting. This clock is separate from the encode off-peak window.</p>
       <label className="block space-y-1.5 text-sm">
-        <span className="font-medium text-muted">Webhook URL</span>
+        <span className="flex items-center gap-1 font-medium text-muted">
+          Webhook URL
+          <Tip label="Webhook URL">A webhook is a web address that receives a message. Home Assistant can turn that message into a phone notification. ntfy can show it when you use a long private topic address. Leave these boxes blank to keep the saved address and token. Polisharr stores them encrypted and leaves the Review copy and the library file as they are when the receiver is down.</Tip>
+        </span>
         <input
           className={FIELD_CONTROL}
           value={webhookUrl}
@@ -230,13 +238,10 @@ export function NotificationSettings({
           autoComplete="off"
         />
       </label>
-      <p className="help">
-        A webhook is a web address that receives a message. Home Assistant can turn that message into a phone notification. ntfy can show it when you use a long private topic address. Leave these boxes blank to keep the saved address and token. Polisharr stores them encrypted and leaves the Review copy and the library file as they are when the receiver is down.
-      </p>
-      <h3 className="font-medium">Email</h3>
-      <p className="help">
-        Polisharr sends mail through a mailbox you already read. Create an app password at that provider and put their submission host here. STARTTLS usually uses port 587. Implicit TLS usually uses port 465.
-      </p>
+      <h3 className="flex items-center gap-1 font-medium">
+        Email
+        <Tip label="Email">Polisharr sends mail through a mailbox you already read. Create an app password at that provider and put their submission host here. STARTTLS usually uses port 587. Implicit TLS usually uses port 465.</Tip>
+      </h3>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block space-y-1.5 text-sm">
           <span className="font-medium text-muted">Mail server</span>
@@ -289,10 +294,10 @@ export function NotificationSettings({
           <input className={FIELD_CONTROL} value={prefs.smtpTo} placeholder="you@example.com" onChange={(event) => patch({ smtpTo: event.target.value })} />
         </label>
       </div>
-      <h3 className="font-medium">Discord</h3>
-      <p className="help">
-        In the Discord channel, open Integrations, then Webhooks, then New Webhook, and paste that address here. Polisharr posts one summary a person can read on a phone. Keep and Discard stay on the Review page.
-      </p>
+      <h3 className="flex items-center gap-1 font-medium">
+        Discord
+        <Tip label="Discord">In the Discord channel, open Integrations, then Webhooks, then New Webhook, and paste that address here. Polisharr posts one summary a person can read on a phone. Keep and Discard stay on the Review page.</Tip>
+      </h3>
       <label className="block space-y-1.5 text-sm">
         <span className="font-medium text-muted">Discord webhook</span>
         <input

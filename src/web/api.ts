@@ -564,7 +564,24 @@ export type PreviewStatus = {
   clips: { original: string; finished: string } | null;
   transform: { scale: string; audio: string; color: string; warnings: string[] } | null;
 };
-export type HistoryRow = { id: string; displayTitle: string; outcome: "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched"; bytesSaved: number; createdAt: number };
+export type HistoryRow = {
+  id: string;
+  displayTitle: string;
+  outcome: "kept" | "discarded" | "flagged" | "failed" | "cancelled" | "searched" | "removed";
+  bytesSaved: number;
+  createdAt: number;
+  href?: string;
+};
+export type ActivityWeek = { weekStart: number; bytesSaved: number; files: number };
+export type ActivityOutcomes = {
+  kept: number;
+  discarded: number;
+  flagged: number;
+  failed: number;
+  cancelled: number;
+  searched: number;
+  removed: number;
+};
 export type HomePayload = {
   filesOptimized: number;
   spaceSavedBytes: number;
@@ -576,6 +593,8 @@ export type HomePayload = {
   recent: HistoryRow[];
   status: string;
   nodes?: WorkNode[];
+  savingsByWeek: ActivityWeek[];
+  outcomes: ActivityOutcomes;
 };
 
 export type ListingState = "complete" | "iso_unlisted";
@@ -674,6 +693,7 @@ export type PlaybackObservation = {
   match: string;
   lastSeenAt: number;
   stale: boolean;
+  href: string | null;
 };
 export type PlaybackRepairDraft = {
   ok: true;

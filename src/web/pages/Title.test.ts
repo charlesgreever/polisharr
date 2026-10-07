@@ -25,6 +25,7 @@ describe("title playback summary", () => {
         match: "matched",
         lastSeenAt: 1,
         stale: false,
+        href: "/movies/film-1080",
       }],
     };
     const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(PlaybackTitleSummary, { playback })));

@@ -209,10 +209,11 @@ describe("playback HTTP", () => {
     });
     expect(enabled.status).toBe(200);
     const first = await (await ctx.app.request("/api/playback/observations", { headers: ctx.headers })).json() as {
-      items: Array<{ libraryItemIds: string[]; match: string; summary: string; stale: boolean }>;
+      items: Array<{ libraryItemIds: string[]; match: string; summary: string; stale: boolean; href: string | null }>;
     };
     expect(first.items).toHaveLength(1);
     expect(first.items[0]?.libraryItemIds).toEqual(["film-1080"]);
+    expect(first.items[0]?.href).toBe("/movies/film-1080");
     expect(first.items[0]?.summary).toContain("converted the audio");
     expect(JSON.stringify(first)).not.toContain("ada");
     expect(JSON.stringify(first)).not.toContain("10.0.0.5");
@@ -570,6 +571,19 @@ describe("playback HTTP", () => {
     };
     expect(unknownObs.items.some((row) => row.id === "unknown")).toBe(true);
     expect(unknownObs.items.some((row) => row.playMethod === "DirectPlay" || row.id === "direct")).toBe(false);
+    ctx.store.savePlaybackOccurrence(seedOccurrence(ctx.jfId, {
+      id: "unmatched-play",
+      sessionId: "unmatched-play",
+      match: "unmatched",
+      libraryItemIds: [],
+      path: "/mnt/nas/movies/missing.mkv",
+      itemName: "Missing Film",
+      lastSeenAt: Date.now(),
+    }));
+    const unmatched = await (await ctx.app.request("/api/playback/observations?title=Missing", { headers: ctx.headers })).json() as {
+      items: Array<{ itemName: string; href: string | null }>;
+    };
+    expect(unmatched.items.find((row) => row.itemName === "Missing Film")?.href).toBeNull();
     const bad = await ctx.app.request("/api/playback/diagnostics?days=14", { headers: ctx.headers });
     expect(bad.status).toBe(400);
     const page = await ctx.app.request("/api/playback/observations?limit=100", { headers: ctx.headers });

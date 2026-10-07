@@ -423,7 +423,10 @@ export function createPlaybackDiagnostics(opts: {
       return pageWindow(all, query, windowStart(query.days));
     },
     listObservations(query) {
-      const items = occurrencesFor(query).map((row) => ({ ...row, summary: observationSummary(row) }));
+      const items = occurrencesFor(query).map((row) => {
+        const item = firstItem(store, row.libraryItemIds);
+        return { ...row, summary: observationSummary(row), href: item ? itemHref(item) : null };
+      });
       return pageWindow(items, query, windowStart(query.days));
     },
     dismiss(id) {

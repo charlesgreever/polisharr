@@ -1,5 +1,47 @@
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { formatSize } from "../api";
+import { Icons } from "./icons";
+
+export function Tip({ label, children }: { label: string; children: string }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <span
+      className="relative inline-flex align-middle"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className="inline-flex size-6 items-center justify-center rounded-full text-accent hover:bg-brand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent dark:hover:bg-brand-500/10"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-describedby={id}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+        }}
+      >
+        {Icons.help({ width: 14, height: 14, "aria-hidden": true })}
+      </button>
+      <span
+        id={id}
+        role="tooltip"
+        className={open
+          ? "absolute left-0 top-7 z-30 w-64 rounded-xl border border-gray-200 bg-white p-3 text-left text-xs font-normal normal-case leading-5 tracking-normal text-gray-700 shadow-theme-sm dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+          : "sr-only"}
+      >
+        {children}
+      </span>
+    </span>
+  );
+}
 
 const pillTone = {
   neutral: "border-gray-200 bg-white text-gray-700 dark:border-gray-800 dark:bg-white/[0.03] dark:text-gray-300",

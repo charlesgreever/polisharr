@@ -5,7 +5,8 @@ import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
 import { ANY_OPEN_NODE_ID, encodeNeedFromPlan } from "../encode-node";
 import { Card } from "../components/Card";
 import { PagedListControls } from "../components/PagedListControls";
-import { Help, PageHead } from "../components/Shell";
+import { PageHead } from "../components/Shell";
+import { Tip } from "../components/ui";
 import { usePagedList } from "../use-paged-list";
 
 export const WORKING_NOW_HEADING = "Working now";
@@ -141,9 +142,6 @@ export function QueuePage() {
   return (
     <section>
       <PageHead title="Queue" />
-      <Help>
-        Working now is the job that is running. Waiting jobs run next; pause, resume, or reorder them. Finished jobs stay until you remove them. Open a title for the same media page as Movies and Series. Progress is elapsed media time, updated about once a second. Cancel never replaces the library file. A sidecar waits in Review; direct write replaces the library file after an integrity check.
-      </Help>
       <div className="mt-3 flex flex-wrap gap-2">
         {toolbar.cancelAll && (
           <button className="btn-secondary" type="button" disabled={busy} onClick={() => void mutate(api.cancelAll)}>
@@ -161,7 +159,10 @@ export function QueuePage() {
       {items.length === 0 && !list.loading && !list.error && <div className="empty">The queue is idle. Approve a suggestion to add work.</div>}
       {working.length > 0 && (
         <div className="mt-5 space-y-3">
-          <h2 className="text-base font-semibold text-ink">{WORKING_NOW_HEADING}</h2>
+          <h2 className="flex items-center gap-1 text-base font-semibold text-ink">
+            {WORKING_NOW_HEADING}
+            <Tip label="Working now">This is the job that is running. Progress is elapsed media time, updated about once a second. Cancel never replaces the library file. A sidecar waits in Review. Direct write replaces the library file after an integrity check.</Tip>
+          </h2>
           {working.map((job) => (
             <WorkingNowCard key={job.id} job={job} actions={actions} />
           ))}
@@ -170,7 +171,10 @@ export function QueuePage() {
       {waiting.length > 0 && (
         <div className="mt-5">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold text-ink">{WAITING_HEADING}</h2>
+            <h2 className="flex items-center gap-1 text-base font-semibold text-ink">
+              {WAITING_HEADING}
+              <Tip label="Waiting">Waiting jobs run next. Pause, resume, or reorder them. Cancel never replaces the library file.</Tip>
+            </h2>
             {nodes.length > 1 && (
               <button
                 className="btn-secondary"
@@ -240,7 +244,14 @@ function QueueTable({
 }) {
   return (
     <div className={heading ? "mt-5" : "mt-3"}>
-      {heading && <h2 className="text-base font-semibold text-ink">{heading}</h2>}
+      {heading && (
+        <h2 className="flex items-center gap-1 text-base font-semibold text-ink">
+          {heading}
+          {heading === FINISHED_HEADING && (
+            <Tip label="Finished">Finished jobs stay until you remove them.</Tip>
+          )}
+        </h2>
+      )}
       <div className={`table-card ${heading ? "mt-3" : ""}`}>
         <table>
           <thead>

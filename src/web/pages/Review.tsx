@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKe
 import { api, formatDuration, formatGbHour, formatSize, type PreviewStatus, type ReviewRow } from "../api";
 import { reviewEncodeLine } from "../review-copy";
 import { PagedListControls } from "../components/PagedListControls";
-import { Help, PageHead } from "../components/Shell";
+import { PageHead } from "../components/Shell";
+import { Tip } from "../components/ui";
 import { FIELD_CONTROL } from "../settings-copy";
 import { usePagedList } from "../use-paged-list";
 import {
@@ -119,6 +120,7 @@ export function ReviewPage() {
           >
             Keep selected ({chosen.length})
           </button>
+          <Tip label="Keep">Keep replaces the library file. The original stays until Keep finishes. If a file is playing, Keep records the request and waits. Cancel wait leaves both copies in place.</Tip>
           <button
             className="btn-secondary"
             type="button"
@@ -127,11 +129,10 @@ export function ReviewPage() {
           >
             Keep all
           </button>
+          <Tip label="Keep all">Keep all replaces every pending library file after you confirm. It skips cards that are already waiting.</Tip>
         </div>
       </PageHead>
-      <Help>
-        Review compares the original and the sidecar: size, codec, duration, tracks, and GB per hour. The card names the encode node, the GPU API, the device, and how long the job ran. Compare clips plays matching samples after you pick a position; opening Review does not start that work. Keep replaces the library file. Discard throws the sidecar away. Encode smaller queues a tighter size target after a miss. The original stays until Keep finishes. If a file is playing, Keep records the request and waits; Cancel wait leaves both copies in place. If Polisharr restarts during Keep, the card comes back so you can try again, unless the new file is already in the library. Keep all promotes every pending sidecar after you confirm and skips cards that are already waiting.
-      </Help>
+
       {confirmAll && (
         <div className="modal-scrim" role="presentation" onClick={() => setConfirmAll(false)}>
           <div
@@ -242,22 +243,29 @@ export function ReviewPage() {
                     >
                       Discard
                     </button>
+                    <Tip label="Discard">Discard throws the sidecar away. The library file stays.</Tip>
                     {canCompareStatus(item.status) && (
-                      <button className="btn-secondary" type="button" onClick={() => setCompareItem(item)}>
-                        Compare clips
-                      </button>
+                      <>
+                        <button className="btn-secondary" type="button" onClick={() => setCompareItem(item)}>
+                          Compare clips
+                        </button>
+                        <Tip label="Compare clips">Plays matching samples after you pick a position. Opening Review does not start that work.</Tip>
+                      </>
                     )}
                     {item.flagged && item.status === "pending" && (
-                      <button
-                        className="btn-secondary"
-                        type="button"
-                        onClick={() => void api.requeueFlagged(item.id).then(() => {
-                          setMsg("Queued a smaller encode.");
-                          return list.refresh();
-                        }).catch((error: Error) => setMsg(error.message))}
-                      >
-                        Encode smaller
-                      </button>
+                      <>
+                        <button
+                          className="btn-secondary"
+                          type="button"
+                          onClick={() => void api.requeueFlagged(item.id).then(() => {
+                            setMsg("Queued a smaller encode.");
+                            return list.refresh();
+                          }).catch((error: Error) => setMsg(error.message))}
+                        >
+                          Encode smaller
+                        </button>
+                        <Tip label="Encode smaller">Queues a tighter size target after a miss.</Tip>
+                      </>
                     )}
                   </div>
                 </div>

@@ -103,6 +103,8 @@ describe("automatic import finish choice", () => {
     expect(importSelect(host).value).toBe("sidecar");
     expect(houseSelect(host).value).toBe("sidecar");
     expect(host.textContent).toContain("Queue new Arr imports uses the choice under that checkbox");
+    expect(host.textContent).toContain("Preferred language decides which audio and subtitle tracks stay.");
+    expect(host.textContent).not.toContain("Preferred language decides which audio and subtitle tracks stay. Confirm it once before any optimize. The review folder");
 
     const box = [...host.querySelectorAll("label")].find((label) =>
       label.textContent?.includes("Queue new Arr imports automatically"),

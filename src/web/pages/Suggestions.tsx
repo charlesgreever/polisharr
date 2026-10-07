@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, type ClusterNode, type SuggestionFilters, type SuggestionRow } from "../api";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
 import { bulkEncodeNeed } from "../encode-node";
 import { PagedListControls } from "../components/PagedListControls";
-import { Help, PageHead } from "../components/Shell";
-import { FilterChip, MediaSnapshot } from "../components/ui";
+import { PageHead } from "../components/Shell";
+import { FilterChip, MediaSnapshot, Tip } from "../components/ui";
 import {
   loadedSelection,
   queueAllConfirmCopy,
@@ -100,57 +100,85 @@ export function SuggestionsPage() {
   return (
     <section>
       <PageHead title="Suggestions" />
-      <Help>
-        Suggestions is the work list: only titles that still need something. Open a title for custom work. Tracks-only means keep the video and clean languages. After size stays blank when the video will not shrink. Largest savings puts the biggest estimated disk wins first. Queue next 10 takes the first 10 rows in the current sort. Queue all asks before it adds the rest of this list. Checked rows queue on their own.
-      </Help>
-      <div className="mt-5 space-y-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-theme-sm dark:border-gray-800 dark:bg-white/[0.03]">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            <input className="filter" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search suggestions" />
-            <select value={filters.type ?? ""} onChange={(event) => setFilter("type", event.target.value)}>
+      <div className="mt-5 space-y-4 rounded-2xl border border-gray-200 bg-white p-4 shadow-theme-sm dark:border-gray-800 dark:bg-white/[0.03]">
+        <input className="h-10 w-full" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search suggestions" />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <FilterField label="Type">
+            <select className="h-10 w-full" value={filters.type ?? ""} onChange={(event) => setFilter("type", event.target.value)}>
               <option value="">Movies and TV</option><option value="movie">Movies</option><option value="episode">TV episodes</option>
             </select>
-            <select value={filters.resolution ?? ""} onChange={(event) => setFilter("resolution", event.target.value)}>
+          </FilterField>
+          <FilterField label="Resolution">
+            <select className="h-10 w-full" value={filters.resolution ?? ""} onChange={(event) => setFilter("resolution", event.target.value)}>
               <option value="">Any resolution</option><option value="1080p">1080p</option><option value="4k">4K</option>
             </select>
-            <select value={filters.hdr ?? ""} onChange={(event) => setFilter("hdr", event.target.value)}>
+          </FilterField>
+          <FilterField label="HDR">
+            <select className="h-10 w-full" value={filters.hdr ?? ""} onChange={(event) => setFilter("hdr", event.target.value)}>
               <option value="">HDR and SDR</option><option value="hdr">HDR</option><option value="sdr">SDR</option>
             </select>
-            <select value={filters.codec ?? ""} onChange={(event) => setFilter("codec", event.target.value)}>
+          </FilterField>
+          <FilterField label="Codec">
+            <select className="h-10 w-full" value={filters.codec ?? ""} onChange={(event) => setFilter("codec", event.target.value)}>
               <option value="">Any codec</option><option value="h264">H.264</option><option value="hevc">HEVC</option><option value="av1">AV1</option>
             </select>
-            <label className="flex items-center gap-2 text-sm text-muted">
-              <span className="whitespace-nowrap font-medium">Sort by</span>
-              <select value={sort} onChange={(event) => setSort(event.target.value === "savings" ? "savings" : "title")}>
-                <option value="title">Title</option>
-                <option value="savings">Largest savings</option>
-              </select>
-            </label>
+          </FilterField>
+          <FilterField label="Sort" tip="Largest savings puts the biggest estimated disk wins first.">
+            <select className="h-10 w-full" value={sort} onChange={(event) => setSort(event.target.value === "savings" ? "savings" : "title")}>
+              <option value="title">Title</option>
+              <option value="savings">Largest savings</option>
+            </select>
+          </FilterField>
+        </div>
+        <div>
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Show</div>
+          <div className="flex flex-wrap gap-2">
+            {(["overCap", "extraTracks", "exempt", "hardwareWarning"] as const).map((key) => (
+              <FilterChip
+                key={key}
+                pressed={filters[key] === true}
+                onToggle={() => {
+                  setSelected({});
+                  setAnchorId(null);
+                  setFilters((current) => ({ ...current, [key]: current[key] ? undefined : true }));
+                }}
+              >
+                {filterLabel(key)}
+              </FilterChip>
+            ))}
           </div>
+        </div>
+        <div className="flex flex-col gap-3 border-t border-gray-200 pt-4 dark:border-gray-800 lg:flex-row lg:items-center lg:justify-between">
+          <EncodeNodeSelect
+            nodes={nodes}
+            value={encodeNodeId}
+            defaultNodeId={defaultNodeId}
+            need={bulkEncodeNeed(items.map((row) => row.after.codec))}
+            onChange={setEncodeNodeId}
+          />
           <div className="flex flex-wrap items-center gap-2">
-            <EncodeNodeSelect
-              nodes={nodes}
-              value={encodeNodeId}
-              defaultNodeId={defaultNodeId}
-              need={bulkEncodeNeed(items.map((row) => row.after.codec))}
-              onChange={setEncodeNodeId}
-            />
-            <button
-              className="btn-secondary"
-              type="button"
-              disabled={busy || list.total === 0}
-              onClick={() => void runBatch(() => api.queueFiltered(debouncedQ, filters, nodeId, { sort, limit: 10 }))}
-            >
-              Queue next 10
-            </button>
-            <button
-              className="btn-secondary"
-              type="button"
-              disabled={busy || list.total === 0}
-              onClick={() => setConfirmAll(true)}
-            >
-              {`Queue all (${list.total})`}
-            </button>
+            <span className="inline-flex items-center gap-1">
+              <button
+                className="btn-secondary"
+                type="button"
+                disabled={busy || list.total === 0}
+                onClick={() => void runBatch(() => api.queueFiltered(debouncedQ, filters, nodeId, { sort, limit: 10 }))}
+              >
+                Queue next 10
+              </button>
+              <Tip label="Queue next 10">Takes the first 10 rows in the current sort. Titles already queued or in Review are skipped.</Tip>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <button
+                className="btn-secondary"
+                type="button"
+                disabled={busy || list.total === 0}
+                onClick={() => setConfirmAll(true)}
+              >
+                {`Queue all (${list.total})`}
+              </button>
+              <Tip label="Queue all">Asks before it adds the rest of this list. Checked rows queue on their own.</Tip>
+            </span>
             <button
               className="btn"
               type="button"
@@ -160,21 +188,6 @@ export function SuggestionsPage() {
               {`Queue selected (${selectedIds.length})`}
             </button>
           </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {(["overCap", "extraTracks", "exempt", "hardwareWarning"] as const).map((key) => (
-            <FilterChip
-              key={key}
-              pressed={filters[key] === true}
-              onToggle={() => {
-                setSelected({});
-                setAnchorId(null);
-                setFilters((current) => ({ ...current, [key]: current[key] ? undefined : true }));
-              }}
-            >
-              {filterLabel(key)}
-            </FilterChip>
-          ))}
         </div>
       </div>
       {confirmAll && (
@@ -232,9 +245,13 @@ export function SuggestionsPage() {
                 <th>Why</th>
                 <th>Now</th>
                 <th>
-                  <button type="button" onClick={() => setSort((current) => current === "savings" ? "title" : "savings")}>
-                    After
-                  </button>
+                  <span className="inline-flex items-center gap-1">
+                    <button type="button" onClick={() => setSort((current) => current === "savings" ? "title" : "savings")}>
+                      After
+                      <span className="ml-1 text-xs font-normal text-muted">{sort === "savings" ? "Largest savings" : "Title"}</span>
+                    </button>
+                    <Tip label="After">After size stays blank when the video will not shrink. Largest savings puts the biggest estimated disk wins first.</Tip>
+                  </span>
                 </th>
                 <th>Actions</th>
               </tr>
@@ -317,6 +334,18 @@ export function SuggestionsPage() {
       setFilters((current) => ({ ...current, codec: value || undefined }));
     }
   }
+}
+
+function FilterField({ label, tip, children }: { label: string; tip?: string; children: ReactNode }) {
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted">
+        {label}
+        {tip ? <Tip label={label}>{tip}</Tip> : null}
+      </span>
+      {children}
+    </label>
+  );
 }
 
 function filterLabel(key: "overCap" | "extraTracks" | "exempt" | "hardwareWarning"): string {

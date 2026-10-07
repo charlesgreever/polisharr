@@ -1,4 +1,4 @@
-import { FilterChip, Pill } from "./ui";
+import { FilterChip, Pill, Tip } from "./ui";
 
 export function LibraryHealthCounts({
   healthyCount,
@@ -33,6 +33,7 @@ export function LibraryWorkFilter({
       <FilterChip pressed={work} onToggle={() => { if (!work) onWorkChange(true); }}>
         Needs work
       </FilterChip>
+      <Tip label="Needs work">Needs work shows suggestions, unread files, and files Polisharr could not read.</Tip>
       {work ? (
         <span className="text-xs text-muted">Suggestions, unread files, and files Polisharr could not read.</span>
       ) : (

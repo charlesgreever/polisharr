@@ -1,17 +1,23 @@
 import { FIELD_CONTROL } from "../settings-copy";
+import { Tip } from "./ui";
 
 export function AudioMixSelect({
   value,
   disabled,
+  tip,
   onChange,
 }: {
   value: "stereo" | "surround" | null;
   disabled?: boolean;
+  tip?: string;
   onChange: (value: "stereo" | "surround" | null) => void;
 }) {
   return (
     <label className="block min-w-[11rem] text-sm">
-      <span className="mb-1 block font-medium text-muted">Preferred audio</span>
+      <span className="mb-1 flex items-center gap-1 font-medium text-muted">
+        Preferred audio
+        {tip ? <Tip label="Preferred audio">{tip}</Tip> : null}
+      </span>
       <select
         className={FIELD_CONTROL}
         value={value ?? ""}

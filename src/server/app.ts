@@ -2134,6 +2134,7 @@ export function createApp(opts: AppOptions) {
   app.get("/api/home", (c) => {
     const sav = store.savings();
     const work = store.workSummary();
+    const activity = store.activityWindow();
     return c.json({
       filesOptimized: sav.filesOptimized,
       spaceSavedBytes: sav.spaceSavedBytes,
@@ -2145,6 +2146,8 @@ export function createApp(opts: AppOptions) {
       recent: store.historyPage(0, 8).items,
       status: homeStatus(work),
       nodes: publicWorkNodes(),
+      savingsByWeek: activity.savingsByWeek,
+      outcomes: activity.outcomes,
     });
   });
 

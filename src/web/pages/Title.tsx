@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, formatSize, type ClusterNode, type ExecutablePlan, type InspectionReport, type LibraryRow, type PlaybackTitleSummary } from "../api";
-import { Help, PageHead } from "../components/Shell";
+import { PageHead } from "../components/Shell";
 import { EncodeNodeSelect } from "../components/EncodeNodeSelect";
 import { EncodeTargetSelect } from "../components/EncodeTargetSelect";
 import { TitleFacts } from "../components/TitleFacts";
-import { Pill } from "../components/ui";
+import { Pill, Tip } from "../components/ui";
 import {
   applyPlaybackAudioDraft,
   audioActionSelectClass,
@@ -268,9 +268,7 @@ export function TitlePage() {
       <PageHead title={item.displayTitle}>
         <Link className="btn-secondary" to={item.type === "movie" ? "/movies" : "/series"}>Back</Link>
       </PageHead>
-      <Help>
-        {`Custom work is optional. Bulk suggestions still exist. Queue stays off until the plan differs from the source. A sidecar is the new file waiting in Review until you Keep it. Direct write replaces the library file after an integrity check. Codec replace turns one soundtrack into AAC at the same layout. Downmix makes a smaller layout such as stereo. Size mode aims at a file size you type. Quality mode aims at an encoder quality number (lower is larger). Identify language listens to a 45-second audio clip, or reads a few minutes of a text subtitle track. Untagged PGS can be identified from a short OCR sample when that helper is installed. Saving a language does not rewrite the library file. Queue this plan can remux a copy that writes the tag; Keep then replaces the library file. Replace this file asks ${arrName} to delete the current copy and search for another. Remove from ${arrName} deletes the files and drops the movie or series from that app.`}
-      </Help>
+
       {(locked || item.error) && (
         <p className="help">{item.error || "This title is still uninspected or unreadable. Optimize stays off until inspect finishes."}</p>
       )}
@@ -288,6 +286,7 @@ export function TitlePage() {
             value={item.videoTarget ?? null}
             houseTarget={houseVideoTarget}
             av1Available={av1}
+            tip="Automatic Suggestions for this movie use this codec. House default follows Settings. The custom plan Codec below is only for one queued job."
             onChange={(videoTarget) => {
               void api.setItemVideoTarget(item.id, videoTarget).then((result) => {
                 setItem(result.item);
@@ -295,7 +294,6 @@ export function TitlePage() {
               }).catch((error: Error) => setMsg(error.message));
             }}
           />
-          <p className="help m-0 mt-2">Automatic Suggestions for this movie use this codec. House default follows Settings. The custom plan Codec below is only for one queued job.</p>
         </div>
       )}
 
@@ -336,20 +334,29 @@ export function TitlePage() {
           </div>
           {videoMode === "size" && (
             <label className="block text-sm">
-              <span className="mb-1 block font-medium text-muted">Target GB</span>
+              <span className="mb-1 flex items-center gap-1 font-medium text-muted">
+                Target GB
+                <Tip label="Target GB">Size mode aims at a file size you type.</Tip>
+              </span>
               <input className="w-28" type="number" min={0.1} step={0.1} value={targetGb} onChange={(e) => setTargetGb(Number(e.target.value))} />
             </label>
           )}
           {videoMode === "quality" && (
             <label className="block text-sm">
-              <span className="mb-1 block font-medium text-muted">Quality 1–51</span>
+              <span className="mb-1 flex items-center gap-1 font-medium text-muted">
+                Quality 1–51
+                <Tip label="Quality">Quality mode aims at an encoder quality number. Lower is larger.</Tip>
+              </span>
               <input className="w-28" type="number" min={1} max={51} value={quality} onChange={(e) => setQuality(Number(e.target.value))} />
             </label>
           )}
           {videoMode !== "copy" && (
             <div className="space-y-3">
               <label className="block text-sm">
-                <span className="mb-1 block font-medium text-muted">Codec</span>
+                <span className="mb-1 flex items-center gap-1 font-medium text-muted">
+                  Codec
+                  <Tip label="Codec">Codec replace turns one soundtrack into AAC at the same layout. Downmix makes a smaller layout such as stereo.</Tip>
+                </span>
                 <select value={av1 ? codec : "hevc"} onChange={(e) => {
                   const value = e.target.value;
                   if (value === "hevc" || (value === "av1" && av1)) setCodec(value);
@@ -379,7 +386,7 @@ export function TitlePage() {
           </select>
         </Section>
       </div>
-      <Section title="Audio">
+      <Section title="Audio" help="Identify language listens to a 45-second audio clip. Saving a language does not rewrite the library file.">
         <fieldset disabled={locked} className="space-y-2 border-0 p-0">
         {!listed && <p className="help m-0">Track edits stay hidden until streams can be listed.</p>}
         {listed && (
@@ -486,7 +493,7 @@ export function TitlePage() {
         )}
         </fieldset>
       </Section>
-      <Section title="Subtitles">
+      <Section title="Subtitles" help="Identify language reads a few minutes of a text subtitle track. Untagged PGS can be identified from a short OCR sample when that helper is installed.">
         {listed && report?.subtitles.length ? (
           <div className="space-y-2">
             {report.subtitles.map((track) => {
@@ -596,6 +603,7 @@ export function TitlePage() {
         >
           Queue this plan
         </button>
+        <Tip label="Queue this plan">Queue stays off until the plan differs from the source. Queue this plan can remux a copy that writes a language tag. Keep then replaces the library file. A sidecar waits in Review until you Keep it.</Tip>
         {onlyWrongLanguage && (
           <button
             className="btn-secondary"
@@ -636,6 +644,7 @@ export function TitlePage() {
         >
           {`Ask ${arrName} to replace this file`}
         </button>
+        <Tip label="Replace this file">{`Asks ${arrName} to delete the current copy and search for another.`}</Tip>
         <button
           className="btn-secondary danger"
           type="button"
@@ -650,6 +659,7 @@ export function TitlePage() {
         >
           {`Remove this ${item.type === "episode" ? "series" : "movie"} from ${arrName}`}
         </button>
+        <Tip label={`Remove from ${arrName}`}>{`Deletes the files and drops the movie or series from ${arrName}.`}</Tip>
       </Section>
       {msg && <p className="ok text-sm">{msg}</p>}
     </section>
@@ -677,8 +687,10 @@ export function PlaybackTitleSummary({ playback }: { playback: PlaybackTitleSumm
 function Section({ title, help, children }: { title: string; help?: string; children: ReactNode }) {
   return (
     <section className="glass space-y-3 p-5">
-      <h2 className="text-sm font-semibold tracking-wide text-ink">{title}</h2>
-      {help && <p className="help m-0">{help}</p>}
+      <h2 className="flex items-center gap-1 text-sm font-semibold tracking-wide text-ink">
+        {title}
+        {help ? <Tip label={title}>{help}</Tip> : null}
+      </h2>
       {children}
     </section>
   );

@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { defaultAlertState, parseAlertState, type AlertState } from "./alerts.ts";
 import type {
   ActivityOutcome,
+  ActivityOutcomes,
+  ActivityWeek,
   ExclusionKind,
   ExecutablePlan,
   FileError,
@@ -1709,14 +1711,19 @@ export class Store {
   }
 
   listHistory(): HistoryRow[] {
-    return (this.db.prepare("SELECT * FROM history ORDER BY created_at DESC").all() as Record<string, unknown>[]).map((r) => ({
-      id: String(r.id),
-      itemId: String(r.item_id),
-      displayTitle: this.getItem(String(r.item_id))?.title ?? String(r.item_id),
-      outcome: activityOutcome(r.outcome),
-      bytesSaved: Number(r.bytes_saved),
-      createdAt: Number(r.created_at),
-    }));
+    return (this.db.prepare("SELECT * FROM history ORDER BY created_at DESC").all() as Record<string, unknown>[]).map((r) => {
+      const itemId = String(r.item_id);
+      const item = this.getItem(itemId);
+      return {
+        id: String(r.id),
+        itemId,
+        displayTitle: item?.title ?? itemId,
+        outcome: activityOutcome(r.outcome),
+        bytesSaved: Number(r.bytes_saved),
+        createdAt: Number(r.created_at),
+        href: item ? itemHref(item.type, item.id) : undefined,
+      };
+    });
   }
 
   historyPage(offset: number, limit: number): Page<HistoryRow> {
@@ -1727,14 +1734,39 @@ export class Store {
        FROM history h LEFT JOIN library_items i ON i.id = h.item_id
        ORDER BY h.created_at DESC, h.id LIMIT ? OFFSET ?`,
     ).all(limit, offset) as Record<string, unknown>[];
-    return page(rows.map((row) => ({
-      id: String(row.id),
-      itemId: String(row.item_id),
-      displayTitle: joinedDisplayTitle(row, String(row.item_id)),
-      outcome: activityOutcome(row.outcome),
-      bytesSaved: Number(row.bytes_saved),
-      createdAt: Number(row.created_at),
-    })), total, offset, limit);
+    return page(rows.map((row) => {
+      const itemId = String(row.item_id);
+      return {
+        id: String(row.id),
+        itemId,
+        displayTitle: joinedDisplayTitle(row, itemId),
+        outcome: activityOutcome(row.outcome),
+        bytesSaved: Number(row.bytes_saved),
+        createdAt: Number(row.created_at),
+        href: row.item_type == null ? undefined : itemHref(row.item_type, itemId),
+      };
+    }), total, offset, limit);
+  }
+
+  activityWindow(now = Date.now()): { savingsByWeek: ActivityWeek[]; outcomes: ActivityOutcomes } {
+    const current = mondayStartUtc(now);
+    const starts = Array.from({ length: 12 }, (_, index) => current - (11 - index) * WEEK_MS);
+    const from = starts[0] ?? current;
+    const rows = this.db.prepare(
+      "SELECT outcome, bytes_saved, created_at FROM history WHERE created_at >= ?",
+    ).all(from) as Array<{ outcome: unknown; bytes_saved: number; created_at: number }>;
+    const weeks = new Map(starts.map((weekStart) => [weekStart, { weekStart, bytesSaved: 0, files: 0 }]));
+    const outcomes = emptyOutcomes();
+    for (const row of rows) {
+      const outcome = activityOutcome(row.outcome);
+      outcomes[outcome] += 1;
+      if (outcome !== "kept") continue;
+      const bucket = weeks.get(mondayStartUtc(Number(row.created_at)));
+      if (!bucket) continue;
+      bucket.bytesSaved += Number(row.bytes_saved);
+      bucket.files += 1;
+    }
+    return { savingsByWeek: starts.map((weekStart) => weeks.get(weekStart) ?? { weekStart, bytesSaved: 0, files: 0 }), outcomes };
   }
 
   workSummary(): {
@@ -2870,6 +2902,19 @@ function currentFileErrorSql(alias: string): string {
 
 function itemHref(itemType: unknown, itemId: string): string {
   return itemType === "episode" ? `/series/episodes/${itemId}` : `/movies/${itemId}`;
+}
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function mondayStartUtc(at: number): number {
+  const date = new Date(at);
+  const midnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  const daysFromMonday = (date.getUTCDay() + 6) % 7;
+  return midnight - daysFromMonday * 24 * 60 * 60 * 1000;
+}
+
+function emptyOutcomes(): ActivityOutcomes {
+  return { kept: 0, discarded: 0, flagged: 0, failed: 0, cancelled: 0, searched: 0, removed: 0 };
 }
 
 const MEDIA_FILE_SUFFIXES = [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".mts", ".iso", ".mk3d", ".webm"];

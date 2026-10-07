@@ -5,6 +5,7 @@ import { inspectBannerView } from "../inspect-banner";
 import { emptyWorkSnapshot, headerWorkLine, navBadgeCount } from "../nav-work";
 import { buildReportIssueUrl, type ReportKind } from "../reportIssue";
 import { Icons } from "./icons";
+import { Tip } from "./ui";
 import { ThemeToggle } from "./ThemeToggle";
 
 const NAV = [
@@ -243,23 +244,17 @@ function ReportBug({ inspect, version }: { inspect: InspectState | null; version
   );
 }
 
-export function PageHead({ title, children }: { title: string; children?: React.ReactNode }) {
+export function PageHead({ title, tip, children }: { title: string; tip?: string; children?: React.ReactNode }) {
   return (
     <div className="page-heading">
-      <div>
-        <p className="eyebrow">POLISHARR</p>
-        <h1>{title}</h1>
+      <div className="flex items-center gap-2">
+        <div>
+          <p className="eyebrow">POLISHARR</p>
+          <h1>{title}</h1>
+        </div>
+        {tip ? <Tip label={title}>{tip}</Tip> : null}
       </div>
       {children}
     </div>
-  );
-}
-
-export function Help({ children }: { children: string }) {
-  return (
-    <p className="help flex items-start gap-2">
-      <span className="mt-0.5">{Icons.help()}</span>
-      <span>{children}</span>
-    </p>
   );
 }

@@ -393,6 +393,19 @@ export type HistoryRow = {
   outcome: ActivityOutcome;
   bytesSaved: number;
   createdAt: number;
+  href?: string;
+};
+
+export type ActivityWeek = { weekStart: number; bytesSaved: number; files: number };
+
+export type ActivityOutcomes = {
+  kept: number;
+  discarded: number;
+  flagged: number;
+  failed: number;
+  cancelled: number;
+  searched: number;
+  removed: number;
 };
 
 export type HardwareInfo = {
@@ -417,6 +430,8 @@ export type HomePayload = {
   errors: number;
   recent: HistoryRow[];
   status: string;
+  savingsByWeek: ActivityWeek[];
+  outcomes: ActivityOutcomes;
 };
 
 export type WidgetPayload = {

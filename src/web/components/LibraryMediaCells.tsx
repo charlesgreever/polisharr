@@ -1,9 +1,17 @@
 import { formatSize, type LibraryRow } from "../api";
 import { libraryRowView } from "../library-row";
 import { RowActions } from "./RowActions";
-import { Pill, PillList, PlanStatus, VideoLabel } from "./ui";
+import { Pill, PillList, PlanStatus, Tip, VideoLabel } from "./ui";
 
-export function LibraryMediaHeaders({ onQuality, onSize }: { onQuality?: () => void; onSize?: () => void }) {
+export function LibraryMediaHeaders({
+  onQuality,
+  onSize,
+  actionsTip,
+}: {
+  onQuality?: () => void;
+  onSize?: () => void;
+  actionsTip?: string;
+}) {
   return (
     <>
       <th>{onQuality ? <button type="button" onClick={onQuality}>Quality</button> : "Quality"}</th>
@@ -12,7 +20,12 @@ export function LibraryMediaHeaders({ onQuality, onSize }: { onQuality?: () => v
       <th>Audio</th>
       <th>Subtitles</th>
       <th>Plan</th>
-      <th>Actions</th>
+      <th>
+        <span className="inline-flex items-center gap-1">
+          Actions
+          {actionsTip ? <Tip label="Actions">{actionsTip}</Tip> : null}
+        </span>
+      </th>
     </>
   );
 }

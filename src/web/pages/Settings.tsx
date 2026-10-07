@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api, type ClusterNode, type Exclusion, type FirstRun, type Hardware, type PlaybackSettingsPayload, type SettingsPayload } from "../api";
-import { Help, PageHead } from "../components/Shell";
+import { PageHead } from "../components/Shell";
+import { Pill, Tip } from "../components/ui";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { EncodeSettings } from "../components/EncodeSettings";
 import { NotificationSettings } from "../components/NotificationSettings";
@@ -106,14 +107,42 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
 
   if (!data) return <p>Loading settings…</p>;
 
+  const sections: Array<[string, string]> = [
+    ["language", "Language and review"],
+    ["account", "Account"],
+    ["caps", "Size caps"],
+    ["encode", "Encode"],
+    ["alerts", "Alerts"],
+    ["nodes", "Nodes"],
+    ["exclusions", "Exclusions"],
+    ["connections", "Connections"],
+    ...(playback && playback.connections.length > 0 ? [["playback", "Jellyfin playback"] as [string, string]] : []),
+    ["webhooks", "Webhooks"],
+    ["widget", "Homepage widget"],
+    ["agent", "AI agent access"],
+  ];
+
   return (
-    <section className="max-w-3xl space-y-6">
-      <div>
-        <PageHead title="Settings" />
-        <Help>
-          Preferred language decides which audio and subtitle tracks stay. Confirm it once before any optimize. The review folder is where finished copies wait for Keep; it must sit outside your movie and show libraries. An agent token (MCP) lets an assistant on this network search the library and queue sidecar encodes; Keep still needs the word KEEP.
-        </Help>
-      </div>
+    <section className="lg:flex lg:items-start lg:gap-8">
+      <nav aria-label="Settings sections" className="mb-4 flex gap-2 overflow-x-auto pb-1 lg:sticky lg:top-4 lg:mb-0 lg:block lg:w-52 lg:shrink-0 lg:space-y-1 lg:overflow-visible lg:pb-0">
+        {sections.map(([id, label]) => (
+          <a
+            key={id}
+            href={`#${id}`}
+            onClick={(event) => {
+              const target = document.getElementById(id);
+              if (!target) return;
+              event.preventDefault();
+              target.scrollIntoView({ block: "start" });
+            }}
+            className="shrink-0 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-brand-300 dark:border-gray-800 dark:bg-white/[0.03] dark:text-gray-300 lg:block lg:rounded-lg lg:border-transparent lg:bg-transparent lg:px-2 lg:py-1.5 lg:text-sm dark:lg:bg-transparent"
+          >
+            {label}
+          </a>
+        ))}
+      </nav>
+      <div className="min-w-0 max-w-4xl flex-1 space-y-6">
+      <PageHead title="Settings" />
       {!firstRun.complete && (
         <div className="glass border-amber-400/30 p-4 text-sm">
           First-run is incomplete.
@@ -122,16 +151,17 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           {!firstRun.hasArr && " Connect an enabled Radarr or Sonarr."}
         </div>
       )}
-      <div className="glass space-y-4 p-5">
+      <div id="language" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="font-semibold">Language and review</h2>
-        <Field label="Preferred language">
+        <p className="m-0 text-sm text-muted">Language, the review folder, and how a finished file is written.</p>
+        <Field label="Preferred language" tip="Preferred language decides which audio and subtitle tracks stay. Confirm it once before any optimize.">
           <input className={FIELD_CONTROL} value={data.preferredLanguage} onChange={(e) => setData({ ...data, preferredLanguage: e.target.value })} />
         </Field>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={data.languageConfirmed} onChange={(e) => setData({ ...data, languageConfirmed: e.target.checked })} />
           I confirm this language before any track cleanup
         </label>
-        <Field label="Review folder">
+        <Field label="Review folder" tip="The review folder is where finished copies wait for Keep. It must sit outside your movie and show libraries.">
           <input className={FIELD_CONTROL} value={data.reviewPath} onChange={(e) => setData({ ...data, reviewPath: e.target.value })} />
         </Field>
         {data.storage?.note && <p className="help m-0">{data.storage.note}</p>}
@@ -139,7 +169,7 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           <input type="checkbox" checked={data.localAuthBypass} onChange={(e) => setData({ ...data, localAuthBypass: e.target.checked })} />
           Allow local addresses without a password
         </label>
-        <Field label="Write finished files">
+        <Field label="Write finished files" tip="A sidecar is the new file waiting in Review. Keep replaces the library file with it. Direct write replaces the library file after an integrity check.">
           <select className={FIELD_CONTROL} value={data.writeMode ?? "sidecar"} onChange={(e) => {
             const value = e.target.value;
             if (value !== "sidecar" && value !== "direct") return;
@@ -165,9 +195,11 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           Save settings
         </button>
       </div>
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">Account</h2>
-        <p className="help m-0">Change the sign-in name and password. Polisharr signs you in again after a password change.</p>
+      <div id="account" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          Account
+          <Tip label="Account">Change the sign-in name and password. Polisharr signs you in again after a password change.</Tip>
+        </h2>
         <Field label="Username">
           <input className={FIELD_CONTROL} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
         </Field>
@@ -187,9 +219,12 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           Save username and password
         </button>
       </div>
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">Size caps (GB per hour)</h2>
-        <p className="help m-0">Automatic Suggestions transcode when the file is above the cap for its kind.</p>
+      <div id="caps" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          Size caps (GB per hour)
+          <Tip label="Size caps">Automatic Suggestions transcode when the file is above the cap for its kind.</Tip>
+        </h2>
+        <p className="m-0 text-sm text-muted">Size caps are GB per hour.</p>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           {SIZE_CAP_GRID.map((column) => (
             <div key={column.heading} className="space-y-3">
@@ -236,11 +271,14 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           />
           Assign a Polisharr profile after an eligible video transcode
         </label>
-        <button className="btn" type="button" onClick={() => void api.syncProfiles().then((r) => setMsg(r.results.map((x) => `${x.created.length} created, ${x.updated.length} updated`).join(" · ") || "Profiles synced.")).catch((e: Error) => setMsg(e.message))}>
-          Sync quality profiles
-        </button>
-        <p className="help">Sync creates or repairs Polisharr-named profiles without changing other profiles or global quality-size limits. Auto-assign applies only after a video transcode and never starts a search. Sonarr assigns the profile to the whole series.</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="btn" type="button" onClick={() => void api.syncProfiles().then((r) => setMsg(r.results.map((x) => `${x.created.length} created, ${x.updated.length} updated`).join(" · ") || "Profiles synced.")).catch((e: Error) => setMsg(e.message))}>
+            Sync quality profiles
+          </button>
+          <Tip label="Sync quality profiles">Sync creates or repairs Polisharr-named profiles without changing other profiles or global quality-size limits. Auto-assign applies only after a video transcode and never starts a search. Sonarr assigns the profile to the whole series.</Tip>
+        </div>
       </div>
+      <div id="encode" className="scroll-mt-24">
       <EncodeSettings
         data={data}
         hardwareLabel={hw ? `${hardwareBackendLabel(hw.backend)}${hw.av1 ? ", AV1 encoder listed" : ", AV1 encoder not listed"}` : "checking…"}
@@ -248,6 +286,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         onChange={(patch) => setData({ ...data, ...patch })}
         onSave={save}
       />
+      </div>
+      <div id="alerts" className="scroll-mt-24">
       <NotificationSettings
         alerts={data.alerts}
         onSaved={(message) => {
@@ -255,13 +295,14 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           load();
         }}
       />
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">Nodes</h2>
-        <p className="help m-0">
-          This computer is one encode node: a GPU box that can run optimize jobs. Settings, the library, Review, and Keep stay here. On the always-on host set POLISHARR_ROLE=master so another GPU box can join. Generate a cluster token, then set that token on the worker. The token is shown once. Remove a worker that will not come back. An online worker joins again on its next hello. Move or cancel that node’s waiting jobs first.
-        </p>
+      </div>
+      <div id="nodes" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          Nodes
+          <Tip label="Nodes">This computer is one encode node: a GPU box that can run optimize jobs. Settings, the library, Review, and Keep stay here. On the always-on host set POLISHARR_ROLE=master so another GPU box can join. Generate a cluster token, then set that token on the worker. The token is shown once. Remove a worker that will not come back. An online worker joins again on its next hello. Move or cancel that node’s waiting jobs first.</Tip>
+        </h2>
         {nodes.length > 1 && (
-          <Field label="Default encode node">
+          <Field label="Default encode node" tip="New jobs run on the default encode node. A named default waits for that machine. Any open node uses the next free capable slot. Jobs already in Queue keep the node they were given.">
             <select
               className={FIELD_CONTROL}
               value={data.defaultEncodeNodeId === ANY_OPEN_NODE_ID ? ANY_OPEN_NODE_ID : (data.defaultEncodeNodeId || data.thisNodeId || "")}
@@ -283,17 +324,16 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
             </select>
           </Field>
         )}
-        {nodes.length > 1 && (
-          <p className="help m-0">
-            New jobs run on the default encode node. A named default waits for that machine. Any open node uses the next free capable slot. Jobs already in Queue keep the node they were given.
-          </p>
-        )}
-        <ul className="space-y-3 text-sm">
+        <ul className="grid grid-cols-1 gap-3 text-sm lg:grid-cols-2">
           {nodes.map((node) => (
             <li key={node.id} className="space-y-2 rounded-lg border border-gray-200 bg-white px-3 py-3 dark:border-gray-800 dark:bg-white/[0.03]">
-              <div className="font-medium text-ink">{node.name}</div>
-              <div className="text-muted">{node.roleLabel} · {node.hardwareLabel} · {node.online ? "Online" : "Offline"}{node.enabled ? "" : " · Drained"}{nodeBuildText(node)}</div>
-              <div className="text-muted">{node.runningCount ?? 0} / {node.concurrency}{node.runningTitles?.length ? ` · ${node.runningTitles.join(", ")}` : ""}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="font-medium text-ink">{node.name}</div>
+                <Pill tone={node.online ? "good" : "neutral"}>{node.online ? "Online" : "Offline"}</Pill>
+                {!node.enabled && <Pill tone="warn">Drained</Pill>}
+              </div>
+              <div className="text-muted">{node.roleLabel} · {node.hardwareLabel}{nodeBuildText(node)}</div>
+              <div className="font-mono text-sm tabular-nums text-ink">{node.runningCount ?? 0} / {node.concurrency}{node.runningTitles?.length ? ` · ${node.runningTitles.join(", ")}` : ""}</div>
               <div className="flex flex-wrap items-end gap-3">
                 <label className="block text-sm">
                   <span className="mb-1 block font-medium text-muted">Concurrent jobs</span>
@@ -369,9 +409,11 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           {data.hasClusterToken ? "Rotate cluster token" : "Generate cluster token"}
         </button>
       </div>
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">Suggestion exclusions</h2>
-        <p className="help m-0">An exclusion hides matching files from Suggestions. It does not delete files or cancel queued work.</p>
+      <div id="exclusions" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          Suggestion exclusions
+          <Tip label="Suggestion exclusions">An exclusion hides matching files from Suggestions. It does not delete files or cancel queued work.</Tip>
+        </h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-[12rem_1fr_auto] sm:items-end">
           <Field label="Kind">
             <select className={FIELD_CONTROL} value={exclusion.kind} onChange={(event) => {
@@ -401,8 +443,9 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           </li>)}
         </ul>
       </div>
-      <div className="glass space-y-4 p-5">
+      <div id="connections" className="glass scroll-mt-24 space-y-4 p-5">
         <h2 className="font-semibold">Connections</h2>
+        <p className="m-0 text-sm text-muted">Radarr, Sonarr, Plex, and Jellyfin.</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Kind">
             <select className={FIELD_CONTROL} value={inst.kind} onChange={(e) => {
@@ -487,10 +530,11 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         <RefreshLibrary />
       </div>
       {playback && playback.connections.length > 0 && (
-        <div className="glass space-y-4 p-5">
-          <h2 className="font-semibold">Jellyfin playback</h2>
-          <p className="help m-0">{PLAYBACK_OBSERVE_HELP}</p>
-          <p className="help m-0">{PLAYBACK_PRIORITY_HELP}</p>
+        <div id="playback" className="glass scroll-mt-24 space-y-4 p-5">
+          <h2 className="flex items-center gap-1 font-semibold">
+            Jellyfin playback
+            <Tip label="Jellyfin playback">{PLAYBACK_OBSERVE_HELP}</Tip>
+          </h2>
           {playback.connections.map((row) => {
             const arrs = data.instances.filter((inst) => inst.kind === "radarr" || inst.kind === "sonarr");
             return (
@@ -539,8 +583,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                     onChange={(event) => void savePlaybackConnection(row.connectionId, { protectNodes: event.target.checked })}
                   />
                   {PLAYBACK_PRIORITY_LABEL}
+                  <Tip label={PLAYBACK_PRIORITY_LABEL}>{`${PLAYBACK_PRIORITY_HELP} ${PLAYBACK_NODE_HELP}`}</Tip>
                 </label>
-                <p className="help m-0">{PLAYBACK_NODE_HELP}</p>
                 <div className="flex flex-wrap gap-3 text-sm">
                   {nodes.map((node) => (
                     <label key={node.id} className="flex items-center gap-2">
@@ -568,8 +612,10 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
                   {PLAYBACK_REPLACEMENT_LABEL}
                 </label>
                 <div>
-                  <div className="text-sm font-medium text-muted">{PLAYBACK_COVERAGE_LABEL}</div>
-                  <p className="help m-0">{PLAYBACK_COVERAGE_HELP}</p>
+                  <div className="flex items-center gap-1 text-sm font-medium text-muted">
+                    {PLAYBACK_COVERAGE_LABEL}
+                    <Tip label={PLAYBACK_COVERAGE_LABEL}>{PLAYBACK_COVERAGE_HELP}</Tip>
+                  </div>
                   <div className="mt-2 flex flex-wrap gap-3 text-sm">
                     {arrs.map((inst) => (
                       <label key={inst.id} className="flex items-center gap-2">
@@ -614,16 +660,14 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           </button>
         </div>
       )}
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">Radarr and Sonarr webhooks</h2>
-        <p className="help">
-          Polisharr can learn about a finished download as soon as Radarr or Sonarr imports it, instead of waiting for the next 15-minute sync. The webhook itself does not start an encode. Turn on Queue new Arr imports automatically if you want a matching suggestion queued as a sidecar.
-        </p>
-        <p className="text-sm">
+      <div id="webhooks" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          Radarr and Sonarr webhooks
+          <Tip label="Radarr and Sonarr webhooks">Polisharr can learn about a finished download as soon as Radarr or Sonarr imports it, instead of waiting for the next 15-minute sync. The webhook itself does not start an encode. Turn on Queue new Arr imports automatically if you want a matching suggestion queued as a sidecar.</Tip>
+        </h2>
+        <p className="flex flex-wrap items-center gap-1 text-sm">
           URL: <code>{typeof window !== "undefined" ? `${window.location.origin}/api/hooks/arr` : "/api/hooks/arr"}</code>
-        </p>
-        <p className="help">
-          On the Arr Docker network use <code>http://polisharr:7373/api/hooks/arr</code>. In Connect, enable On Import, On Upgrade, and On Rename. Paste the token as header <code>X-Api-Key</code>, or as the Connect password. A query <code>?apikey=</code> works if the form only has a URL; that puts the token in access logs.
+          <Tip label="Webhook URL">On the Arr Docker network use http://polisharr:7373/api/hooks/arr. In Connect, enable On Import, On Upgrade, and On Rename. Paste the token as header X-Api-Key, or as the Connect password. A query apikey works if the form only has a URL; that puts the token in access logs.</Tip>
         </p>
         {webhookToken ? (
           <SecretOnce
@@ -649,11 +693,11 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           {data.hasWebhookToken ? "Rotate webhook token" : "Generate webhook token"}
         </button>
       </div>
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">Homepage widget</h2>
-        <p className="help">
-          Homepage can poll Polisharr for running title, queued, review, suggestions, and errors. The key is shown once.
-        </p>
+      <div id="widget" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          Homepage widget
+          <Tip label="Homepage widget">Homepage can poll Polisharr for running title, queued, review, suggestions, and errors. The key is shown once.</Tip>
+        </h2>
         {widgetKey ? (
           <SecretOnce
             label="Key (shown once)"
@@ -678,11 +722,11 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
           {data.hasWidgetKey ? "Rotate widget key" : "Generate widget key"}
         </button>
       </div>
-      <div className="glass space-y-4 p-5">
-        <h2 className="font-semibold">AI agent access</h2>
-        <p className="help">
-          Mint a token so an agent such as Grok can call Polisharr over MCP. Point the agent at the master URL path /mcp with this token. GPU workers do not serve MCP. Queue writes a sidecar; the library file does not change until Keep. Keep and Discard require the confirm words KEEP and DISCARD.
-        </p>
+      <div id="agent" className="glass scroll-mt-24 space-y-4 p-5">
+        <h2 className="flex items-center gap-1 font-semibold">
+          AI agent access
+          <Tip label="AI agent access">An agent token (MCP) lets an assistant on this network search the library and queue sidecar encodes. Keep still needs the word KEEP. Point the agent at the master URL path /mcp. GPU workers do not serve MCP. Discard needs the word DISCARD.</Tip>
+        </h2>
         {mcpToken ? (
           <SecretOnce
             label="Token (shown once)"
@@ -708,14 +752,18 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         </button>
       </div>
       {msg && <p className="ok text-sm">{msg}</p>}
+      </div>
     </section>
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, tip, children }: { label: string; tip?: string; children: ReactNode }) {
   return (
     <label className="block space-y-1.5 text-sm">
-      <span className="font-medium text-muted">{label}</span>
+      <span className="flex items-center gap-1 font-medium text-muted">
+        {label}
+        {tip ? <Tip label={label}>{tip}</Tip> : null}
+      </span>
       {children}
     </label>
   );

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type LibraryRow } from "../api";
-import { Help, PageHead } from "../components/Shell";
+import { PageHead } from "../components/Shell";
 import { RefreshLibrary } from "../components/RefreshLibrary";
 import { LibraryHealthPills } from "../components/LibraryHealthPills";
 import { LibraryMediaCells, LibraryMediaHeaders } from "../components/LibraryMediaCells";
@@ -139,7 +139,6 @@ export function MoviesPage() {
       <PageHead title="Movies">
         <RefreshLibrary onDone={() => void load(true)} />
       </PageHead>
-      <Help>Each row is one movie. Encode target chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Open a title for custom work. Queue still uses the automatic suggestion. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo. The header counts every movie, not just this page. Show All movies, or Needs work for suggestions, unread files, and files Polisharr could not read.</Help>
       {libraryTotal > 0 && (
         <div className="mt-4 flex flex-col gap-2 text-sm text-muted">
           <div className="flex flex-wrap items-center gap-2">
@@ -169,7 +168,11 @@ export function MoviesPage() {
               <tr>
                 <th className="w-12">Poster</th>
                 <th><button type="button" onClick={() => setSort("title")}>Title</button></th>
-                <LibraryMediaHeaders onQuality={() => setSort("quality")} onSize={() => setSort("size")} />
+                <LibraryMediaHeaders
+                  onQuality={() => setSort("quality")}
+                  onSize={() => setSort("size")}
+                  actionsTip="Encode target chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Queue uses the automatic suggestion. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo."
+                />
               </tr>
             </thead>
             <tbody>

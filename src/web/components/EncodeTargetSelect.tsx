@@ -1,22 +1,28 @@
 import { FIELD_CONTROL } from "../settings-copy";
+import { Tip } from "./ui";
 
 export function EncodeTargetSelect({
   value,
   houseTarget,
   av1Available,
   disabled,
+  tip,
   onChange,
 }: {
   value: "hevc" | "av1" | null;
   houseTarget: "hevc" | "av1";
   av1Available: boolean;
   disabled?: boolean;
+  tip?: string;
   onChange: (value: "hevc" | "av1" | null) => void;
 }) {
   const houseLabel = houseTarget === "av1" && av1Available ? "AV1" : "HEVC";
   return (
     <label className="block min-w-[10rem] text-sm">
-      <span className="mb-1 block font-medium text-muted">Encode target</span>
+      <span className="mb-1 flex items-center gap-1 font-medium text-muted">
+        Encode target
+        {tip ? <Tip label="Encode target">{tip}</Tip> : null}
+      </span>
       <select
         className={FIELD_CONTROL}
         value={value ?? ""}

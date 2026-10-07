@@ -1517,6 +1517,83 @@ describe("public HTTP behavior", () => {
     expect(res.status).toBe(401);
   });
 
+  it("links history titles that are still in the library and charts kept savings from the last 12 weeks", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await readyToQueue(ctx);
+    const now = Date.now();
+    const week = 7 * 24 * 60 * 60 * 1000;
+    const item = {
+      instanceId: "radarr-a",
+      arrSeriesId: null as number | null,
+      arrEpisodeFileId: null as number | null,
+      showTitle: null as string | null,
+      season: null as number | null,
+      episode: null as number | null,
+      episodeTitle: null as string | null,
+      sizeBytes: 1_000,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [] as string[],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    };
+    ctx.store.upsertItem({
+      ...item,
+      id: "home-film",
+      arrId: 41,
+      type: "movie",
+      title: "Home Film",
+      path: "/movies/home-film.mkv",
+    });
+    ctx.store.upsertItem({
+      ...item,
+      id: "home-ep",
+      arrId: 42,
+      arrSeriesId: 7,
+      arrEpisodeFileId: 42,
+      type: "episode",
+      title: "Home Show",
+      showTitle: "Home Show",
+      season: 1,
+      episode: 2,
+      episodeTitle: "Pilot",
+      path: "/tv/home-show.mkv",
+    });
+    ctx.store.addHistory("home-film", "kept", 2_000_000_000, now);
+    ctx.store.addHistory("home-film", "kept", 9_000_000_000, now - 13 * week);
+    ctx.store.addHistory("home-ep", "discarded", 0, now - 2_000);
+    ctx.store.addHistory("gone-title", "failed", 0, now - 3_000);
+
+    const home = await (await ctx.app.app.request("/api/home", { headers })).json() as {
+      filesOptimized: number;
+      spaceSavedBytes: number;
+      savingsByWeek: Array<{ weekStart: number; bytesSaved: number; files: number }>;
+      outcomes: { kept: number; discarded: number; failed: number; flagged: number; cancelled: number; searched: number; removed: number };
+      recent: Array<{ displayTitle: string; href?: string }>;
+    };
+    expect(home.filesOptimized).toBe(2);
+    expect(home.spaceSavedBytes).toBe(11_000_000_000);
+    expect(home.savingsByWeek).toHaveLength(12);
+    expect(home.savingsByWeek.reduce((sum, row) => sum + row.bytesSaved, 0)).toBe(2_000_000_000);
+    expect(home.savingsByWeek.at(-1)).toMatchObject({ bytesSaved: 2_000_000_000, files: 1 });
+    expect(home.savingsByWeek[0]!.weekStart + 11 * week).toBe(home.savingsByWeek[11]!.weekStart);
+    expect(home.outcomes).toMatchObject({ kept: 1, discarded: 1, failed: 1, flagged: 0, cancelled: 0, searched: 0, removed: 0 });
+    expect(home.recent).toEqual(expect.arrayContaining([
+      expect.objectContaining({ displayTitle: "Home Film", href: "/movies/home-film" }),
+      expect.objectContaining({ href: "/series/episodes/home-ep" }),
+    ]));
+    expect(home.recent.find((row) => row.displayTitle === "gone-title")?.href).toBeUndefined();
+
+    const history = await (await ctx.app.app.request("/api/history", { headers })).json() as {
+      items: Array<{ displayTitle: string; href?: string }>;
+    };
+    expect(history.items.find((row) => row.displayTitle === "Home Film")?.href).toBe("/movies/home-film");
+    expect(history.items.find((row) => row.href === "/series/episodes/home-ep")).toBeTruthy();
+    expect(history.items.find((row) => row.displayTitle === "gone-title")?.href).toBeUndefined();
+  });
+
   it("does not trust client address headers when proxy trust is disabled", async () => {
     const ctx = await setup();
     apps.push(ctx);

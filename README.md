@@ -1,5 +1,7 @@
 # Polisharr
 
+![Polisharr, a companion for Radarr and Sonarr. Smaller files, cleaner tracks, and the library file stays until you Keep.](docs/brand/readme-banner.png)
+
 Polisharr is a companion container for Radarr and Sonarr. It inspects the same library those apps already know, suggests smaller HEVC (or AV1) files and cleaner tracks, and writes a sidecar you Keep or Discard before the library file changes. It can listen to an untagged soundtrack or read untagged subtitles to name the language, and it can watch Jellyfin so a player conversion is visible and playback can hold encodes and file replacement. Custom title plans, ISO remux, and optional direct write are also supported.
 
 This tree is a greenfield rewrite. Do not import the previous application code.

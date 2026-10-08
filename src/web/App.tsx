@@ -16,13 +16,18 @@ import { TitlePage } from "./pages/Title";
 import { LoginPage } from "./pages/Login";
 import { SetupPage } from "./pages/Setup";
 import { WorkerPage } from "./pages/Worker";
+import { OgImagePage } from "./pages/OgImage";
 
 export function App() {
+  const ogImage = window.location.pathname === "/og-image";
   const [auth, setAuth] = useState<{ authenticated: boolean; firstRun: FirstRun; version?: string; role?: "standalone" | "master" | "worker" } | null>(null);
 
   useEffect(() => {
+    if (ogImage) return;
     void api.status().then(setAuth).catch(() => setAuth({ authenticated: false, firstRun: emptyFirst() }));
-  }, []);
+  }, [ogImage]);
+
+  if (ogImage) return <OgImagePage />;
 
   if (!auth) {
     return <main className="auth-page" />;

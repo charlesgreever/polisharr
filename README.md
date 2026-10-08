@@ -1,11 +1,11 @@
 # Polisharr
 
-Polisharr is a companion container for Radarr and Sonarr. It inspects the same library those apps already know, suggests smaller HEVC (or AV1) files and cleaner tracks, and writes a sidecar you Keep or Discard before the library file changes. Custom title plans, ISO remux, and optional direct write are also supported.
+Polisharr is a companion container for Radarr and Sonarr. It inspects the same library those apps already know, suggests smaller HEVC (or AV1) files and cleaner tracks, and writes a sidecar you Keep or Discard before the library file changes. It can listen to an untagged soundtrack or read untagged subtitles to name the language, and it can watch Jellyfin so a player conversion is visible and playback can hold encodes and file replacement. Custom title plans, ISO remux, and optional direct write are also supported.
 
 This tree is a greenfield rewrite. Do not import the previous application code.
 
 **PRD:** [docs/v2 prd.md](docs/v2%20prd.md) (v2). The rewrite PRD is [docs/prd.md](docs/prd.md).
-**Plan:** remaining work is [plans/review-follow-up.md](plans/review-follow-up.md). Multi-node (one master, extra GPU boxes): [plans/multi-node.md](plans/multi-node.md). Same-volume Keep and clone: [plans/native-fs-copy.md](plans/native-fs-copy.md). Shipped v2 work: [plans/v2-implementation-plan.md](plans/v2-implementation-plan.md). Earlier review-gap work: [plans/review-gap-remediation.md](plans/review-gap-remediation.md).
+**Plans:** multi-node (one master, extra GPU boxes): [plans/multi-node.md](plans/multi-node.md). Same-volume Keep and clone: [plans/native-fs-copy.md](plans/native-fs-copy.md). Jellyfin playback and Review clips: [plans/playback-and-review.md](plans/playback-and-review.md). Shipped v2 work: [plans/v2-implementation-plan.md](plans/v2-implementation-plan.md). Finished follow-ups: [plans/review-follow-up.md](plans/review-follow-up.md) and [plans/review-gap-remediation.md](plans/review-gap-remediation.md).
 **Engineering standard:** [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md)
 **Prose standard:** [CODING_STANDARDS.md](CODING_STANDARDS.md)
 
@@ -14,24 +14,27 @@ This tree is a greenfield rewrite. Do not import the previous application code.
 - Syncs movies from Radarr and episodes from Sonarr over their APIs
 - Refreshes Arr libraries at startup, every 15 minutes, on request, and when Radarr or Sonarr posts a webhook after import
 - Opens the network path each Arr reports
-- Inspects MKV with ffprobe and ISO disc images with ffmpeg. Blu-ray remux copies the feature video and usable audio, copies playlist languages onto the Matroska file, ignores dummy AC3 decode errors, and skips audio-only menu listings. A BR-DISK image is opened with the bluray protocol, not as a raw file. A stale ISO listing (the file treated as a lone AC3 stream) is listed again before the next remux. Titles with no file yet stay off Errors. Optional Suggestions can convert ISO to MKV. A title whose only audio is not your preferred language can ask Radarr or Sonarr to search again after you confirm.
+- Inspects MKV with ffprobe and ISO disc images with ffmpeg. Blu-ray remux copies the feature video and usable audio, copies playlist languages onto the Matroska file, ignores dummy AC3 decode errors, and skips audio-only menu listings. A BR-DISK image is opened with the bluray protocol. A stale ISO listing (the file treated as a lone AC3 stream) is listed again before the next remux. Titles with no file yet stay off Errors. A file that ends well before its inspected duration is rejected and left off Review. Optional Suggestions can convert ISO to MKV. A title whose only audio is not your preferred language can ask Radarr or Sonarr to search again after you confirm.
 - Flags files over the GB-per-hour cap, extra languages, and missing AAC stereo
 - Can suggest converting MP4 files to MKV before a hardware encode, or as remux-only work
 - Filters Suggestions by media facts or warning state and manages path, profile, tag, and title exclusions
-- Lets you queue a custom plan from a title page: track edits, remux, size mode, or encoder quality. The title page shows file name and path. Queue stays off until the plan differs from the source. AV1 appears when an encode node can encode it. Untagged audio can **Identify language** from a 45-second clip when `WHISPER_LID` is set. Untagged text subtitles can identify language from a few minutes of words (no extra install). Untagged PGS can identify language from a short OCR sample when `PGS_OCR` is set. A weak sample stays untagged and offers another start time. The library file does not change until Keep.
-- Optional language identification: the image ships `/usr/local/bin/whisper-lid` (faster-whisper, tiny model). Set `WHISPER_LID` to that path. The first listen downloads the model into `/config/whisper`. CUDA is used when an NVIDIA device is present; otherwise the clip is identified on CPU. If `WHISPER_LID` is unset, the title page does not offer audio Identify language. PGS Identify language uses `/usr/local/bin/pgs-ocr` (Tesseract OSD+English on a 180-second sample). Set `PGS_OCR` to that path. It does not convert the PGS track to SRT.
-- Home shows a Status strip, large files-optimized and space-saved tiles, and links into Suggestions, Queue, Review, and Errors. Direct write counts in the tallies the same way Keep does.
+- Lets you queue a custom plan from a title page: track edits, remux, size mode, or encoder quality. The title page shows file name and path. Queue stays off until the plan differs from the source. AV1 appears when an encode node can encode it. The library file does not change until Keep.
+- Names an untagged soundtrack by listening to a 45-second clip, and an untagged subtitle by reading three minutes of words. Picture subtitles (PGS) use a short OCR sample. You confirm the language before it is saved. A weak sample stays untagged. A file whose only soundtrack is untagged keeps that track. Details: [Identify Unknown Languages](#identify-unknown-languages).
+- Watches each Jellyfin connection you opt in, and lists player conversions on Playback. It can hold new encodes on the GPUs you map, and wait to replace a file someone is watching. Plex connections refresh the library after Keep. Details: [Jellyfin Playback](#jellyfin-playback).
+- Movie and episode rows can Queue, Force a suggestion, add stereo, Exempt a file from the size cap, ask Radarr or Sonarr to replace the file, or stop tracking that title. Two episodes that share one file share one job and one Review card.
+- Suggestions can queue the next 10 in the current sort, queue every match in the current search and filters, or queue the rows you check. Titles already queued or in Review are skipped.
+- Home shows a Status strip, files-optimized and space-saved tiles, a 12-week space-saved chart, and links into Suggestions, Queue, Review, and Errors. History lists finished work. Direct write counts in the tallies the same way Keep does.
 - Settings uses stacked labels and everyday size-cap names. Title-page audio actions keep a fixed-width dropdown so Keep and Replace with downmix do not jump.
 - Series headers show episode total, how many are healthy, and how many still have suggestions. Movies shows the same three counts for the whole Radarr library, not just the loaded page.
 - Lets a movie or a whole show pick HEVC or AV1 for automatic Suggestions without changing the house Encode Target. A series header can Prefer stereo (replace surround with a downmix and discard included stereo, including 5.1 kids shows) or Keep surround.
 - Suggestion, Errors, and Queue titles open the same detail page as Movies and Series
-- Queue pins running jobs in Working now, then waiting jobs, then finished jobs, so a long batch does not hide the encode in progress
+- Queue pins running jobs in Working now, then waiting jobs, then finished jobs, so a long batch does not hide the encode in progress. Hold jobs outside off-peak keeps new work queued until that window. Run now starts one of those jobs outside the window, and still waits while Jellyfin playback protection is on.
 - Size-mode encode reserves room for copied audio. A file within 5% of its GB-per-hour cap counts as meeting it.
 - Muxes tracks with MKVtoolnix and encodes video with the GPU or Mac media engine you pass in. mkvmerge and ffmpeg run with a UTF-8 locale so titles such as 烧烤 are not truncated.
 - Writes a sidecar for Review by default, or replaces the library file after an integrity check when **Write finished files** is Direct write. Waiting bulk jobs use that setting when they start. Queue new Arr imports uses the choice under that checkbox: a Review sidecar, that same setting, or a direct replace after the integrity check. Keep then asks Radarr or Sonarr to refresh media info and rename the library file so tokens such as `EAC3 5.1` or `H264` match the new audio and video.
-- Lets you Keep one sidecar, Keep selected, or Keep all waiting sidecars after a confirm. Flagged results can queue a smaller encode. Review shows duration and GB per hour. Keep selected reports how many were skipped.
+- Lets you Keep one sidecar, Keep selected, or Keep all waiting sidecars after a confirm. Flagged results can queue a smaller encode. Review shows duration and GB per hour. Keep selected reports how many were skipped. Compare clips plays matching samples of the original and the finished file after you pick a position. Opening Review does not start that work. The browser pair is a scaled picture with AAC stereo (surround downmixed) and HDR shown as SDR. The pair supports the Keep decision.
 - Checks review-volume free space before work. After restart, interrupted jobs return to the queue. Interrupted Keep cards return to Review so you can retry or discard them. A Keep that already replaced the library file counts as kept.
-- Can create named Arr quality profiles from the current size caps without starting a search
+- Can create or repair Polisharr-named Arr quality profiles from the current size caps. Auto-assign applies only after a video transcode and never starts a search.
 
 ## Installation
 
@@ -44,7 +47,7 @@ git clone https://github.com/charlesgreever/polisharr.git polisharr
 cd polisharr
 ```
 
-The running image is `ghcr.io/charlesgreever/polisharr:latest` (version tags such as `0.2.0` match GitHub releases). GitHub Actions builds that image on each `v*` tag.
+The running image is `ghcr.io/charlesgreever/polisharr:latest` (a version tag such as `v0.2.57` matches that GitHub release). GitHub Actions builds that image when a `v*.*.*` tag is pushed.
 
 ### 2. Copy and edit compose
 
@@ -73,7 +76,7 @@ Recreate the container after you change GPU settings. To compile this tree inste
 
 ### 4. First run
 
-Open `http://localhost:7373` (or the host address you published). Create the admin account. Polisharr then collects preferred language, a review folder (where finished copies wait for Keep, outside movie and show libraries), and at least one enabled Radarr or Sonarr. Put that review folder on the **same share** as Movies and TV so Keep can rename instead of copying the whole file back over the network. Plex and Jellyfin can wait; add them later in Settings. Optional: add a webhook so new imports show up immediately ([Webhooks from Radarr and Sonarr](#webhooks-from-radarr-and-sonarr)). The sidebar shows the running version from `package.json`.
+Open `http://localhost:7373` (or the host address you published). Create the admin account. Polisharr then collects preferred language, a review folder (where finished copies wait for Keep, outside movie and show libraries), and at least one enabled Radarr or Sonarr. Put that review folder on the **same share** as Movies and TV so Keep can rename on that volume. Plex and Jellyfin library refresh can wait; add them later in Settings. Jellyfin playback observation stays off until you turn it on ([Jellyfin Playback](#jellyfin-playback)). Optional: add a webhook so new imports show up immediately ([Webhooks from Radarr and Sonarr](#webhooks-from-radarr-and-sonarr)). The sidebar shows the running version from `package.json`.
 
 Under **Default suggestion operations**, **Convert MP4 to MKV** is off by default. When enabled, Polisharr uses `mkvmerge` to create an MKV before any hardware encode. An MP4 that needs no other work gets a remux-only suggestion.
 
@@ -89,6 +92,8 @@ Under **Default suggestion operations**, **Convert MP4 to MKV** is off by defaul
 | `POLISHARR_NODE_NAME` | hostname | Label in Settings → Nodes and the Encode node picker |
 | `POLISHARR_MASTER_URL` | unset | Worker only: URL of the master, for example `http://192.168.1.10:7373` |
 | `POLISHARR_CLUSTER_TOKEN` | unset | Shared secret. Generate it on the master; set the same value on each worker |
+| `WHISPER_LID` | `/usr/local/bin/whisper-lid` in compose and the image | Command that listens to an untagged soundtrack. Unset hides audio Identify language |
+| `PGS_OCR` | `/usr/local/bin/pgs-ocr` in compose and the image | Command that reads a PGS subtitle sample. Unset leaves picture subtitles unread |
 
 ## Encode target and preferred audio
 
@@ -105,6 +110,35 @@ Series headers also have **Preferred audio**:
 - **Keep surround** turns automatic stereo off for that show.
 
 Add stereo on a row still works for one episode. Queue still writes a sidecar. Keep still replaces the library file.
+
+## Identify Unknown Languages
+
+Untagged audio and subtitles (`und` or unknown) are otherwise offered for removal. A file whose only soundtrack is untagged keeps that track, so cleanup cannot silence it. A lone untagged subtitle stays too. On the title page, **Identify language** names the track before you decide. **Use** saves the language on the inspection and refreshes Suggestions. The library file keeps the old tag until Keep or a direct write replaces it.
+
+The image and [compose.example.yaml](compose.example.yaml) set `WHISPER_LID=/usr/local/bin/whisper-lid` and `PGS_OCR=/usr/local/bin/pgs-ocr`, so those buttons are available in Docker. Clear a variable to hide that button. A native macOS or `npm start` process needs the same paths. When a path is missing, the title page names the missing tool and hides that button. Each sample starts at 1:30 on a long file, and at the beginning when the file is shorter.
+
+**Audio.** Identify language extracts a 45-second clip. `whisper-lid` runs faster-whisper with the tiny model. The first listen downloads that model into `/config/whisper`. An NVIDIA GPU is tried first (CUDA). When CUDA is missing, the same clip runs on CPU. Polisharr shows the language and a confidence percent. Below 75% confidence, or a clip with no speech, the track stays untagged and you can listen again at another time.
+
+**Text subtitles.** SRT, ASS, WebVTT, and similar text tracks need no extra program. Polisharr extracts three minutes as SubRip and reads the words. A thin sample stays untagged. **Use** saves the language on that track.
+
+**PGS.** These subtitles are pictures. When `PGS_OCR` is set, Identify language reads up to 24 images from a three-minute sample with Tesseract’s English model, then guesses the language from that text. Polisharr saves a language tag and leaves the PGS pictures in the file. VobSub and DVB subtitles stay unread.
+
+## Jellyfin Playback
+
+A Jellyfin connection can refresh that library after Keep, the same way a Plex connection can. Playback monitoring is a separate switch and stays off until you check **Observe playback** on that Jellyfin connection. **Test playback access** needs a Jellyfin server API key. A login that cannot see household sessions fails that test. Use a server API key so Polisharr can see those sessions.
+
+Polisharr asks Jellyfin about current sessions about every 10 seconds. Each observation stores the title, player name, time, playback method, and the conversion reason Jellyfin reported. It stores the device name and viewing time, and it omits usernames and IP addresses. **Keep viewing history** can be off while live protection stays on. **Clear viewing history** deletes stored observations and dismissed recommendations.
+
+Playback has two views, with filters for title, player, Jellyfin connection, reason, and the last 7 or 30 days:
+
+- **Recent problems** lists conversions. A viewing does not queue work. **Open repair plan** opens a custom plan you still queue yourself. When the file already has a playable stereo track, the card tells you to choose that soundtrack in Jellyfin. A surround file with no preferred-language stereo can open a plan that adds AAC stereo and keeps the original mix. A video or subtitle conversion explains Jellyfin’s report. Polisharr leaves the codec and the subtitle tracks for you to choose. A bitrate limit points at an existing size suggestion when one exists, and leaves the target alone when none exists.
+- **Recent observations** lists what Jellyfin reported, including direct play.
+
+After Keep, a later direct play on the same device can read “Direct playback observed on this device after Keep.” With no matching viewing yet, the line stays “Not yet observed.” Unmatched playback and a stale connection stay on Playback. They stay off Errors.
+
+**Let Jellyfin playback take priority** holds new work on the encode nodes you check while that server is playing video, including direct play. A job already running finishes. Paused video releases those nodes after the idle cooldown. The file stays protected while Jellyfin still lists it as the current item. **Run now** still waits for this hold. When Jellyfin cannot be reached, mapped nodes stay held until a poll succeeds.
+
+**Protect file replacement** waits to replace a library file in the Radarr or Sonarr libraries you check while someone is watching that file. A finished direct write then waits in Review until playback ends. The original file stays until that replacement runs. Notifications can say “Polisharr will replace it when playback ends.”
 
 ## Extra GPU boxes
 

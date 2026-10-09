@@ -154,6 +154,7 @@ export const api = {
   keepAll: () => req<{ accepted: number; skipped: number; started?: number; waiting?: number }>("/api/review/keep-all", { method: "POST" }),
   discard: (id: string) => req(`/api/review/${id}/discard`, { method: "POST" }),
   requeueFlagged: (id: string) => req<{ ok: true; id: string }>(`/api/review/${id}/requeue`, { method: "POST" }),
+  encodeAgain: (id: string) => req<{ ok: true; id: string }>(`/api/review/${id}/encode-again`, { method: "POST" }),
   requestReviewPreview: (reviewId: string, body: PreviewRequestBody) =>
     req<PreviewStatus>(`/api/review/${encodeURIComponent(reviewId)}/previews`, { method: "POST", body: JSON.stringify(body) }),
   reviewPreviewStatus: (reviewId: string, taskId: string, init?: RequestInit) =>

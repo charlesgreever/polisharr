@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
+import { isSourceChangedError } from "../../server/review-recovery.ts";
 import { api, formatDuration, formatGbHour, formatSize, type PreviewStatus, type ReviewRow } from "../api";
 import { reviewEncodeLine } from "../review-copy";
 import { PagedListControls } from "../components/PagedListControls";
@@ -183,7 +184,7 @@ export function ReviewPage() {
                 <input
                   type="checkbox"
                   className="mt-1"
-                  disabled={item.status !== "pending"}
+                  disabled={item.status !== "pending" || isSourceChangedError(item.error)}
                   checked={Boolean(selected?.[item.id])}
                   onChange={(e) => setSelected((s) => ({ ...s, [item.id]: e.target.checked }))}
                   aria-label={`Select ${item.displayTitle}`}
@@ -213,7 +214,7 @@ export function ReviewPage() {
                     <button
                       className="btn"
                       type="button"
-                      disabled={item.status !== "pending"}
+                      disabled={item.status !== "pending" || isSourceChangedError(item.error)}
                       onClick={() => void (async () => {
                         await cancelOpenPreview(item.id);
                         await api.keep(item.id);
@@ -244,6 +245,27 @@ export function ReviewPage() {
                       Discard
                     </button>
                     <Tip label="Discard">Discard throws the sidecar away. The library file stays.</Tip>
+                    {item.status === "pending" && isSourceChangedError(item.error) && (
+                      <>
+                        <button
+                          className="btn-secondary"
+                          type="button"
+                          onClick={() => void (async () => {
+                            await cancelOpenPreview(item.id);
+                            try {
+                              await api.encodeAgain(item.id);
+                              setMsg("Queued the same plan for the current file.");
+                              await afterMutation([item.id]);
+                            } catch (error) {
+                              setMsg(error instanceof Error ? error.message : "Encode again failed.");
+                            }
+                          })()}
+                        >
+                          Encode again
+                        </button>
+                        <Tip label="Encode again">Throws this finished copy away and encodes the current library file with the same plan.</Tip>
+                      </>
+                    )}
                     {canCompareStatus(item.status) && (
                       <>
                         <button className="btn-secondary" type="button" onClick={() => setCompareItem(item)}>
@@ -252,7 +274,7 @@ export function ReviewPage() {
                         <Tip label="Compare clips">Plays matching samples after you pick a position. Opening Review does not start that work.</Tip>
                       </>
                     )}
-                    {item.flagged && item.status === "pending" && (
+                    {item.flagged && item.status === "pending" && !isSourceChangedError(item.error) && (
                       <>
                         <button
                           className="btn-secondary"

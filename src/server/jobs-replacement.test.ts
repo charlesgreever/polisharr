@@ -1,16 +1,20 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobService, type JobPlaybackGate } from "./jobs.ts";
 import { PLAYBACK_ALLOWED, type PlaybackDecision } from "./playback-policy.ts";
 import {
+  ENCODE_AGAIN_JOB_GONE,
   KEEP_ALREADY_WAITING,
+  LIBRARY_SOURCE_GONE,
   MISSING_REVISION,
   REPLACEMENT_STARTED,
+  PREVIOUS_SOURCE_CHANGED,
   SOURCE_CHANGED,
   WAITING_TO_REPLACE,
 } from "./review-recovery.ts";
+import { readFileRevision } from "./file-revision.ts";
 import { Store } from "./store.ts";
 import type { ExecutablePlan, InspectionReport, ReviewItem } from "./types.ts";
 
@@ -757,5 +761,146 @@ describe("deferred replacement", () => {
     expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
     expect(existsSync(ctx.sidecarPath)).toBe(true);
     expect(ctx.store.historyPage(0, 10).items.filter((row) => row.outcome === "kept")).toHaveLength(0);
+  });
+});
+
+describe("encode again", () => {
+  it("queues the same plan after an in-place replacement and leaves the new library file", async () => {
+    const ctx = harness();
+    ctx.jobs.stop();
+    insertPending(ctx);
+    writeFileSync(ctx.sourcePath, "ARR-UPGRADE-BYTES");
+    ctx.store.updateReview("rev-1", { error: SOURCE_CHANGED });
+
+    const result = await ctx.jobs.encodeAgain("rev-1");
+
+    expect(result).toMatchObject({ id: expect.any(String) });
+    if (!("id" in result)) return;
+    expect(existsSync(ctx.sidecarPath)).toBe(false);
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ARR-UPGRADE-BYTES");
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+    expect(ctx.store.listReviews()).toHaveLength(0);
+    const queued = ctx.store.getJob(result.id);
+    expect(queued).toMatchObject({
+      status: "queued",
+      itemId: ctx.itemId,
+      sourceRevision: null,
+      plan: copyPlan(),
+    });
+  });
+
+  it("queues the current library file when the encoded path is gone", async () => {
+    const ctx = harness();
+    ctx.jobs.stop();
+    insertPending(ctx);
+    const nextPath = join(ctx.dir, "movie-new.mkv");
+    writeFileSync(nextPath, "NEW-RELEASE");
+    unlinkSync(ctx.sourcePath);
+    ctx.store.updateItemFile(ctx.itemId, nextPath, 12);
+    ctx.store.updateReview("rev-1", { error: SOURCE_CHANGED });
+
+    const result = await ctx.jobs.encodeAgain("rev-1");
+
+    expect(result).toMatchObject({ id: expect.any(String) });
+    if (!("id" in result)) return;
+    expect(existsSync(ctx.sidecarPath)).toBe(false);
+    expect(existsSync(ctx.sourcePath)).toBe(false);
+    expect(readFileSync(nextPath, "utf8")).toBe("NEW-RELEASE");
+    expect(ctx.store.getItem(ctx.itemId)?.path).toBe(nextPath);
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+    expect(ctx.store.getJob(result.id)).toMatchObject({ status: "queued", itemId: ctx.itemId, plan: copyPlan() });
+  });
+
+  it("leaves the sidecar when the current library file is missing", async () => {
+    const ctx = harness();
+    insertPending(ctx);
+    unlinkSync(ctx.sourcePath);
+    ctx.store.updateReview("rev-1", { error: SOURCE_CHANGED });
+
+    const result = await ctx.jobs.encodeAgain("rev-1");
+
+    expect(result).toMatchObject({ error: LIBRARY_SOURCE_GONE, status: 409 });
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("SIDECAR!!!");
+    expect(ctx.store.getReview("rev-1")).toMatchObject({ status: "pending", error: SOURCE_CHANGED });
+    expect(ctx.store.listJobs().filter((job) => job.status === "queued")).toHaveLength(0);
+  });
+
+  it("leaves the sidecar when the card is not this error or the finished job is gone", async () => {
+    const ctx = harness();
+    insertPending(ctx);
+
+    const otherError = await ctx.jobs.encodeAgain("rev-1");
+    expect(otherError).toMatchObject({ status: 409 });
+    expect(existsSync(ctx.sidecarPath)).toBe(true);
+    expect(ctx.store.getReview("rev-1")?.status).toBe("pending");
+
+    ctx.store.updateReview("rev-1", { error: SOURCE_CHANGED });
+    const smaller = await ctx.jobs.requeueFlagged("rev-1");
+    expect(smaller).toMatchObject({ error: "Only a flagged sidecar can be encoded smaller.", status: 409 });
+    expect(existsSync(ctx.sidecarPath)).toBe(true);
+
+    ctx.store.insertReview({
+      id: "rev-gone",
+      jobId: "gone",
+      itemId: ctx.itemId,
+      displayTitle: "Film",
+      status: "pending",
+      flagged: false,
+      flagReason: null,
+      sourcePath: ctx.sourcePath,
+      sidecarPath: ctx.sidecarPath,
+      ...compare(9, 10),
+      error: SOURCE_CHANGED,
+    });
+    const missingJob = await ctx.jobs.encodeAgain("rev-gone");
+    expect(missingJob).toEqual({ error: ENCODE_AGAIN_JOB_GONE, status: 409 });
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("SIDECAR!!!");
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    expect(ctx.store.getReview("rev-gone")?.status).toBe("pending");
+    expect(ctx.store.getReview("rev-1")?.status).toBe("pending");
+  });
+
+  it("refuses Keep after the original changes and leaves both copies", async () => {
+    const ctx = harness();
+    insertPending(ctx);
+    ctx.store.updateJob("job-1", { sourceRevision: readFileRevision(ctx.sourcePath) });
+    writeFileSync(ctx.sourcePath, "ARR-UPGRADE-BYTES");
+    ctx.store.updateReview("rev-1", { error: SOURCE_CHANGED });
+
+    const keep = await ctx.jobs.keep("rev-1");
+
+    expect(keep).toMatchObject({ error: SOURCE_CHANGED, status: 409 });
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ARR-UPGRADE-BYTES");
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("SIDECAR!!!");
+    expect(ctx.store.getReview("rev-1")?.status).toBe("pending");
+    expect(ctx.store.historyPage(0, 10).items.filter((row) => row.outcome === "kept")).toHaveLength(0);
+  });
+
+  it("queues the same plan when the card still has the previous sentence", async () => {
+    const ctx = harness();
+    ctx.jobs.stop();
+    insertPending(ctx);
+    writeFileSync(ctx.sourcePath, "ARR-UPGRADE-BYTES");
+    ctx.store.updateReview("rev-1", { error: PREVIOUS_SOURCE_CHANGED });
+
+    const result = await ctx.jobs.encodeAgain("rev-1");
+
+    expect(result).toMatchObject({ id: expect.any(String) });
+    expect(existsSync(ctx.sidecarPath)).toBe(false);
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ARR-UPGRADE-BYTES");
+    expect(ctx.store.getReview("rev-1")).toBeUndefined();
+  });
+
+  it("skips Keep all for a card whose original file changed", async () => {
+    const ctx = harness();
+    insertPending(ctx);
+    ctx.store.updateReview("rev-1", { error: SOURCE_CHANGED });
+
+    const bulk = await ctx.jobs.keepPending();
+
+    expect(bulk).toEqual({ accepted: 0, skipped: 1, started: 0, waiting: 0 });
+    expect(readFileSync(ctx.sourcePath, "utf8")).toBe("ORIGINAL!");
+    expect(readFileSync(ctx.sidecarPath, "utf8")).toBe("SIDECAR!!!");
+    expect(ctx.store.getReview("rev-1")).toMatchObject({ status: "pending", error: SOURCE_CHANGED });
   });
 });

@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PREVIOUS_SOURCE_CHANGED, SOURCE_CHANGED } from "../../server/review-recovery.ts";
 import { api, type ReviewRow } from "../api";
 import { ReviewPage } from "./Review.tsx";
 
@@ -96,6 +97,63 @@ describe("Review page compare entry", () => {
       durationMs: 15_000,
       preset: "custom",
     }));
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("offers Encode again only after the original file changed", async () => {
+    const encodeAgain = vi.fn(async () => ({ ok: true as const, id: "job-new" }));
+    api.review = async () => ({
+      items: [
+        reviewRow(),
+        reviewRow({ id: "rev-changed", displayTitle: "Changed", error: SOURCE_CHANGED }),
+        reviewRow({ id: "rev-previous", displayTitle: "Previous", error: PREVIOUS_SOURCE_CHANGED }),
+        reviewRow({
+          id: "rev-flagged",
+          displayTitle: "Flagged",
+          flagged: true,
+          flagReason: "The sidecar missed the size target or is larger than the original.",
+        }),
+      ],
+      nextOffset: null,
+      total: 3,
+      pendingCount: 3,
+    });
+    api.encodeAgain = encodeAgain;
+    api.requestReviewPreview = requestReviewPreview;
+
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(createElement(ReviewPage));
+    });
+
+    const buttons = () => [...host.querySelectorAll("button")];
+    expect(buttons().filter((button) => button.textContent === "Encode again")).toHaveLength(2);
+    expect(buttons().filter((button) => button.textContent === "Encode smaller")).toHaveLength(1);
+    const cards = [...host.querySelectorAll("li")];
+    const keepIn = (card: Element | undefined) => [...(card?.querySelectorAll("button") ?? [])].find((button) => button.textContent === "Keep");
+    expect(keepIn(cards[0])?.disabled).toBe(false);
+    expect(keepIn(cards[1])?.disabled).toBe(true);
+    expect(keepIn(cards[2])?.disabled).toBe(true);
+    expect(keepIn(cards[3])?.disabled).toBe(false);
+    expect(cards[1]?.textContent).toContain("Encode again");
+    expect(cards[2]?.textContent).toContain("Encode again");
+    expect(cards[0]?.textContent).not.toContain("Encode again");
+    expect(cards[3]?.textContent).not.toContain("Encode again");
+    expect(cards[3]?.textContent).toContain("Encode smaller");
+
+    const again = buttons().find((button) => button.textContent === "Encode again");
+    await act(async () => {
+      again?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(encodeAgain).toHaveBeenCalledTimes(1);
+    expect(encodeAgain).toHaveBeenCalledWith("rev-changed");
+    expect(host.textContent).toContain("Queued the same plan for the current file.");
+    expect(requestReviewPreview).not.toHaveBeenCalled();
+
     await act(async () => {
       root.unmount();
     });

@@ -2111,6 +2111,14 @@ export function createApp(opts: AppOptions) {
     return c.json({ ok: true, id: result.id });
   });
 
+  app.post("/api/review/:id/encode-again", async (c) => {
+    const blocked = gateOptimize();
+    if (blocked) return c.json({ error: blocked }, 403);
+    const result = await jobs.encodeAgain(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.status as 400 | 404 | 409);
+    return c.json({ ok: true, id: result.id });
+  });
+
   app.get("/api/history", (c) => {
     const { offset, limit } = pageRequest(c.req.query("offset"), c.req.query("limit"));
     return c.json(store.historyPage(offset, limit));

@@ -10,6 +10,8 @@ import { CancelledError, cleanReviewLeftovers, isExecutablePlan, planFromSuggest
 import { aggressiveTargetBytes, missedOutputTarget } from "./size-budget.ts";
 import {
   classifyInterruptedKeep,
+  ENCODE_AGAIN_JOB_GONE,
+  isSourceChangedError,
   KEEP_ALREADY_WAITING,
   KEEP_INTERRUPTED,
   LIBRARY_SOURCE_GONE,
@@ -46,6 +48,7 @@ import {
 } from "./playback-policy.ts";
 import {
   canonicalFilePath,
+  filePathsEqual,
   isTrustedRevision,
   readFileRevision,
   revisionsMatch,
@@ -770,6 +773,11 @@ export class JobService {
     let waiting = 0;
     let skipped = 0;
     for (const id of this.opts.store.pendingReviewIds()) {
+      const review = this.opts.store.getReview(id);
+      if (isSourceChangedError(review?.error)) {
+        skipped += 1;
+        continue;
+      }
       const result = await this.keep(id);
       if ("error" in result) skipped += 1;
       else if (result.disposition === "waiting") waiting += 1;
@@ -1144,7 +1152,33 @@ export class JobService {
     });
   }
 
-  async discard(reviewId: string): Promise<{ accepted: true } | { error: string; status: number }> {
+  async encodeAgain(reviewId: string): Promise<{ id: string } | { error: string; status: number }> {
+    const review = this.opts.store.getReview(reviewId);
+    if (!review) return { error: "That review item is gone.", status: 404 };
+    if (review.status !== "pending") return { error: "Only a pending sidecar can be encoded again.", status: 409 };
+    if (!isSourceChangedError(review.error)) return { error: "Encode again is for a sidecar whose original file changed.", status: 409 };
+    const item = this.opts.store.getItem(review.itemId);
+    if (!item) return { error: "That title is not in the library.", status: 404 };
+    const job = this.opts.store.getJob(review.jobId);
+    if (!job?.plan) return { error: ENCODE_AGAIN_JOB_GONE, status: 409 };
+    let plan: ExecutablePlan;
+    try {
+      plan = resolvePlan(job.plan, job.writeMode);
+    } catch {
+      return { error: ENCODE_AGAIN_JOB_GONE, status: 409 };
+    }
+    if (!(await fileExists(item.path))) return { error: LIBRARY_SOURCE_GONE, status: 409 };
+    const sourceRemains = await fileExists(review.sourcePath);
+    if (!sourceRemains && filePathsEqual(review.sourcePath, item.path)) {
+      return { error: LIBRARY_SOURCE_GONE, status: 409 };
+    }
+    // The encoded path can be gone after an Arr upgrade. The current library file is a different path and stays.
+    const discarded = await this.discard(reviewId, { allowMissingSource: !sourceRemains });
+    if ("error" in discarded) return discarded;
+    return this.enqueueCustom(item.id, plan);
+  }
+
+  async discard(reviewId: string, options?: { allowMissingSource?: boolean }): Promise<{ accepted: true } | { error: string; status: number }> {
     await this.previews?.withdrawAndWait(reviewId);
     const claimed = this.opts.store.claimReviewDiscard(reviewId);
     if (!claimed) {
@@ -1152,7 +1186,7 @@ export class JobService {
       if (!review) return { error: "That review item is gone.", status: 404 };
       return { error: REPLACEMENT_STARTED, status: 409 };
     }
-    if (!(await fileExists(claimed.sourcePath))) {
+    if (!(await fileExists(claimed.sourcePath)) && !options?.allowMissingSource) {
       this.opts.store.updateReview(reviewId, { status: "pending", error: LIBRARY_SOURCE_GONE });
       return { error: LIBRARY_SOURCE_GONE, status: 409 };
     }

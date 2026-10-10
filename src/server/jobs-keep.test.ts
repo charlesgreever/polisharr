@@ -340,16 +340,19 @@ describe("interrupted Keep recovery", () => {
       fetch: (async (input, init) => {
         const url = String(input);
         const method = init?.method ?? "GET";
-        const body = init?.body ? JSON.parse(String(init.body)) as { name?: string } : {};
+        const body = init?.body ? JSON.parse(String(init.body)) as { name?: string; movieId?: number } : {};
         if (method === "POST" && body.name === "RefreshMovie") {
           return new Response(JSON.stringify({ id: 1, status: "completed" }), { status: 201 });
         }
         if (url.includes("/api/v3/rename?")) {
           return new Response(JSON.stringify([
-            { movieId: 10, movieFileId: 55, existingPath: oldPath, newPath },
+            { movieId: 10, movieFileId: 55, existingPath: "Film [WEBRip-1080p EAC3 5.1].mkv", newPath: "Film [WEBRip-1080p AAC 2.0].mkv" },
           ]));
         }
         if (method === "POST" && body.name === "RenameFiles") {
+          if (body.movieId !== 10) {
+            return new Response(JSON.stringify({ id: 2, status: "failed" }), { status: 201 });
+          }
           renameSync(oldPath, newPath);
           return new Response(JSON.stringify({ id: 2, status: "completed" }), { status: 201 });
         }

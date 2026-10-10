@@ -120,7 +120,73 @@ describe("Arr identity", () => {
     expect(result.warning).toBeNull();
     expect(calls[0]).toMatchObject({ method: "POST", body: { name: "RefreshMovie", movieIds: [10] } });
     expect(calls.some((call) => call.url.includes("/api/v3/rename?movieId=10"))).toBe(true);
-    expect(calls.some((call) => call.method === "POST" && (call.body as { name?: string })?.name === "RenameFiles")).toBe(true);
+    expect(calls.some((call) => call.method === "POST" && (call.body as { name?: string; movieId?: number; files?: number[] })?.name === "RenameFiles"
+      && (call.body as { movieId?: number }).movieId === 10
+      && (call.body as { files?: number[] }).files?.[0] === 55)).toBe(true);
+  });
+
+  it("renames a Radarr movie when the preview paths are relative to the movie folder", async () => {
+    const calls: Array<{ method: string; body?: unknown }> = [];
+    const folder = "/movies/Film (2020)";
+    const oldPath = `${folder}/Film [H264].mkv`;
+    const newPath = `${folder}/Film [AV1].mkv`;
+    const result = await refreshAndRenameArr({
+      kind: "radarr",
+      url: "http://radarr:7878",
+      apiKey: "k",
+      movieId: 10,
+      currentPath: oldPath,
+      fetch: (async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as unknown : undefined;
+        calls.push({ method, body });
+        if (method === "POST" && url.endsWith("/api/v3/command")) {
+          return new Response(JSON.stringify({ id: 1, status: "completed" }), { status: 201 });
+        }
+        if (url.includes("/api/v3/rename?")) {
+          return new Response(JSON.stringify([
+            { movieId: 10, movieFileId: 55, existingPath: "Film [H264].mkv", newPath: "Film [AV1].mkv" },
+          ]));
+        }
+        if (url.endsWith("/api/v3/movie/10")) {
+          return new Response(JSON.stringify({ movieFile: { id: 55, path: newPath } }));
+        }
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch,
+      sleep: async () => undefined,
+    });
+    expect(result.path).toBe(newPath);
+    expect(result.warning).toBeNull();
+    expect(calls.some((call) => call.method === "POST" && (call.body as { name?: string; movieId?: number })?.name === "RenameFiles"
+      && (call.body as { movieId?: number }).movieId === 10)).toBe(true);
+  });
+
+  it("does not store a relative Radarr preview path when the movie lookup has no file path", async () => {
+    const oldPath = "/movies/Film (2020)/Film [H264].mkv";
+    const result = await refreshAndRenameArr({
+      kind: "radarr",
+      url: "http://radarr:7878",
+      apiKey: "k",
+      movieId: 10,
+      currentPath: oldPath,
+      fetch: (async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (method === "POST" && url.endsWith("/api/v3/command")) {
+          return new Response(JSON.stringify({ id: 1, status: "completed" }), { status: 201 });
+        }
+        if (url.includes("/api/v3/rename?")) {
+          return new Response(JSON.stringify([
+            { movieId: 10, movieFileId: 55, existingPath: "Film [H264].mkv", newPath: "Film [AV1].mkv" },
+          ]));
+        }
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+      sleep: async () => undefined,
+    });
+    expect(result.path).toBeNull();
+    expect(result.warning).toBeNull();
   });
 
   it("refreshes a Sonarr series then renames the episode file", async () => {
@@ -144,7 +210,12 @@ describe("Arr identity", () => {
         }
         if (url.includes("/api/v3/rename?")) {
           return new Response(JSON.stringify([
-            { seriesId: 42, episodeFileId: 77, existingPath: oldPath, newPath },
+            {
+              seriesId: 42,
+              episodeFileId: 77,
+              existingPath: "Paw Patrol - S01E05 [WEBRip-1080p EAC3 5.1 Sonarr].mkv",
+              newPath: "Paw Patrol - S01E05 [WEBRip-1080p AAC 2.0 Sonarr].mkv",
+            },
           ]));
         }
         if (url.endsWith("/api/v3/episodefile/77")) {

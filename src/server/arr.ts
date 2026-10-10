@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { isMediaFilePath } from "./inspect.ts";
 
 export type ArrHttpAuth = {
@@ -202,13 +203,18 @@ export async function refreshAndRenameArr(input: ArrRefreshRenameInput): Promise
   const preview = await renamePreview(connection, input);
   if ("warning" in preview) return { path: null, warning: preview.warning };
   if (preview.files.length === 0) return { path: null, warning: null };
+  const fileIds = preview.files.map((file) => file.fileId);
+  // Radarr looks the movie up by movieId. A body without it runs as movie 0 and renames nothing.
   const renameBody = input.kind === "radarr"
-    ? { name: "RenameFiles", files: preview.files.map((file) => file.fileId) }
-    : { name: "RenameFiles", seriesId: input.seriesId, files: preview.files.map((file) => file.fileId) };
+    ? { name: "RenameFiles", movieId: input.movieId, files: fileIds }
+    : { name: "RenameFiles", seriesId: input.seriesId, files: fileIds };
   const renamed = await runArrCommand(connection, renameBody, input);
   if (renamed) return { path: null, warning: renamed };
-  const path = await promotedArrPath(connection, input, preview.files[0]?.newPath ?? null);
-  return { path: path && path !== input.currentPath ? path : preview.files[0]?.newPath ?? null, warning: null };
+  const reported = absoluteLibraryPath(await promotedArrPath(connection, input, null));
+  if (reported && reported !== input.currentPath) return { path: reported, warning: null };
+  const previewPath = absoluteLibraryPath(preview.files[0]?.newPath);
+  if (!reported && previewPath && previewPath !== input.currentPath) return { path: previewPath, warning: null };
+  return { path: null, warning: null };
 }
 
 async function runArrCommand(
@@ -275,12 +281,12 @@ async function renamePreview(
       return [{ fileId, existingPath, newPath }];
     });
     const matched = files.filter((file) => {
-      if (file.existingPath === input.currentPath) return true;
       if (input.episodeFileId && file.fileId === input.episodeFileId) return true;
-      if (input.kind === "radarr") return files.length === 1;
+      if (previewNamesCurrentFile(file.existingPath, input.currentPath)) return true;
+      if (input.kind === "radarr" && files.length === 1) return true;
       return false;
     });
-    return { files: matched.length > 0 ? matched : files.filter((file) => file.existingPath === input.currentPath) };
+    return { files: matched };
   } catch (error) {
     const message = error instanceof Error ? error.message : "The Arr rename preview failed.";
     return { warning: `${message} The new file is already in place.` };
@@ -324,6 +330,19 @@ async function arrJson(
   }
   if (!res.ok) throw new Error(`The Arr returned HTTP ${res.status}.`);
   return res.json();
+}
+
+function absoluteLibraryPath(candidate: string | null | undefined): string | null {
+  if (!candidate || !isAbsolute(candidate)) return null;
+  return candidate;
+}
+
+// Arr rename previews report paths relative to the movie or series folder.
+function previewNamesCurrentFile(existingPath: string, currentPath: string): boolean {
+  if (existingPath === currentPath) return true;
+  const relative = existingPath.replaceAll("\\", "/").replace(/^\/+/, "");
+  const current = currentPath.replaceAll("\\", "/");
+  return relative.length > 0 && current.endsWith(`/${relative}`);
 }
 
 function connectionError(error: unknown): ConnectionResult {

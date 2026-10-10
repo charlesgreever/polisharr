@@ -99,7 +99,14 @@ export async function collectTitleLinks(input: {
     if (!player.enabled || !player.secret) return null;
     const token = input.decrypt(player.secret);
     if (player.kind === "plex") return lookupPlexLink(player.url, token, input.item.path, input.fetch);
-    if (player.kind === "jellyfin") return lookupJellyfinLink(player.url, token, input.item.path, input.fetch);
+    if (player.kind === "jellyfin") {
+      return lookupJellyfinLink(player.url, token, {
+        type: input.item.type,
+        title: input.item.title,
+        episodeTitle: input.item.episodeTitle,
+        path: input.item.path,
+      }, input.fetch);
+    }
     return null;
   });
   const found = await Promise.allSettled(playerLookups);
@@ -146,30 +153,69 @@ export async function lookupPlexLink(
   }
 }
 
+export type JellyfinLinkTarget = {
+  type: "movie" | "episode";
+  title: string;
+  episodeTitle?: string | null;
+  path: string;
+};
+
 export async function lookupJellyfinLink(
   baseUrl: string,
   token: string,
-  filePath: string,
+  target: JellyfinLinkTarget,
   httpFetch: typeof fetch,
 ): Promise<ExternalLink | null> {
+  const search = jellyfinSearch(target);
+  if (!search) return null;
   try {
     const headers = jellyfinAuthHeaders(token);
-    const pathQuery = new URLSearchParams({
-      recursive: "true",
-      includeItemTypes: "Movie,Episode",
-      filters: "IsNotFolder",
-      fields: "Path",
-      searchTerm: basename(filePath),
-      limit: "25",
-    });
-    const payload = await playerJson(httpFetch, `${trimUrl(baseUrl)}/Items?${pathQuery}`, headers);
-    const id = jellyfinItemIdForPath(payload, filePath);
+    const first = await jellyfinItems(baseUrl, headers, search, 0, httpFetch);
+    let id = jellyfinItemIdForPath(first, target.path);
+    if (!id && jellyfinTotal(first) > 50) {
+      const second = await jellyfinItems(baseUrl, headers, search, 50, httpFetch);
+      id = jellyfinItemIdForPath(second, target.path);
+    }
     if (!id) return null;
     const href = jellyfinDetailsHref(baseUrl, id);
     return href ? { label: "Open in Jellyfin", href } : null;
   } catch {
+    // A 401 or timeout omits the link so the title page still opens.
     return null;
   }
+}
+
+function jellyfinSearch(target: JellyfinLinkTarget): { searchTerm: string; itemType: "Movie" | "Episode" } | null {
+  // Jellyfin SearchTerm matches the item name. A release filename matches nothing.
+  const searchTerm = target.type === "episode"
+    ? (target.episodeTitle?.trim() || target.title.trim())
+    : target.title.trim();
+  if (!searchTerm) return null;
+  return { searchTerm, itemType: target.type === "episode" ? "Episode" : "Movie" };
+}
+
+async function jellyfinItems(
+  baseUrl: string,
+  headers: Record<string, string>,
+  search: { searchTerm: string; itemType: "Movie" | "Episode" },
+  startIndex: number,
+  httpFetch: typeof fetch,
+): Promise<unknown> {
+  const query = new URLSearchParams({
+    recursive: "true",
+    includeItemTypes: search.itemType,
+    filters: "IsNotFolder",
+    fields: "Path",
+    searchTerm: search.searchTerm,
+    limit: "50",
+  });
+  if (startIndex > 0) query.set("startIndex", String(startIndex));
+  return playerJson(httpFetch, `${trimUrl(baseUrl)}/Items?${query}`, headers);
+}
+
+function jellyfinTotal(payload: unknown): number {
+  const total = asRecord(payload).TotalRecordCount;
+  return typeof total === "number" && Number.isFinite(total) ? total : 0;
 }
 
 function plexMachineId(payload: unknown): string | null {
@@ -206,20 +252,20 @@ function firstPlexRatingKey(payload: unknown): string | null {
 }
 
 function jellyfinItemIdForPath(payload: unknown, filePath: string): string | null {
-  const row = asRecord(payload);
-  const items = Array.isArray(row.Items) ? row.Items : [];
-  const wanted = filePath.replace(/\\/g, "/").toLowerCase();
-  const file = basename(filePath).toLowerCase();
+  const items = asRecord(payload).Items;
+  const wanted = normalizeMediaPath(filePath);
+  if (!wanted || !Array.isArray(items)) return null;
   for (const raw of items) {
     const item = asRecord(raw);
-    if (!item.Id && !item.id && !item.Path) continue;
-    const path = String(item.Path ?? "").replace(/\\/g, "/").toLowerCase();
-    if (path === wanted || path.endsWith(`/${file}`)) {
-      const id = item.Id ?? item.id;
-      if (id) return String(id);
-    }
+    if (normalizeMediaPath(String(item.Path ?? "")) !== wanted) continue;
+    const id = item.Id ?? item.id;
+    if (id) return String(id);
   }
   return null;
+}
+
+function normalizeMediaPath(path: string): string {
+  return path.replace(/\\/g, "/").toLowerCase();
 }
 
 async function playerJson(httpFetch: typeof fetch, url: string, headers: Record<string, string>): Promise<unknown> {

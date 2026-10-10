@@ -84,13 +84,136 @@ describe("Plex and Jellyfin web links", () => {
     });
   });
 
-  it("looks up a Jellyfin item by file name and omits the link on 401", async () => {
-    const okFetch = (async () => new Response(JSON.stringify({
-      Items: [{ Id: "jf-1", Path: "/mnt/nas/Movies/film.mkv" }],
+  const filmPath = "/mnt/nas/Movies/1917 (2019)/1917 (2019) {imdb-tt8579674}[Bluray-2160p][HDR][10bit][x265][TrueHD Atmos 7.1].mkv";
+
+  it("opens a Jellyfin movie when the item path is the library file", async () => {
+    const seen: string[] = [];
+    const httpFetch = (async (url) => {
+      seen.push(String(url));
+      return new Response(JSON.stringify({
+        Items: [{ Id: "jf-1917", Path: filmPath }],
+        TotalRecordCount: 1,
+      }));
+    }) as typeof fetch;
+    const link = await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "movie",
+      title: "1917",
+      path: filmPath,
+    }, httpFetch);
+    expect(link).toEqual({ label: "Open in Jellyfin", href: "http://jellyfin:8096/web/#/details?id=jf-1917" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("searchTerm=1917");
+    expect(seen[0]).toContain("includeItemTypes=Movie");
+    expect(seen[0]).not.toContain("Bluray-2160p");
+    expect(seen[0]).not.toContain("tok");
+  });
+
+  it("omits Jellyfin when the path is a different file with the same name", async () => {
+    const httpFetch = (async () => new Response(JSON.stringify({
+      Items: [{ Id: "other", Path: `/mnt/other/${filmPath.split("/").pop()}` }],
+      TotalRecordCount: 1,
     }))) as typeof fetch;
-    const link = await lookupJellyfinLink("http://jellyfin:8096", "tok", "/mnt/nas/Movies/film.mkv", okFetch);
-    expect(link).toEqual({ label: "Open in Jellyfin", href: "http://jellyfin:8096/web/#/details?id=jf-1" });
+    expect(await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "movie",
+      title: "1917",
+      path: filmPath,
+    }, httpFetch)).toBeNull();
+  });
+
+  it("opens a Jellyfin episode from the episode title", async () => {
+    const seen: string[] = [];
+    const path = "/mnt/nas/TV/Stick/Stick - S01E01 - Pilot.mkv";
+    const httpFetch = (async (url) => {
+      seen.push(String(url));
+      return new Response(JSON.stringify({
+        Items: [{ Id: "ep-1", Path: path }],
+        TotalRecordCount: 1,
+      }));
+    }) as typeof fetch;
+    const link = await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "episode",
+      title: "Stick",
+      episodeTitle: "Pilot",
+      path,
+    }, httpFetch);
+    expect(link).toEqual({ label: "Open in Jellyfin", href: "http://jellyfin:8096/web/#/details?id=ep-1" });
+    expect(seen[0]).toContain("searchTerm=Pilot");
+    expect(seen[0]).toContain("includeItemTypes=Episode");
+    expect(seen[0]).not.toContain("searchTerm=Stick");
+  });
+
+  it("reads a second Jellyfin page when the file is not on the first", async () => {
+    const seen: string[] = [];
+    const path = "/mnt/nas/TV/Show/Show - S01E01 - Pilot.mkv";
+    const httpFetch = (async (url) => {
+      seen.push(String(url));
+      const body = seen.length === 1
+        ? { Items: [{ Id: "other", Path: "/mnt/nas/TV/Other/Other - S01E01 - Pilot.mkv" }], TotalRecordCount: 60 }
+        : { Items: [{ Id: "ep-2", Path: path }], TotalRecordCount: 60 };
+      return new Response(JSON.stringify(body));
+    }) as typeof fetch;
+    const link = await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "episode",
+      title: "Show",
+      episodeTitle: "Pilot",
+      path,
+    }, httpFetch);
+    expect(link).toEqual({ label: "Open in Jellyfin", href: "http://jellyfin:8096/web/#/details?id=ep-2" });
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toContain("startIndex=50");
+  });
+
+  it("omits Jellyfin when the second page still misses the file and when Jellyfin returns 401", async () => {
+    const missed = (async () => new Response(JSON.stringify({
+      Items: [{ Id: "other", Path: "/mnt/nas/TV/Other/Pilot.mkv" }],
+      TotalRecordCount: 60,
+    }))) as typeof fetch;
+    expect(await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "episode",
+      title: "Show",
+      episodeTitle: "Pilot",
+      path: "/mnt/nas/TV/Show/Show - S01E01 - Pilot.mkv",
+    }, missed)).toBeNull();
     const denied = (async () => new Response("no", { status: 401 })) as typeof fetch;
-    expect(await lookupJellyfinLink("http://jellyfin:8096", "tok", "/mnt/nas/Movies/film.mkv", denied)).toBeNull();
+    expect(await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "movie",
+      title: "1917",
+      path: filmPath,
+    }, denied)).toBeNull();
+  });
+
+  it("searches a Jellyfin episode by the show title when the episode title is blank", async () => {
+    const seen: string[] = [];
+    const path = "/mnt/nas/TV/Stick/Stick - S01E01.mkv";
+    const httpFetch = (async (url) => {
+      seen.push(String(url));
+      return new Response(JSON.stringify({
+        Items: [{ Id: "ep-3", Path: path }],
+        TotalRecordCount: 1,
+      }));
+    }) as typeof fetch;
+    const link = await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "episode",
+      title: "Stick",
+      episodeTitle: " ",
+      path,
+    }, httpFetch);
+    expect(link).toEqual({ label: "Open in Jellyfin", href: "http://jellyfin:8096/web/#/details?id=ep-3" });
+    expect(seen[0]).toContain("searchTerm=Stick");
+    expect(seen[0]).toContain("includeItemTypes=Episode");
+  });
+
+  it("omits Jellyfin when the movie title is blank", async () => {
+    let called = false;
+    const httpFetch = (async () => {
+      called = true;
+      return new Response("no", { status: 500 });
+    }) as typeof fetch;
+    expect(await lookupJellyfinLink("http://jellyfin:8096", "tok", {
+      type: "movie",
+      title: " ",
+      path: filmPath,
+    }, httpFetch)).toBeNull();
+    expect(called).toBe(false);
   });
 });

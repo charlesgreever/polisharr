@@ -29,7 +29,7 @@ Polisharr already stores the Arr movie id, series id, and episode file id, plus 
 
 **Plex web:** `{url}/web/index.html#!/server/{machineIdentifier}/details?key=/library/metadata/{ratingKey}`. Needs `machineIdentifier` from `GET /identity` and `ratingKey` from a library lookup. Path lookup works when Plex sees the same file path Polisharr stored (`/mnt/nas/...` on this household).
 
-**Jellyfin web:** `{url}/web/#/details?id={itemId}` (10.x and still accepted). 12’s React UI also understands `/web/#/item?id={itemId}`. Lookup: `GET /Items?recursive=true&filters=IsNotFolder` with `Path` or a search on the file name. Same path-match caveat as Plex.
+**Jellyfin web:** `{url}/web/#/details?id={itemId}` (10.x and still accepted). 12’s React UI also understands `/web/#/item?id={itemId}`. Lookup: `GET /Items` with `searchTerm` set to the library title (the episode title for an episode). Keep the link only when Jellyfin's Path equals the library path.
 
 Plex/Jellyfin ids are **not** worth storing in SQLite (they change on library rebuild). Look them up when the title page loads.
 
@@ -64,7 +64,7 @@ Plex/Jellyfin ids are **not** worth storing in SQLite (they change on library re
 
 - On title GET only (not Movies list), if a Plex or Jellyfin instance is enabled:
   - Plex: `GET /identity` for `machineIdentifier`; find the item by file path (or file name fallback); build the web details URL.
-  - Jellyfin: find the item by `Path` (or Name + ProductionYear fallback); build `/web/#/details?id={id}` (works on 10 and 12).
+  - Jellyfin: search by the library title (the episode title for an episode), then keep the link only when the returned Path equals the library file. Build `/web/#/details?id={id}` (works on 10 and 12).
 - Append **Open in Plex** / **Open in Jellyfin** to the same `links` array.
 - Cap lookup time (few seconds). Failure → omit that link.
 - Path mismatch (container vs host) is expected in some installs: hide the player link rather than guess.

@@ -2136,7 +2136,8 @@ describe("public HTTP behavior", () => {
         languageConfirmed: true,
         preferredLanguage: "eng",
         reviewPath: join(dir, "review"),
-        videoTarget: "hevc",
+        movieVideoTarget: "hevc",
+        tvVideoTarget: "av1",
         suggestionDefaults: {
           transcodeToSizeCap: false,
           transcodeBelowHevc: true,
@@ -2256,6 +2257,111 @@ describe("public HTTP behavior", () => {
     };
     expect(suggestions.items).toHaveLength(1);
     expect(suggestions.items[0]?.after?.codec).toBe("AV1");
+  });
+
+  it("uses the TV encode target for episodes and keeps a series pin", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-"));
+    const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
+    const created = createApp({
+      env,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: true, reason: null }),
+      readable: async () => true,
+      probe: async () => ({
+        format: { duration: "1369" },
+        streams: [
+          { codec_type: "video", codec_name: "hevc", width: 1920, height: 1080 },
+          { codec_type: "audio", codec_name: "aac", channels: 2, tags: { language: "eng" }, index: 1 },
+        ],
+      }),
+      fetch: (async (url: string) => {
+        if (String(url).includes("system/status")) return new Response(JSON.stringify({ appName: "Sonarr", version: "4" }));
+        return new Response("[]");
+      }) as typeof fetch,
+    });
+    apps.push({ store: created.store, app: created });
+    const setupRes = await created.app.request("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username: "ada", password: "secret12" }),
+    });
+    const headers = { cookie: cookie(setupRes) };
+    await created.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "sonarr", name: "Sonarr", url: "http://sonarr:8989", apiKey: "k", enabled: true }),
+    });
+    await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        languageConfirmed: true,
+        preferredLanguage: "eng",
+        reviewPath: join(dir, "review"),
+        movieVideoTarget: "hevc",
+        tvVideoTarget: "hevc",
+        suggestionDefaults: {
+          transcodeToSizeCap: false,
+          transcodeBelowHevc: true,
+          removeNonPreferredSubtitles: false,
+          removeNonPreferredAudio: false,
+          addStereo: false,
+        },
+      }),
+    });
+    const instanceId = created.store.listInstances()[0]?.id ?? "";
+    const itemId = `${instanceId}:episode:10`;
+    created.store.upsertItem({
+      id: itemId,
+      instanceId,
+      arrId: 10,
+      arrSeriesId: 42,
+      arrEpisodeFileId: 10,
+      type: "episode",
+      title: "Pilot",
+      showTitle: "Show",
+      season: 1,
+      episode: 1,
+      episodeTitle: "Pilot",
+      path: "/tv/show.mkv",
+      sizeBytes: 1_000_000_000,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    await created.inspectPending();
+    expect(((await (await created.app.request("/api/suggestions", { headers })).json()) as { items: unknown[] }).items).toHaveLength(0);
+
+    const saved = await created.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ tvVideoTarget: "av1" }),
+    });
+    expect(saved.status).toBe(200);
+    const suggestions = (await (await created.app.request("/api/suggestions", { headers })).json()) as {
+      items: Array<{ after?: { codec?: string } }>;
+    };
+    expect(suggestions.items).toHaveLength(1);
+    expect(suggestions.items[0]?.after?.codec).toBe("AV1");
+    const title = (await (await created.app.request(`/api/library/items/${encodeURIComponent(itemId)}`, { headers })).json()) as {
+      item?: { videoTarget?: string | null };
+      settings?: { movieVideoTarget?: string; tvVideoTarget?: string };
+    };
+    expect(title.settings).toMatchObject({ movieVideoTarget: "hevc", tvVideoTarget: "av1" });
+    expect(title.item?.videoTarget ?? null).toBeNull();
+
+    const pinned = await created.app.request(`/api/library/series/${instanceId}/42/video-target`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ videoTarget: "hevc" }),
+    });
+    expect(pinned.status).toBe(200);
+    expect(((await (await created.app.request("/api/suggestions", { headers })).json()) as { items: unknown[] }).items).toHaveLength(0);
+    const pinnedTitle = (await (await created.app.request(`/api/library/items/${encodeURIComponent(itemId)}`, { headers })).json()) as {
+      item?: { videoTarget?: string | null };
+    };
+    expect(pinnedTitle.item?.videoTarget).toBe("hevc");
   });
 
   it("lets a series prefer stereo so 5.1 episodes get a stereo suggestion", async () => {

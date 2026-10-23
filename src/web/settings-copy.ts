@@ -27,8 +27,9 @@ export const SIZE_CAP_GRID: Array<{ heading: string; cells: Array<{ key: string;
   },
 ];
 
-export function transcodeBelowTargetLabel(target: "hevc" | "av1"): string {
-  return `Transcode video below Target Encode (${target === "av1" ? "AV1" : "HEVC"})`;
+export function transcodeBelowTargetLabel(movie: "hevc" | "av1", tv: "hevc" | "av1"): string {
+  const name = (target: "hevc" | "av1") => (target === "av1" ? "AV1" : "HEVC");
+  return `Transcode video below the encode target (Movies ${name(movie)}, TV ${name(tv)})`;
 }
 
 export function hardwareBackendLabel(backend: string): string {

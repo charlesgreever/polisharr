@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.ts";
 import { loadEnv } from "./env.ts";
 import { encodeDraftFromArgs, MCP_AUTH_ERROR, MCP_MASTER_ONLY, mcpToolNames } from "./mcp.ts";
@@ -12,11 +12,11 @@ function cookie(res: Response): string {
   return raw.split(";")[0] ?? "";
 }
 
-async function setup(role: "standalone" | "master" | "worker" = "standalone") {
+async function setup(role: "standalone" | "master" | "worker" = "standalone", av1 = false) {
   const dir = mkdtempSync(join(tmpdir(), "opt-"));
   mkdirSync(join(dir, "review"), { recursive: true });
   const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373", POLISHARR_ROLE: role });
-  const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null };
+  const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1, reason: null };
   const created = createApp({
     env,
     hardware: async () => hw,
@@ -234,6 +234,101 @@ describe("MCP agent access", () => {
     const job = ctx.store.getJob(String(queued.data.jobId));
     expect(job?.plan).toMatchObject({ origin: "custom", writeMode: "sidecar" });
     expect(job?.plan && "video" in job.plan && job.plan.video && (job.plan.video as { targetBytes?: number }).targetBytes).toBe(8 * 1024 ** 3);
+  });
+
+  it("uses the TV encode target when an episode plan omits the codec", async () => {
+    const ctx = await setup("standalone", true);
+    apps.push(ctx);
+    const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
+    const headers = { cookie: cookie(setupRes) };
+    await ctx.app.app.request("/api/integrations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kind: "sonarr", name: "Sonarr", url: "http://sonarr:8989", apiKey: "k", enabled: true }),
+    });
+    await ctx.app.app.request("/api/settings", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        languageConfirmed: true,
+        preferredLanguage: "eng",
+        reviewPath: join(ctx.dir, "review"),
+        movieVideoTarget: "hevc",
+        tvVideoTarget: "av1",
+      }),
+    });
+    const minted = (await (await ctx.app.app.request("/api/settings/mcp-token", { method: "POST", headers })).json()) as { token: string };
+    const instanceId = ctx.store.listInstances()[0]?.id ?? "";
+    const movieId = `${instanceId}:movie:1`;
+    const episodeId = `${instanceId}:episode:2`;
+    const report = {
+      sourceSig: "split-target",
+      sourceMethod: "ffprobe" as const,
+      listingState: "complete" as const,
+      durationSec: 3600,
+      sizeBytes: 2_000_000_000,
+      sizePerHourGb: 2,
+      videoCodec: "h264",
+      width: 1920,
+      height: 1080,
+      bitDepth: 8,
+      hdr: "none" as const,
+      audio: [{ index: 1, language: "eng", channels: 2, codec: "aac", title: "", untagged: false, commentary: false }],
+      subtitles: [],
+      hasChapters: false,
+      hasAttachments: false,
+    };
+    ctx.store.upsertItem({
+      id: movieId,
+      instanceId,
+      arrId: 1,
+      arrSeriesId: null,
+      arrEpisodeFileId: null,
+      type: "movie",
+      title: "Film",
+      showTitle: null,
+      season: null,
+      episode: null,
+      episodeTitle: null,
+      path: "/mnt/nas/movies/film.mkv",
+      sizeBytes: 2_000_000_000,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    ctx.store.upsertItem({
+      id: episodeId,
+      instanceId,
+      arrId: 2,
+      arrSeriesId: 9,
+      arrEpisodeFileId: 2,
+      type: "episode",
+      title: "Pilot",
+      showTitle: "Show",
+      season: 1,
+      episode: 1,
+      episodeTitle: "Pilot",
+      path: "/mnt/nas/tv/pilot.mkv",
+      sizeBytes: 2_000_000_000,
+      quality: "HD",
+      resolution: "1080",
+      profile: "HD",
+      tags: [],
+      posterRemoteUrl: null,
+      sizeExempt: false,
+    });
+    ctx.store.saveInspection(movieId, { ...report, sourceSig: movieId });
+    ctx.store.saveInspection(episodeId, { ...report, sourceSig: episodeId });
+    ctx.app.jobs.stop();
+    await vi.waitFor(async () => {
+      const movie = await tool(ctx.app.app, minted.token, "preview_plan", { itemId: movieId, targetGb: 1 });
+      const episode = await tool(ctx.app.app, minted.token, "preview_plan", { itemId: episodeId, targetGb: 1 });
+      expect(movie.data.codec).toBe("hevc");
+      expect(episode.data.codec).toBe("av1");
+    });
   });
 
   it("rejects an undersized encode and direct write when Settings use sidecar", async () => {

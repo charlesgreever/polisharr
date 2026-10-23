@@ -27,9 +27,9 @@ describe("settings copy", () => {
     ]);
   });
 
-  it("names the below-target checkbox after the current Encode Target", () => {
-    expect(transcodeBelowTargetLabel("hevc")).toBe("Transcode video below Target Encode (HEVC)");
-    expect(transcodeBelowTargetLabel("av1")).toBe("Transcode video below Target Encode (AV1)");
+  it("names the below-target checkbox after the Movies and TV encode targets", () => {
+    expect(transcodeBelowTargetLabel("hevc", "hevc")).toBe("Transcode video below the encode target (Movies HEVC, TV HEVC)");
+    expect(transcodeBelowTargetLabel("hevc", "av1")).toBe("Transcode video below the encode target (Movies HEVC, TV AV1)");
   });
 
   it("discloses device names and that clearing history leaves live coverage", () => {

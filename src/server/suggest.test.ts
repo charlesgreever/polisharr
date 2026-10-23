@@ -770,7 +770,8 @@ describe("suggestion engine", () => {
   it("suggests AV1 for under-cap HEVC when Encode Target is AV1 and below-target is on", () => {
     const settings = {
       ...DEFAULT_SETTINGS,
-      videoTarget: "av1" as const,
+      movieVideoTarget: "av1" as const,
+      tvVideoTarget: "av1" as const,
       suggestionDefaults: {
         ...DEFAULT_SETTINGS.suggestionDefaults,
         transcodeToSizeCap: false,
@@ -820,7 +821,8 @@ describe("suggestion engine", () => {
       report: report({ sizePerHourGb: 1, videoCodec: "h264", hdr: "none", audio: [], subtitles: [] }),
       settings: {
         ...DEFAULT_SETTINGS,
-        videoTarget: "av1",
+        movieVideoTarget: "av1",
+        tvVideoTarget: "av1",
         suggestionDefaults: {
           ...DEFAULT_SETTINGS.suggestionDefaults,
           transcodeToSizeCap: false,

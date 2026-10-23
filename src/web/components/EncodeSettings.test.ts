@@ -7,7 +7,8 @@ describe("encode settings", () => {
   it("places an explicit save action beside concurrent jobs", () => {
     const html = renderToStaticMarkup(createElement(EncodeSettings, {
       data: {
-        videoTarget: "hevc",
+        movieVideoTarget: "hevc",
+        tvVideoTarget: "av1",
         concurrency: 4,
         conservativeMode: false,
         offPeakEnabled: false,
@@ -21,14 +22,18 @@ describe("encode settings", () => {
 
     expect(html).toContain("Concurrent jobs");
     expect(html).toContain("Save encode settings");
+    expect(html).toContain("Movies");
+    expect(html).toContain("TV");
     expect(html).toContain("AV1");
-    expect(html).toContain("Automatic Suggestions that re-encode video use this target");
+    expect(html).toContain("use the Movies target or the TV target");
+    expect(html.indexOf("Movies encode target")).toBeLessThan(html.indexOf("TV encode target"));
   });
 
   it("hides AV1 when hardware cannot encode it", () => {
     const html = renderToStaticMarkup(createElement(EncodeSettings, {
       data: {
-        videoTarget: "hevc",
+        movieVideoTarget: "hevc",
+        tvVideoTarget: "hevc",
         concurrency: 1,
         conservativeMode: false,
         offPeakEnabled: false,

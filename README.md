@@ -99,11 +99,13 @@ Under **Default suggestion operations**, **Convert MP4 to MKV** is off by defaul
 
 ## Encode target and preferred audio
 
-Settings **Target** under Encode is the house codec for automatic Suggestions: HEVC, or AV1 when an encode node can encode it. **Transcode video below Target Encode** flags H.264, MPEG-2, VC-1, and similar codecs even when the file is under its size cap. When the target is AV1, it also flags HEVC. Already-AV1 files stay as they are.
+Settings **Encode** has a **Movies** target and a **TV** target. Automatic Suggestions that re-encode video use the target for that library. Both start as HEVC. AV1 appears when an encode node can encode it. An older install copies its previous Target onto both until you save a difference.
 
-Each movie row and that movie's title page have **Encode target**. Pick HEVC, AV1, or **House default** to follow Settings. Saving recomputes the automatic suggestion for that film. The Codec control on a custom title plan is only for the job you queue there.
+**Transcode video below the encode target** flags H.264, MPEG-2, VC-1, and similar codecs even when the file is under its size cap. Movies use the Movies target. Episodes use the TV target. When that target is AV1, the checkbox also flags HEVC. Already-AV1 files stay as they are.
 
-A series header has the same **Encode target**. It applies to every episode of that show, including files Sonarr imports later. Episode rows have no codec dropdown.
+Each movie row and that movie's title page have **Encode target**. Pick HEVC, AV1, or **House default** to follow the Movies target. Saving recomputes the automatic suggestion for that film. The Codec control on a custom title plan starts on that film's resolved target and applies only to the job you queue there. A playback repair leaves the codec for you to choose.
+
+A series header has the same **Encode target**. **House default** follows the TV target. The choice applies to every episode of that show, including files Sonarr imports later. Episode rows have no codec dropdown.
 
 Series headers also have **Preferred audio**:
 

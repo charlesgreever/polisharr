@@ -76,7 +76,7 @@ import {
   type McpHost,
 } from "./mcp.ts";
 import type { ArrKind, CustomPlanDraft, HardwareInfo, PlayerKind, Settings, Suggestion } from "./types.ts";
-import { parseAudioMix, parseVideoTarget } from "./types.ts";
+import { houseVideoTarget, parseAudioMix, parseVideoTarget, type VideoTarget } from "./types.ts";
 import { createInspectionRunner } from "./inspection-runner.ts";
 import { createLibraryReadModel } from "./library-read-model.ts";
 import { collectTitleLinks } from "./external-links.ts";
@@ -506,6 +506,10 @@ export function createApp(opts: AppOptions) {
     return null;
   }
 
+  function encodeTargetFor(item: NonNullable<ReturnType<Store["getItem"]>>): VideoTarget {
+    return store.videoTargetForItem(item) ?? houseVideoTarget(store.getSettings(), item.type);
+  }
+
   const mcpHost: McpHost = {
     version,
     searchTitles: (query) => store.listItems()
@@ -625,7 +629,7 @@ export function createApp(opts: AppOptions) {
         sizeExempt: item.sizeExempt,
         excluded: false,
         forceStereo: true,
-        videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
+        videoTarget: encodeTargetFor(item),
         av1Available: clusterAv1(),
         hardwareAvailable: clusterHardware(),
       });
@@ -677,7 +681,7 @@ export function createApp(opts: AppOptions) {
     }
     const settings = store.getSettings();
     const video = parsed.draft.video ?? { mode: "copy" as const };
-    const codec = video.mode === "copy" ? undefined : (video.codec ?? store.videoTargetForItem(item) ?? settings.videoTarget);
+    const codec = video.mode === "copy" ? undefined : (video.codec ?? encodeTargetFor(item));
     const draft: CustomPlanDraft = {
       ...parsed.draft,
       video: video.mode === "copy"
@@ -1268,7 +1272,7 @@ export function createApp(opts: AppOptions) {
       settings,
       sizeExempt: item.sizeExempt,
       excluded,
-      videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
+      videoTarget: encodeTargetFor(item),
       av1Available: clusterAv1(),
       hardwareAvailable: clusterHardware(),
       audioMix: store.audioMixForItem(item),
@@ -1360,7 +1364,7 @@ export function createApp(opts: AppOptions) {
       sizeExempt: false,
       excluded: false,
       forceTranscode: true,
-      videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
+      videoTarget: encodeTargetFor(item),
       av1Available: clusterAv1(),
       hardwareAvailable: clusterHardware(),
     });
@@ -1387,7 +1391,7 @@ export function createApp(opts: AppOptions) {
       sizeExempt: item.sizeExempt,
       excluded: false,
       forceStereo: true,
-      videoTarget: store.videoTargetForItem(item) ?? settings.videoTarget,
+      videoTarget: encodeTargetFor(item),
       av1Available: clusterAv1(),
       hardwareAvailable: clusterHardware(),
     });
@@ -1457,6 +1461,9 @@ export function createApp(opts: AppOptions) {
     const item = store.getItem(c.req.param("id"));
     if (!item) return c.json({ error: "That title is not in the library." }, 404);
     const presented = library.item(item.id, true);
+    const detail = presented && item.type === "episode"
+      ? { ...presented, videoTarget: store.videoTargetForItem(item) }
+      : presented;
     const links = await collectTitleLinks({
       item,
       instance: store.getInstance(item.instanceId),
@@ -1469,12 +1476,13 @@ export function createApp(opts: AppOptions) {
       },
     });
     return c.json({
-      item: { ...presented, links },
+      item: { ...detail, links },
       hardware: lastHardware,
       av1Available: clusterAv1(),
       settings: {
         writeMode: store.getSettings().writeMode,
-        videoTarget: store.getSettings().videoTarget,
+        movieVideoTarget: store.getSettings().movieVideoTarget,
+        tvVideoTarget: store.getSettings().tvVideoTarget,
         preferredLanguage: store.getSettings().preferredLanguage,
       },
       languageId: { available: Boolean(opts.runLanguageLid || opts.env.whisperLid) },
@@ -2502,7 +2510,8 @@ function dirnameOf(path: string): string {
 function suggestionSettingsChanged(current: Settings, next: Settings): boolean {
   return (
     current.preferredLanguage !== next.preferredLanguage ||
-    current.videoTarget !== next.videoTarget ||
+    current.movieVideoTarget !== next.movieVideoTarget ||
+    current.tvVideoTarget !== next.tvVideoTarget ||
     JSON.stringify(current.sizeCaps) !== JSON.stringify(next.sizeCaps) ||
     JSON.stringify(current.suggestionDefaults) !== JSON.stringify(next.suggestionDefaults)
   );

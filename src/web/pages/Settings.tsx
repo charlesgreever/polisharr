@@ -274,7 +274,8 @@ export function SettingsPage({ firstRun, onChange }: { firstRun: FirstRun; onCha
         <SuggestionDefaultsSettings
           value={data.suggestionDefaults}
           writeMode={data.queueNewImportWriteMode ?? "sidecar"}
-          videoTarget={data.videoTarget}
+          movieVideoTarget={data.movieVideoTarget}
+          tvVideoTarget={data.tvVideoTarget}
           onChange={(suggestionDefaults) => setData({ ...data, suggestionDefaults })}
           onWriteModeChange={(queueNewImportWriteMode) => setData({ ...data, queueNewImportWriteMode })}
           onSave={() => save("caps-defaults")}

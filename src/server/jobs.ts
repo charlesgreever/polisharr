@@ -25,6 +25,7 @@ import { clearStagedBackup, promote, promotedPath, recoverStagedReplace, type Pr
 import { assignProfile, PROFILE_NAMES } from "./arr-profiles.ts";
 import {
   effectiveWriteMode,
+  houseVideoTarget,
   PLAYBACK_REPLACEMENT_PREFLIGHT_MS,
   profileAssignmentEligible,
   type ExecutablePlan,
@@ -565,7 +566,7 @@ export class JobService {
       reviewDir: settings.reviewPath,
       plan: { ...resolved, writeMode },
       report,
-      target: this.opts.store.videoTargetForItem(item) ?? settings.videoTarget,
+      target: this.opts.store.videoTargetForItem(item) ?? houseVideoTarget(settings, item.type),
       conservative: settings.conservativeMode,
       writeMode,
       nodeId: job.nodeId ?? this.localNodeId(),
@@ -665,7 +666,7 @@ export class JobService {
         suggestion: isExecutablePlan(job.plan) ? undefined : job.plan,
         plan,
         report,
-        target: this.opts.store.videoTargetForItem(item) ?? settings.videoTarget,
+        target: this.opts.store.videoTargetForItem(item) ?? houseVideoTarget(settings, item.type),
         backend: hardware.backend,
         vaapiDevice: hardware.vaapiDevice,
         qsv: hardware.qsv === true,
@@ -1128,7 +1129,7 @@ export class JobService {
     const targetBytes = aggressiveTargetBytes(previousTarget);
     const codec = previous?.video.kind === "size" || previous?.video.kind === "quality"
       ? previous.video.codec
-      : this.opts.store.getSettings().videoTarget;
+      : this.opts.store.videoTargetForItem(item) ?? houseVideoTarget(this.opts.store.getSettings(), item.type);
     const downscale1080p = previous?.video.kind === "size" || previous?.video.kind === "quality"
       ? previous.video.downscale1080p
       : false;

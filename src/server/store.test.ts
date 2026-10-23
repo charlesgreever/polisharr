@@ -129,7 +129,12 @@ describe("store schema migration", () => {
     const store = new Store(join(mkdtempSync(join(tmpdir(), "opt-corrupt-settings-")), "polisharr.db"));
     stores.push(store);
     store.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?)").run("{broken");
-    expect(store.getSettings()).toMatchObject({ writeMode: "sidecar", concurrency: 1, videoTarget: "hevc" });
+    expect(store.getSettings()).toMatchObject({
+      writeMode: "sidecar",
+      concurrency: 1,
+      movieVideoTarget: "hevc",
+      tvVideoTarget: "hevc",
+    });
   });
 
   it("defaults profile auto-assign on for existing installs and persists an opt-out", () => {

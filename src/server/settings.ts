@@ -4,6 +4,7 @@ import {
   type Settings,
   type SizeCaps,
   type SuggestionDefaults,
+  type VideoTarget,
 } from "./types.ts";
 
 type SettingsResult = { ok: true; settings: Settings } | { ok: false; error: string };
@@ -23,7 +24,11 @@ export function parseStoredSettings(value: unknown): Settings {
   for (const field of ["preferredLanguage", "reviewPath", "offPeakStart", "offPeakEnd", "defaultEncodeNodeId"] as const) {
     if (typeof raw[field] === "string") valid[field] = raw[field];
   }
-  if (raw.videoTarget === "hevc" || raw.videoTarget === "av1") valid.videoTarget = raw.videoTarget;
+  const legacyTarget = storedVideoTarget(raw.videoTarget);
+  const movieVideoTarget = storedVideoTarget(raw.movieVideoTarget) ?? legacyTarget;
+  const tvVideoTarget = storedVideoTarget(raw.tvVideoTarget) ?? legacyTarget;
+  if (movieVideoTarget) valid.movieVideoTarget = movieVideoTarget;
+  if (tvVideoTarget) valid.tvVideoTarget = tvVideoTarget;
   if (raw.writeMode === "sidecar" || raw.writeMode === "direct") valid.writeMode = raw.writeMode;
   const importWriteMode = readImportWriteMode(raw.queueNewImportWriteMode);
   if (importWriteMode) valid.queueNewImportWriteMode = importWriteMode;
@@ -54,7 +59,9 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
     return invalid("preferredLanguage");
   }
   if ("reviewPath" in raw && typeof raw.reviewPath !== "string") return invalid("reviewPath");
-  if ("videoTarget" in raw && raw.videoTarget !== "hevc" && raw.videoTarget !== "av1") return invalid("videoTarget");
+  for (const field of ["movieVideoTarget", "tvVideoTarget", "videoTarget"] as const) {
+    if (field in raw && !storedVideoTarget(raw[field])) return invalid(field);
+  }
   if ("writeMode" in raw && raw.writeMode !== "sidecar" && raw.writeMode !== "direct") return invalid("writeMode");
   if ("queueNewImportWriteMode" in raw && readImportWriteMode(raw.queueNewImportWriteMode) === null) {
     return invalid("queueNewImportWriteMode");
@@ -69,6 +76,8 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
   if (!sizeCaps) return invalid("sizeCaps");
   const suggestionDefaults = validSuggestionDefaults(raw.suggestionDefaults, current.suggestionDefaults, true);
   if (!suggestionDefaults) return invalid("suggestionDefaults");
+  const legacyTarget = storedVideoTarget(raw.videoTarget);
+  const splitSent = "movieVideoTarget" in raw || "tvVideoTarget" in raw;
 
   return {
     ok: true,
@@ -78,7 +87,8 @@ export function updateSettings(current: Settings, value: unknown): SettingsResul
       reviewPath: stringValue(raw.reviewPath, current.reviewPath),
       sizeCaps,
       suggestionDefaults,
-      videoTarget: raw.videoTarget === "av1" || raw.videoTarget === "hevc" ? raw.videoTarget : current.videoTarget,
+      movieVideoTarget: chosenHouseTarget(raw, "movieVideoTarget", current.movieVideoTarget, legacyTarget, splitSent),
+      tvVideoTarget: chosenHouseTarget(raw, "tvVideoTarget", current.tvVideoTarget, legacyTarget, splitSent),
       concurrency: integerValue(raw.concurrency, current.concurrency),
       conservativeMode: booleanValue(raw.conservativeMode, current.conservativeMode),
       offPeakEnabled: booleanValue(raw.offPeakEnabled, current.offPeakEnabled),
@@ -131,6 +141,23 @@ function validSuggestionDefaults(value: unknown, fallback: SuggestionDefaults, s
     result[key] = raw[key];
   }
   return result;
+}
+
+function storedVideoTarget(value: unknown): VideoTarget | undefined {
+  return value === "hevc" || value === "av1" ? value : undefined;
+}
+
+function chosenHouseTarget(
+  raw: Record<string, unknown>,
+  field: "movieVideoTarget" | "tvVideoTarget",
+  current: VideoTarget,
+  legacy: VideoTarget | undefined,
+  splitSent: boolean,
+): VideoTarget {
+  const explicit = storedVideoTarget(raw[field]);
+  if (explicit) return explicit;
+  if (splitSent) return current;
+  return legacy ?? current;
 }
 
 function record(value: unknown): Record<string, unknown> {

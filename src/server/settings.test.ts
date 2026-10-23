@@ -17,9 +17,45 @@ describe("settings boundary", () => {
     expect(parseStoredSettings({ sizeCaps: { movie1080p: 2.5, movie4kSdr: 6, movie4kHdr: 8, tv1080p: 1, tv4k: 4 } }).sizeCaps.tv4kHdr).toBe(6);
     expect(parseStoredSettings({ writeMode: "erase", videoTarget: "vp9", concurrency: 0 })).toMatchObject({
       writeMode: "sidecar",
-      videoTarget: "hevc",
+      movieVideoTarget: "hevc",
+      tvVideoTarget: "hevc",
       concurrency: 1,
     });
+    expect(parseStoredSettings({ videoTarget: "av1" })).toMatchObject({
+      movieVideoTarget: "av1",
+      tvVideoTarget: "av1",
+    });
+    expect(parseStoredSettings({ videoTarget: "hevc", tvVideoTarget: "av1" })).toMatchObject({
+      movieVideoTarget: "hevc",
+      tvVideoTarget: "av1",
+    });
+    expect(parseStoredSettings({ videoTarget: "av1" })).not.toHaveProperty("videoTarget");
+  });
+
+  it("keeps movie and TV encode targets independent", () => {
+    const legacy = updateSettings(DEFAULT_SETTINGS, { videoTarget: "av1" });
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) return;
+    expect(legacy.settings.movieVideoTarget).toBe("av1");
+    expect(legacy.settings.tvVideoTarget).toBe("av1");
+    expect(legacy.settings).not.toHaveProperty("videoTarget");
+
+    const split = updateSettings(DEFAULT_SETTINGS, { videoTarget: "av1", movieVideoTarget: "hevc", tvVideoTarget: "av1" });
+    expect(split.ok).toBe(true);
+    if (!split.ok) return;
+    expect(split.settings.movieVideoTarget).toBe("hevc");
+    expect(split.settings.tvVideoTarget).toBe("av1");
+
+    const tvOnly = updateSettings(
+      { ...DEFAULT_SETTINGS, movieVideoTarget: "av1", tvVideoTarget: "hevc" },
+      { tvVideoTarget: "av1" },
+    );
+    expect(tvOnly.ok).toBe(true);
+    if (!tvOnly.ok) return;
+    expect(tvOnly.settings.movieVideoTarget).toBe("av1");
+    expect(tvOnly.settings.tvVideoTarget).toBe("av1");
+    expect(updateSettings(DEFAULT_SETTINGS, { tvVideoTarget: "vp9" }).ok).toBe(false);
+    expect(updateSettings(DEFAULT_SETTINGS, { movieVideoTarget: "vp9" }).ok).toBe(false);
   });
 
   it("keeps an empty default encode node as this machine", () => {

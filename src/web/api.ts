@@ -49,7 +49,7 @@ export const api = {
     item: LibraryRow;
     hardware: Hardware;
     av1Available?: boolean;
-    settings: { writeMode: string; videoTarget: string; preferredLanguage?: string };
+    settings: { writeMode: string; movieVideoTarget: string; tvVideoTarget: string; preferredLanguage?: string };
     languageId?: { available?: boolean };
     pgsOcr?: { available?: boolean };
     playback?: PlaybackTitleSummary;
@@ -379,7 +379,8 @@ export type SettingsPayload = {
     searchPreferredLanguage: boolean;
     queueNewImports: boolean;
   };
-  videoTarget: "hevc" | "av1";
+  movieVideoTarget: "hevc" | "av1";
+  tvVideoTarget: "hevc" | "av1";
   concurrency: number;
   conservativeMode: boolean;
   offPeakEnabled: boolean;

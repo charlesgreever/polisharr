@@ -55,7 +55,7 @@ export function SeriesPage() {
   useEffect(() => {
     void load(true);
     void api.settings().then((settings) => {
-      setHouseVideoTarget(settings.videoTarget === "av1" ? "av1" : "hevc");
+      setHouseVideoTarget(settings.tvVideoTarget === "av1" ? "av1" : "hevc");
     }).catch(() => undefined);
     void api.nodes().then((payload) => {
       setAv1Available(Boolean(payload.av1Available));
@@ -309,7 +309,7 @@ function SeriesGroup({
           value={summary.videoTarget ?? null}
           houseTarget={houseVideoTarget}
           av1Available={av1Available}
-          tip="Chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. House default follows Settings."
+          tip="Chooses HEVC or AV1 for automatic Suggestions on every episode, including later imports. House default follows the TV target in Settings."
           onChange={(videoTarget) => {
             void api.setSeriesVideoTarget(summary.instanceId, summary.arrSeriesId, videoTarget).then((result) => {
               onPatch({

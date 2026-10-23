@@ -11,7 +11,8 @@ export function SuggestionDefaultsSettings({
   onChange,
   onWriteModeChange,
   onSave,
-  videoTarget = "hevc",
+  movieVideoTarget = "hevc",
+  tvVideoTarget = "hevc",
   status = null,
 }: {
   value: SuggestionDefaults;
@@ -19,7 +20,8 @@ export function SuggestionDefaultsSettings({
   onChange: (value: SuggestionDefaults) => void;
   onWriteModeChange: (mode: ImportWriteMode) => void;
   onSave: () => void;
-  videoTarget?: "hevc" | "av1";
+  movieVideoTarget?: "hevc" | "av1";
+  tvVideoTarget?: "hevc" | "av1";
   status?: ReactNode;
 }) {
   const checkbox = (field: keyof SuggestionDefaults, label: string, tip: string) => (
@@ -41,7 +43,7 @@ export function SuggestionDefaultsSettings({
       {checkbox("removeNonPreferredAudio", "Remove non-preferred audio tracks", "Automatic Suggestions drop audio tracks that are not in your preferred language.")}
       {checkbox("addStereo", "Add stereo from surround audio", "Adds an AAC stereo track to a surround file that has no stereo track in your language, including a 5.1 mix, and keeps the original mix.")}
       {checkbox("transcodeToSizeCap", "Transcode files over their size cap", "Transcodes when the file is above the cap for its kind.")}
-      {checkbox("transcodeBelowHevc", transcodeBelowTargetLabel(videoTarget), "Flags H.264, MPEG-2, VC-1, and similar codecs even under the size cap. When the encode target is AV1, it also flags HEVC.")}
+      {checkbox("transcodeBelowHevc", transcodeBelowTargetLabel(movieVideoTarget, tvVideoTarget), "Flags H.264, MPEG-2, VC-1, and similar codecs even under the size cap. Movies use the Movies target. Episodes use the TV target. When that target is AV1, HEVC is flagged too.")}
       {checkbox("convertMp4ToMkv", "Convert MP4 to MKV", "Offers to remux MP4 files into MKV.")}
       {checkbox("convertIsoToMkv", "Convert ISO to MKV", "Offers to remux disc images into MKV.")}
       {checkbox("searchPreferredLanguage", "Suggest a Radarr or Sonarr search when the only audio is not preferred", "Suggests a search when the only audio is not your language. The search waits for you to confirm and does not delete a file until you agree.")}

@@ -119,7 +119,7 @@ export function MoviesPage() {
   };
   useEffect(() => {
     void api.settings().then((settings) => {
-      setHouseVideoTarget(settings.videoTarget === "av1" ? "av1" : "hevc");
+      setHouseVideoTarget(settings.movieVideoTarget === "av1" ? "av1" : "hevc");
     }).catch(() => undefined);
     void api.nodes().then((payload) => setAv1Available(Boolean(payload.av1Available))).catch(() => undefined);
   }, []);
@@ -172,7 +172,7 @@ export function MoviesPage() {
                   onQuality={() => setSort("quality")}
                   onSize={() => setSort("size")}
                   encodeTarget
-                  encodeTargetTip="Chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows Settings. Queue uses the automatic suggestion."
+                  encodeTargetTip="Chooses HEVC or AV1 for automatic Suggestions on that movie. House default follows the Movies target in Settings. Queue uses the automatic suggestion."
                   actionsTip="Queue uses the automatic suggestion. Force adds the title to Suggestions. Stereo adds a stereo track to the plan. Exempt keeps a large file off the size cap so Polisharr only offers language cleanup and stereo. Replace and Remove change the movie in Radarr."
                 />
               </tr>

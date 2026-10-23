@@ -5,8 +5,38 @@ import { Tip } from "./ui";
 
 type EncodeSettingsData = Pick<
   SettingsPayload,
-  "videoTarget" | "concurrency" | "conservativeMode" | "offPeakEnabled" | "offPeakStart" | "offPeakEnd"
+  "movieVideoTarget" | "tvVideoTarget" | "concurrency" | "conservativeMode" | "offPeakEnabled" | "offPeakStart" | "offPeakEnd"
 >;
+
+function TargetField({
+  label,
+  value,
+  av1Available,
+  onChange,
+}: {
+  label: string;
+  value: "hevc" | "av1";
+  av1Available: boolean;
+  onChange: (target: "hevc" | "av1") => void;
+}) {
+  return (
+    <label className="block space-y-1.5 text-sm">
+      <span className="font-medium text-muted">{label}</span>
+      <select
+        className={FIELD_CONTROL}
+        aria-label={`${label} encode target`}
+        value={av1Available ? value : "hevc"}
+        onChange={(event) => {
+          const target = event.target.value;
+          if (target === "hevc" || (target === "av1" && av1Available)) onChange(target);
+        }}
+      >
+        <option value="hevc">HEVC</option>
+        {av1Available && <option value="av1">AV1</option>}
+      </select>
+    </label>
+  );
+}
 
 export function EncodeSettings({
   data,
@@ -27,19 +57,23 @@ export function EncodeSettings({
     <div className="glass space-y-3 p-4">
       <h2 className="flex items-center gap-1 font-semibold">
         Encode
-        <Tip label="Encode">Automatic Suggestions that re-encode video use this target. AV1 appears only when encode hardware can encode it.</Tip>
+        <Tip label="Encode">Automatic Suggestions that re-encode video use the Movies target or the TV target. A movie or a series can still choose its own codec. AV1 appears only when an encode node can encode it.</Tip>
       </h2>
       <p className="m-0 text-sm text-muted">Detected hardware: {hardwareLabel}.</p>
-      <label className="block space-y-1.5 text-sm">
-        <span className="font-medium text-muted">Target</span>
-        <select className={FIELD_CONTROL} value={av1Available ? data.videoTarget : "hevc"} onChange={(event) => {
-          const target = event.target.value;
-          if (target === "hevc" || (target === "av1" && av1Available)) onChange({ videoTarget: target });
-        }}>
-          <option value="hevc">HEVC</option>
-          {av1Available && <option value="av1">AV1</option>}
-        </select>
-      </label>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <TargetField
+          label="Movies"
+          value={data.movieVideoTarget}
+          av1Available={av1Available}
+          onChange={(movieVideoTarget) => onChange({ movieVideoTarget })}
+        />
+        <TargetField
+          label="TV"
+          value={data.tvVideoTarget}
+          av1Available={av1Available}
+          onChange={(tvVideoTarget) => onChange({ tvVideoTarget })}
+        />
+      </div>
       <label className="block space-y-1.5 text-sm">
         <span className="font-medium text-muted">Concurrent jobs</span>
         <input

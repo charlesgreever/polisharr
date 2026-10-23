@@ -15,11 +15,17 @@ const defaults = {
   queueNewImports: false,
 };
 
-function markup(queueNewImports: boolean, writeMode: "sidecar" | "follow" | "direct", videoTarget?: "hevc" | "av1"): string {
+function markup(
+  queueNewImports: boolean,
+  writeMode: "sidecar" | "follow" | "direct",
+  movieVideoTarget?: "hevc" | "av1",
+  tvVideoTarget?: "hevc" | "av1",
+): string {
   return renderToStaticMarkup(createElement(SuggestionDefaultsSettings, {
     value: { ...defaults, queueNewImports },
     writeMode,
-    videoTarget,
+    movieVideoTarget,
+    tvVideoTarget,
     onChange: () => undefined,
     onWriteModeChange: () => undefined,
     onSave: () => undefined,
@@ -35,7 +41,7 @@ describe("suggestion defaults settings", () => {
     const html = markup(false, "sidecar");
 
     expect(html).toContain("Default suggestion operations");
-    expect(html).toContain("Transcode video below Target Encode (HEVC)");
+    expect(html).toContain("Transcode video below the encode target (Movies HEVC, TV HEVC)");
     expect(html).toContain("Convert MP4 to MKV");
     expect(html).toContain("Convert ISO to MKV");
     expect(html).toContain("Queue new Arr imports automatically");
@@ -64,10 +70,10 @@ describe("suggestion defaults settings", () => {
     expect(html).toContain("Direct write replaces the library file after the integrity check");
   });
 
-  it("names the below-target checkbox after Encode Target AV1", () => {
-    const html = markup(false, "sidecar", "av1");
+  it("names the below-target checkbox after the Movies and TV targets", () => {
+    const html = markup(false, "sidecar", "hevc", "av1");
 
-    expect(html).toContain("Transcode video below Target Encode (AV1)");
-    expect(html).not.toContain("Transcode video below Target Encode (HEVC)");
+    expect(html).toContain("Transcode video below the encode target (Movies HEVC, TV AV1)");
+    expect(html).toContain("Episodes use the TV target");
   });
 });

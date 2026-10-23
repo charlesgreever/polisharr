@@ -89,9 +89,16 @@ export function TitlePage() {
   useEffect(() => {
     void api.title(id).then((r) => {
       setItem(r.item);
-      setAv1(Boolean(r.av1Available ?? r.hardware.av1));
       setWriteDefault(r.settings.writeMode);
-      setHouseVideoTarget(r.settings.videoTarget === "av1" ? "av1" : "hevc");
+      const house = r.item.type === "episode"
+        ? (r.settings.tvVideoTarget === "av1" ? "av1" : "hevc")
+        : (r.settings.movieVideoTarget === "av1" ? "av1" : "hevc");
+      const av1Ready = Boolean(r.av1Available ?? r.hardware.av1);
+      setHouseVideoTarget(house);
+      setAv1(av1Ready);
+      if (!repairId) {
+        setCodec((r.item.videoTarget ?? house) === "av1" && av1Ready ? "av1" : "hevc");
+      }
       if (r.settings.preferredLanguage) setPreferredLanguage(r.settings.preferredLanguage);
       setLanguageIdAvailable(Boolean(r.languageId?.available));
       setPgsOcrAvailable(Boolean(r.pgsOcr?.available));
@@ -286,7 +293,7 @@ export function TitlePage() {
             value={item.videoTarget ?? null}
             houseTarget={houseVideoTarget}
             av1Available={av1}
-            tip="Automatic Suggestions for this movie use this codec. House default follows Settings. The custom plan Codec below is only for one queued job."
+            tip="Automatic Suggestions for this movie use this codec. House default follows the Movies target in Settings. The custom plan Codec below is only for one queued job."
             onChange={(videoTarget) => {
               void api.setItemVideoTarget(item.id, videoTarget).then((result) => {
                 setItem(result.item);

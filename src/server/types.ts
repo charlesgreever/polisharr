@@ -143,7 +143,8 @@ export type Settings = {
   reviewPath: string;
   sizeCaps: SizeCaps;
   suggestionDefaults: SuggestionDefaults;
-  videoTarget: VideoTarget;
+  movieVideoTarget: VideoTarget;
+  tvVideoTarget: VideoTarget;
   concurrency: number;
   conservativeMode: boolean;
   offPeakEnabled: boolean;
@@ -165,7 +166,8 @@ export const DEFAULT_SETTINGS: Settings = {
   reviewPath: "",
   sizeCaps: { ...DEFAULT_SIZE_CAPS },
   suggestionDefaults: { ...DEFAULT_SUGGESTION_DEFAULTS },
-  videoTarget: "hevc",
+  movieVideoTarget: "hevc",
+  tvVideoTarget: "hevc",
   concurrency: 1,
   conservativeMode: false,
   offPeakEnabled: false,
@@ -179,6 +181,13 @@ export const DEFAULT_SETTINGS: Settings = {
   queueNewImportWriteMode: "sidecar",
   defaultEncodeNodeId: "",
 };
+
+export function houseVideoTarget(
+  settings: Pick<Settings, "movieVideoTarget" | "tvVideoTarget">,
+  type: MediaType,
+): VideoTarget {
+  return type === "episode" ? settings.tvVideoTarget : settings.movieVideoTarget;
+}
 
 export type ArrInstance = {
   id: string;

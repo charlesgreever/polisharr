@@ -80,7 +80,7 @@ import { houseVideoTarget, parseAudioMix, parseVideoTarget, type VideoTarget } f
 import { createInspectionRunner } from "./inspection-runner.ts";
 import { createLibraryReadModel } from "./library-read-model.ts";
 import { collectTitleLinks } from "./external-links.ts";
-import { shouldQueueNewImport } from "./auto-queue.ts";
+import { msUntilNewImportQueue, NEW_IMPORT_QUEUE_DELAY_MS } from "./auto-queue.ts";
 import { updateSettings } from "./settings.ts";
 import { describePlacement } from "./fs-copy.ts";
 import { LibrarySync, pathsOverlap } from "./library-sync.ts";
@@ -153,6 +153,7 @@ export type AppOptions = {
   probe?: (path: string, size: number) => Promise<Record<string, unknown>>;
   listIso?: (path: string, size: number) => Promise<string>;
   clock?: () => number;
+  importQueueDelayMs?: number;
   readable?: (path: string) => Promise<boolean>;
   clientAddress?: (context: Context) => string | undefined;
   syncIntervalMs?: number;
@@ -176,6 +177,8 @@ export type AppOptions = {
 export function createApp(opts: AppOptions) {
   const version = opts.version ?? readAppVersion();
   const store = opts.store ?? new Store(opts.env.dbPath);
+  const importQueueDelayMs = opts.importQueueDelayMs ?? NEW_IMPORT_QUEUE_DELAY_MS;
+  const importQueueTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const secret = loadOrCreateSecret(opts.env.secretPath);
   const httpFetch = opts.fetch ?? fetch;
   const hardware = opts.hardware ?? detectHardware(opts.env.ffmpeg);
@@ -1250,14 +1253,57 @@ export function createApp(opts: AppOptions) {
 
   function afterInspect(itemId: string): Suggestion | null {
     const suggestion = recomputeSuggestion(itemId);
-    const item = store.getItem(itemId);
-    const settings = store.getSettings();
-    if (!item || !suggestion || !shouldQueueNewImport({ settings, item, suggestion })) {
-      return suggestion;
-    }
-    const mode = settings.queueNewImportWriteMode;
-    jobs.enqueue(itemId, suggestion, mode === "follow" ? { runNow: false } : { writeMode: mode, runNow: false });
+    scheduleAutomaticImport(itemId);
     return suggestion;
+  }
+
+  function clearImportQueueTimer(itemId: string): void {
+    const timer = importQueueTimers.get(itemId);
+    if (!timer) return;
+    clearTimeout(timer);
+    importQueueTimers.delete(itemId);
+  }
+
+  function stopImportQueues(): void {
+    for (const itemId of importQueueTimers.keys()) clearImportQueueTimer(itemId);
+  }
+
+  function scheduleAutomaticImport(itemId: string): void {
+    if (isWorker) return;
+    clearImportQueueTimer(itemId);
+    const item = store.getItem(itemId);
+    const suggestion = store.openSuggestionForItem(itemId) ?? null;
+    const settings = store.getSettings();
+    const wait = item
+      ? msUntilNewImportQueue({ settings, item, suggestion, now: Date.now(), delayMs: importQueueDelayMs })
+      : null;
+    if (wait === null || !item || !suggestion) {
+      store.deleteImportQueueWait(itemId);
+      return;
+    }
+    if (wait === 0) {
+      const mode = settings.queueNewImportWriteMode;
+      jobs.enqueue(itemId, suggestion, mode === "follow" ? { runNow: false } : { writeMode: mode, runNow: false });
+      store.deleteImportQueueWait(itemId);
+      return;
+    }
+    store.saveImportQueueWait(itemId, Date.now() + wait);
+    const timer = setTimeout(() => {
+      importQueueTimers.delete(itemId);
+      try {
+        scheduleAutomaticImport(itemId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        // The wait can fire after a test closes the database.
+        if (!/not open/i.test(message)) throw error;
+      }
+    }, wait);
+    timer.unref?.();
+    importQueueTimers.set(itemId, timer);
+  }
+
+  function resumeImportQueueWaits(): void {
+    for (const row of store.listImportQueueWaits()) scheduleAutomaticImport(row.itemId);
   }
 
   function recomputeSuggestion(itemId: string): Suggestion | null {
@@ -2296,6 +2342,7 @@ export function createApp(opts: AppOptions) {
   }
 
   if (!isWorker) {
+    resumeImportQueueWaits();
     sync.start();
     void inspections.inspectPending();
   }
@@ -2480,7 +2527,7 @@ export function createApp(opts: AppOptions) {
     }
   }
 
-  return { app, store, jobs, previews, sync, inspectPending: inspections.inspectPending, secret, workerLoop, playbackMonitor, playbackPolicy, alerts };
+  return { app, store, jobs, previews, sync, inspectPending: inspections.inspectPending, stopImportQueues, secret, workerLoop, playbackMonitor, playbackPolicy, alerts };
 }
 
 async function readJson(c: Context): Promise<unknown> {

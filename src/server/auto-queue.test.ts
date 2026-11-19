@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldQueueNewImport } from "./auto-queue.ts";
+import { msUntilNewImportQueue, shouldQueueNewImport } from "./auto-queue.ts";
 import { DEFAULT_SETTINGS, type Suggestion } from "./types.ts";
 
 const suggestion: Suggestion = {
@@ -83,6 +83,28 @@ describe("auto-queue new Arr imports", () => {
       item: item(),
       suggestion,
     })).toBe(false);
+  });
+
+  it("waits two minutes after the file last changed", () => {
+    const changedAt = 10_000;
+    const twoMinutes = 2 * 60 * 1000;
+    const waiting = {
+      settings: settings(),
+      item: item({ fileChangedAt: changedAt }),
+      suggestion,
+      now: changedAt + twoMinutes - 1,
+    };
+    expect(msUntilNewImportQueue(waiting)).toBe(1);
+    expect(shouldQueueNewImport(waiting)).toBe(false);
+    const ready = { ...waiting, now: changedAt + twoMinutes };
+    expect(msUntilNewImportQueue(ready)).toBe(0);
+    expect(shouldQueueNewImport(ready)).toBe(true);
+    expect(msUntilNewImportQueue({
+      settings: settings({ queueNewImports: false }),
+      item: item({ fileChangedAt: changedAt }),
+      suggestion,
+      now: changedAt + twoMinutes,
+    })).toBeNull();
   });
 
   it("does not queue the file Polisharr just kept, and does queue a later Arr upgrade", () => {

@@ -47,6 +47,8 @@ describe("suggestion defaults settings", () => {
     expect(html).toContain("Queue new Arr imports automatically");
     expect(html).toContain("It does not queue that file again");
     expect(html).toContain("A later Arr upgrade can still queue that file");
+    expect(html).toContain("waits two minutes after the path or size last changes");
+    expect(html).toContain("A later path or size change starts those two minutes again");
     expect(html).toContain("Turning that on does not queue your existing library");
     expect(html).toContain("Save suggestion defaults");
   });

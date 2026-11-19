@@ -85,13 +85,22 @@ async function queuedItemIds(ctx: Awaited<ReturnType<typeof setup>>, headers: { 
   return body.items.map((item) => item.itemId);
 }
 
-async function setup() {
+async function setup(options: { importQueueDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "opt-"));
   const env = loadEnv({ CONFIG_DIR: dir, PORT: "7373" });
   let probeCalls = 0;
+  const movie = {
+    id: 10,
+    title: "American Underdog",
+    path: "/mnt/nas/movies/underdog.mkv",
+    sizeOnDisk: 8_000_000_000,
+    movieFile: { path: "/mnt/nas/movies/underdog.mkv", size: 8_000_000_000, quality: { quality: { name: "Bluray-1080p" } } },
+    images: [{ coverType: "poster", url: "http://radarr/poster.jpg" }],
+  };
   const hw: HardwareInfo = { backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null };
   const created = createApp({
     env,
+    importQueueDelayMs: options.importQueueDelayMs,
     hardware: async () => hw,
     readable: async () => true,
     probe: async () => {
@@ -106,20 +115,7 @@ async function setup() {
       };
     },
     fetch: (async (url: string) => {
-      if (String(url).includes("/movie")) {
-        return new Response(
-          JSON.stringify([
-            {
-              id: 10,
-              title: "American Underdog",
-              path: "/mnt/nas/movies/underdog.mkv",
-              sizeOnDisk: 8_000_000_000,
-              movieFile: { path: "/mnt/nas/movies/underdog.mkv", size: 8_000_000_000, quality: { quality: { name: "Bluray-1080p" } } },
-              images: [{ coverType: "poster", url: "http://radarr/poster.jpg" }],
-            },
-          ]),
-        );
-      }
+      if (String(url).includes("/movie")) return new Response(JSON.stringify([movie]));
       if (String(url).includes("system/status")) return new Response(JSON.stringify({ appName: "Radarr", version: "5" }));
       return new Response("{}", { status: 404 });
     }) as typeof fetch,
@@ -133,13 +129,50 @@ async function setup() {
       },
     }),
   });
-  return { app: created, store: created.store, dir, probeCalls: () => probeCalls };
+  return { app: created, store: created.store, dir, movie, probeCalls: () => probeCalls };
+}
+
+const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+async function importQueueReady(ctx: Awaited<ReturnType<typeof setup>>): Promise<{ cookie: string; "content-type": string }> {
+  const setupRes = await ctx.app.app.request("/api/auth/setup", {
+    method: "POST",
+    body: JSON.stringify({ username: "ada", password: "secret12" }),
+  });
+  const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
+  await ctx.app.app.request("/api/integrations", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ kind: "radarr", name: "Radarr", url: "http://radarr:7878", apiKey: "k", enabled: true }),
+  });
+  const nodes = (await (await ctx.app.app.request("/api/nodes", { headers })).json()) as { thisNodeId: string };
+  await ctx.app.app.request(`/api/nodes/${nodes.thisNodeId}`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ enabled: false }),
+  });
+  await ctx.app.app.request("/api/settings", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      languageConfirmed: true,
+      preferredLanguage: "eng",
+      reviewPath: join(ctx.dir, "review"),
+      suggestionDefaults: { queueNewImports: true },
+    }),
+  });
+  return headers;
+}
+
+function importQueueClock(): void {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 }
 
 describe("public HTTP behavior", () => {
-  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; alerts?: { stop: () => void }; previews?: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
+  const apps: Array<{ store: { close: () => void }; app: { jobs: { stop: () => void }; stopImportQueues?: () => void; alerts?: { stop: () => void }; previews?: { stop: () => void }; workerLoop?: { stop: () => void }; playbackMonitor?: { stop: () => Promise<void> } } }> = [];
   afterEach(async () => {
     for (const a of apps) {
+      a.app.stopImportQueues?.();
       a.app.jobs.stop();
       a.app.alerts?.stop();
       a.app.previews?.stop();
@@ -148,6 +181,7 @@ describe("public HTTP behavior", () => {
       a.store.close();
     }
     apps.length = 0;
+    vi.useRealTimers();
   });
 
   it("boots health without secrets", async () => {
@@ -930,7 +964,7 @@ describe("public HTTP behavior", () => {
   });
 
   it("queues an automatic import as a locked direct write when that choice overrides sidecar", async () => {
-    const ctx = await setup();
+    const ctx = await setup({ importQueueDelayMs: 0 });
     apps.push(ctx);
     const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
     const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
@@ -968,7 +1002,7 @@ describe("public HTTP behavior", () => {
   });
 
   it("follows a later Write finished files change for an unlocked automatic import", async () => {
-    const ctx = await setup();
+    const ctx = await setup({ importQueueDelayMs: 0 });
     apps.push(ctx);
     const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
     const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
@@ -1019,7 +1053,7 @@ describe("public HTTP behavior", () => {
   });
 
   it("keeps a queued sidecar import on sidecar after the import choice and Write finished files change", async () => {
-    const ctx = await setup();
+    const ctx = await setup({ importQueueDelayMs: 0 });
     apps.push(ctx);
     const setupRes = await ctx.app.app.request("/api/auth/setup", { method: "POST", body: JSON.stringify({ username: "ada", password: "secret12" }) });
     const headers = { cookie: cookie(setupRes), "content-type": "application/json" };
@@ -1060,6 +1094,77 @@ describe("public HTTP behavior", () => {
       body: JSON.stringify({ enabled: true }),
     });
     await vi.waitFor(() => expect(ctx.store.getJob(queued!.id)?.dispatchedWriteMode).toBe("sidecar"));
+  });
+
+  it("waits two minutes after a new import before queueing it", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await importQueueReady(ctx);
+    importQueueClock();
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    expect(ctx.store.listJobs()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(TWO_MINUTES_MS - 1_000);
+    expect(ctx.store.listJobs()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(ctx.store.listJobs()).toHaveLength(1);
+  });
+
+  it("starts the two minutes again when the imported file path changes", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await importQueueReady(ctx);
+    importQueueClock();
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    await vi.advanceTimersByTimeAsync(60_000);
+    ctx.movie.path = "/mnt/nas/movies/underdog-renamed.mkv";
+    ctx.movie.movieFile = { ...ctx.movie.movieFile, path: ctx.movie.path };
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    await vi.advanceTimersByTimeAsync(TWO_MINUTES_MS - 1_000);
+    expect(ctx.store.listJobs()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const item = ctx.store.listItems("movie")[0];
+    expect(item?.path).toBe("/mnt/nas/movies/underdog-renamed.mkv");
+    expect(ctx.store.listJobs()).toEqual([expect.objectContaining({ itemId: item?.id })]);
+  });
+
+  it("queues a waited import after restart once the two minutes have passed", async () => {
+    const ctx = await setup();
+    apps.push(ctx);
+    const headers = await importQueueReady(ctx);
+    importQueueClock();
+    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
+    await ctx.app.inspectPending();
+    expect(ctx.store.listJobs()).toHaveLength(0);
+    expect(ctx.store.listImportQueueWaits()).toHaveLength(1);
+    ctx.app.stopImportQueues();
+    ctx.app.jobs.stop();
+    ctx.app.sync.stop();
+    await vi.advanceTimersByTimeAsync(TWO_MINUTES_MS);
+    expect(ctx.store.listJobs()).toHaveLength(0);
+    const restarted = createApp({
+      env: loadEnv({ CONFIG_DIR: ctx.dir, PORT: "7373" }),
+      store: ctx.store,
+      syncIntervalMs: 0,
+      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
+      readable: async () => true,
+      probe: async () => ({ format: { duration: "3600" }, streams: [] }),
+      fetch: (async () => new Response("{}", { status: 404 })) as typeof fetch,
+    });
+    try {
+      expect(ctx.store.listJobs()).toHaveLength(1);
+      expect(ctx.store.listImportQueueWaits()).toHaveLength(0);
+    } finally {
+      restarted.stopImportQueues();
+      restarted.jobs.stop();
+      restarted.alerts.stop();
+      restarted.previews.stop();
+      restarted.sync.stop();
+      restarted.workerLoop.stop();
+      await restarted.playbackMonitor.stop();
+    }
   });
 
   it("returns running Queue jobs before finished jobs and reports finishedCount", async () => {
@@ -1376,6 +1481,7 @@ describe("public HTTP behavior", () => {
     let storeRef: { listItems: (type?: "movie") => Array<{ sizeBytes: number; keptSizeBytes?: number }> } | undefined;
     const created = createApp({
       env,
+      importQueueDelayMs: 0,
       hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
       readable: async () => true,
       probe: async () => ({

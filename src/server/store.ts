@@ -364,6 +364,10 @@ export class Store {
       );
     `);
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS import_queue_waits (
+        item_id TEXT PRIMARY KEY,
+        ready_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS kept_events (
         sidecar_path TEXT PRIMARY KEY,
         review_id TEXT NOT NULL,
@@ -928,6 +932,21 @@ export class Store {
       | undefined;
     if (!row) return undefined;
     return { ...(JSON.parse(row.payload) as Suggestion), dismissed: row.dismissed === 1 };
+  }
+
+  saveImportQueueWait(itemId: string, readyAt: number): void {
+    this.db.prepare(
+      "INSERT INTO import_queue_waits (item_id, ready_at) VALUES (?, ?) ON CONFLICT(item_id) DO UPDATE SET ready_at = excluded.ready_at",
+    ).run(itemId, readyAt);
+  }
+
+  deleteImportQueueWait(itemId: string): void {
+    this.db.prepare("DELETE FROM import_queue_waits WHERE item_id = ?").run(itemId);
+  }
+
+  listImportQueueWaits(): Array<{ itemId: string; readyAt: number }> {
+    return (this.db.prepare("SELECT item_id, ready_at FROM import_queue_waits").all() as Array<{ item_id: string; ready_at: number }>)
+      .map((row) => ({ itemId: row.item_id, readyAt: Number(row.ready_at) }));
   }
 
   openSuggestionForItem(itemId: string): Suggestion | undefined {

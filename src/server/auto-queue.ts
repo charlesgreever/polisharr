@@ -1,8 +1,8 @@
 import type { LibraryItem, Settings, Suggestion } from "./types.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
 
-// Radarr and Sonarr often rename a new file just after import. Queueing sooner snapshots a path that then changes, and replacement refuses the finished copy.
-export const NEW_IMPORT_QUEUE_DELAY_MS = 2 * 60 * 1000;
+// Sonarr On Import Complete arrives after that download is in the library. The automatic queue does not add its own wait.
+export const NEW_IMPORT_QUEUE_DELAY_MS = 0;
 
 type ImportQueueInput = {
   settings: Settings;

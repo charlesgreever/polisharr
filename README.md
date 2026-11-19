@@ -220,7 +220,7 @@ CONFIG_DIR=./config npm start
 
 ## Webhooks from Radarr and Sonarr
 
-Polisharr already syncs Radarr and Sonarr every 15 minutes. A Connect webhook tells it about a finished import right away so the new file is inspected without waiting. The webhook itself does not start an encode. Optional: **Queue new Arr imports automatically** in suggestion defaults queues the suggestion two minutes after the path or size last changes. A later change starts those two minutes again, so Radarr or Sonarr can finish renaming the file before the encode starts. The choice under that checkbox writes a Review sidecar, follows **Write finished files**, or replaces the library file after the integrity check. Keep still replaces the library file. It does not queue that file again. A later Arr upgrade can still queue that file.
+Polisharr already syncs Radarr and Sonarr every 15 minutes. A Connect webhook tells it about a finished import right away so the new file is inspected without waiting. The webhook itself does not start an encode. Optional: **Queue new Arr imports automatically** in suggestion defaults queues the suggestion after inspect. The choice under that checkbox writes a Review sidecar, follows **Write finished files**, or replaces the library file after the integrity check. Keep still replaces the library file. It does not queue that file again. A later Arr upgrade can still queue that file.
 
 ### 1. Generate a token in Polisharr
 
@@ -235,6 +235,7 @@ In Radarr and in Sonarr: **Settings → Connect → Add → Webhook**.
 | URL | `http://polisharr:7373/api/hooks/arr` on the Arr Docker network, or `http://<host>:7373/api/hooks/arr` from another machine |
 | Method | POST |
 | On Import | on |
+| On Import Complete | on in Sonarr |
 | On Upgrade | on |
 | On Rename | on |
 | Token | Header `X-Api-Key` with the generated token, **or** the Connect **Password** field (HTTP Basic). Username can be `polisharr`. |
@@ -245,7 +246,7 @@ Use **Test**. Polisharr answers 200 when the token is correct.
 
 ### 3. What happens on import
 
-Radarr or Sonarr posts after it imports, upgrades, or renames a file. Polisharr syncs that title (or the whole library if the payload has no id), then inspects it. Suggestions appear when inspect finishes. Grab events (download started, file not on disk yet) are ignored.
+Radarr or Sonarr posts after it imports, upgrades, or renames a file. Sonarr **On Import Complete** is the notice that the download is in the library and Sonarr has finished processing it. Polisharr syncs that title (or the whole library if the payload has no id), then inspects it. Suggestions appear when inspect finishes. Grab events (download started, file not on disk yet) are ignored.
 
 ## Report a bug
 

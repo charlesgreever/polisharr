@@ -132,7 +132,7 @@ async function setup(options: { importQueueDelayMs?: number } = {}) {
   return { app: created, store: created.store, dir, movie, probeCalls: () => probeCalls };
 }
 
-const TWO_MINUTES_MS = 2 * 60 * 1000;
+
 
 async function importQueueReady(ctx: Awaited<ReturnType<typeof setup>>): Promise<{ cookie: string; "content-type": string }> {
   const setupRes = await ctx.app.app.request("/api/auth/setup", {
@@ -162,10 +162,6 @@ async function importQueueReady(ctx: Awaited<ReturnType<typeof setup>>): Promise
     }),
   });
   return headers;
-}
-
-function importQueueClock(): void {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 }
 
 describe("public HTTP behavior", () => {
@@ -1096,75 +1092,14 @@ describe("public HTTP behavior", () => {
     await vi.waitFor(() => expect(ctx.store.getJob(queued!.id)?.dispatchedWriteMode).toBe("sidecar"));
   });
 
-  it("waits two minutes after a new import before queueing it", async () => {
+  it("queues a new import as soon as inspect finishes", async () => {
     const ctx = await setup();
     apps.push(ctx);
     const headers = await importQueueReady(ctx);
-    importQueueClock();
     await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
     await ctx.app.inspectPending();
-    expect(ctx.store.listJobs()).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(TWO_MINUTES_MS - 1_000);
-    expect(ctx.store.listJobs()).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1_000);
     expect(ctx.store.listJobs()).toHaveLength(1);
-  });
-
-  it("starts the two minutes again when the imported file path changes", async () => {
-    const ctx = await setup();
-    apps.push(ctx);
-    const headers = await importQueueReady(ctx);
-    importQueueClock();
-    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
-    await ctx.app.inspectPending();
-    await vi.advanceTimersByTimeAsync(60_000);
-    ctx.movie.path = "/mnt/nas/movies/underdog-renamed.mkv";
-    ctx.movie.movieFile = { ...ctx.movie.movieFile, path: ctx.movie.path };
-    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
-    await ctx.app.inspectPending();
-    await vi.advanceTimersByTimeAsync(TWO_MINUTES_MS - 1_000);
-    expect(ctx.store.listJobs()).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1_000);
-    const item = ctx.store.listItems("movie")[0];
-    expect(item?.path).toBe("/mnt/nas/movies/underdog-renamed.mkv");
-    expect(ctx.store.listJobs()).toEqual([expect.objectContaining({ itemId: item?.id })]);
-  });
-
-  it("queues a waited import after restart once the two minutes have passed", async () => {
-    const ctx = await setup();
-    apps.push(ctx);
-    const headers = await importQueueReady(ctx);
-    importQueueClock();
-    await ctx.app.app.request("/api/library/refresh", { method: "POST", headers });
-    await ctx.app.inspectPending();
-    expect(ctx.store.listJobs()).toHaveLength(0);
-    expect(ctx.store.listImportQueueWaits()).toHaveLength(1);
-    ctx.app.stopImportQueues();
-    ctx.app.jobs.stop();
-    ctx.app.sync.stop();
-    await vi.advanceTimersByTimeAsync(TWO_MINUTES_MS);
-    expect(ctx.store.listJobs()).toHaveLength(0);
-    const restarted = createApp({
-      env: loadEnv({ CONFIG_DIR: ctx.dir, PORT: "7373" }),
-      store: ctx.store,
-      syncIntervalMs: 0,
-      hardware: async () => ({ backend: "cuda", cuda: true, vaapi: false, av1: false, reason: null }),
-      readable: async () => true,
-      probe: async () => ({ format: { duration: "3600" }, streams: [] }),
-      fetch: (async () => new Response("{}", { status: 404 })) as typeof fetch,
-    });
-    try {
-      expect(ctx.store.listJobs()).toHaveLength(1);
-      expect(ctx.store.listImportQueueWaits()).toHaveLength(0);
-    } finally {
-      restarted.stopImportQueues();
-      restarted.jobs.stop();
-      restarted.alerts.stop();
-      restarted.previews.stop();
-      restarted.sync.stop();
-      restarted.workerLoop.stop();
-      await restarted.playbackMonitor.stop();
-    }
+    expect(ctx.store.listImportQueueWaits()).toHaveLength(0);
   });
 
   it("returns running Queue jobs before finished jobs and reports finishedCount", async () => {

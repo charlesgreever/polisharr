@@ -85,25 +85,21 @@ describe("auto-queue new Arr imports", () => {
     })).toBe(false);
   });
 
-  it("waits two minutes after the file last changed", () => {
+  it("queues as soon as the file has changed", () => {
     const changedAt = 10_000;
-    const twoMinutes = 2 * 60 * 1000;
-    const waiting = {
+    const ready = {
       settings: settings(),
       item: item({ fileChangedAt: changedAt }),
       suggestion,
-      now: changedAt + twoMinutes - 1,
+      now: changedAt,
     };
-    expect(msUntilNewImportQueue(waiting)).toBe(1);
-    expect(shouldQueueNewImport(waiting)).toBe(false);
-    const ready = { ...waiting, now: changedAt + twoMinutes };
     expect(msUntilNewImportQueue(ready)).toBe(0);
     expect(shouldQueueNewImport(ready)).toBe(true);
     expect(msUntilNewImportQueue({
       settings: settings({ queueNewImports: false }),
       item: item({ fileChangedAt: changedAt }),
       suggestion,
-      now: changedAt + twoMinutes,
+      now: changedAt,
     })).toBeNull();
   });
 

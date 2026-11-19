@@ -1,8 +1,8 @@
 import type { LibraryItem, Settings, Suggestion } from "./types.ts";
 import { isArrSearchOnly } from "./arr-search.ts";
 
-// Sonarr On Import Complete arrives after that download is in the library. The automatic queue does not add its own wait.
-export const NEW_IMPORT_QUEUE_DELAY_MS = 0;
+// The NAS commits a new file's modification time about a second after Radarr or Sonarr closes the import. Queueing in that second snapshots the earlier time, and replacement refuses the finished copy.
+export const NEW_IMPORT_QUEUE_DELAY_MS = 5 * 60 * 1000;
 
 type ImportQueueInput = {
   settings: Settings;

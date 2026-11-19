@@ -47,7 +47,7 @@ export function SuggestionDefaultsSettings({
       {checkbox("convertMp4ToMkv", "Convert MP4 to MKV", "Offers to remux MP4 files into MKV.")}
       {checkbox("convertIsoToMkv", "Convert ISO to MKV", "Offers to remux disc images into MKV.")}
       {checkbox("searchPreferredLanguage", "Suggest a Radarr or Sonarr search when the only audio is not preferred", "Suggests a search when the only audio is not your language. The search waits for you to confirm and does not delete a file until you agree.")}
-      {checkbox("queueNewImports", "Queue new Arr imports automatically", "Inspects a new or upgraded Radarr or Sonarr file and queues its suggestion. Turning that on does not queue your existing library.")}
+      {checkbox("queueNewImports", "Queue new Arr imports automatically", "Inspects a new or upgraded Radarr or Sonarr file, waits five minutes after the path or size last changes, and then queues its suggestion. A later path or size change starts those five minutes again. Turning that on does not queue your existing library.")}
       <label className="block space-y-1 pl-6 text-sm">
         <span className="flex items-center gap-1">
           How those imports finish
